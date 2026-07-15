@@ -7,7 +7,7 @@ const themePath = new URL("../src/theme.css", import.meta.url);
 test("defines the Miku palette and Codex surface tokens", async () => {
   const css = await readFile(themePath, "utf8");
 
-  assert.match(css, /CODEX_MIKU_THEME v3 PIXEL MATCH/);
+  assert.match(css, /CODEX_MIKU_THEME v4 FULL CANVAS PET/);
 
   for (const token of [
     "--miku-cyan",
@@ -81,6 +81,16 @@ test("uses all four deterministic Miku crops and maximal decorative layers", asy
   assert.match(css, /[✦♡♪☆]/u);
   assert.match(css, /saturate\(/);
   assert.match(css, /backdrop-filter/);
+});
+
+test("keeps the full chat canvas themed below the hero artwork", async () => {
+  const css = await readFile(themePath, "utf8");
+  const mainSurface = css.match(/\.main-surface,[\s\S]*?\.browser-main-surface\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+
+  assert.match(mainSurface, /min-height:\s*100%/);
+  assert.match(mainSurface, /#dbf4fc/i);
+  assert.match(mainSurface, /#e7dbf5/i);
+  assert.doesNotMatch(mainSurface, /#f8f8fcf7\s+100%/i);
 });
 
 test("does not load remote assets or force motion", async () => {

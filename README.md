@@ -1,27 +1,26 @@
 # Codex Miku Theme
 
-本项目把本机 Codex Desktop 改造成高饱和天蓝、粉紫、雾白玻璃与角色主视觉叠加的初音未来主题。
+本项目把本机 Codex Desktop 改造成高饱和天蓝、粉紫、雾白玻璃、全高角色主视觉与动画宠物结合的初音未来主题。
 
 ## 当前状态
 
 - 已适配 Codex Desktop `26.707.72221`，构建号 `5307`。
-- 已安装到 `/Applications/ChatGPT.app/Contents/Resources/app.asar`。
-- 当前安装版本为 `PIXEL MATCH v3`。
-- 用户参考图已精确裁成 Hero、角色、侧栏纹理和拍立得 4 张独立素材，并嵌入 4 个低频 PNG 资源槽。裁剪坐标、源图与目标图 SHA-256 记录在 `assets/miku-crops.json`。
+- v4 源码与安装包已完成；当前运行中的 Codex 仍是 v3，完全退出后运行安装器即可切换。
+- 用户参考图已裁成全高主画布、角色、侧栏纹理和拍立得 4 张独立素材，并嵌入 4 个低频 PNG 资源槽。裁剪坐标、源图与目标图 SHA-256 记录在 `assets/miku-crops.json`。
+- 原生 `Codex` 宠物槽已替换成与壁纸人物一致的 Q 版初音未来，保留待机、奔跑、跳跃、等待、审查、失败和转身动画。
 - 真实根节点、侧栏选中态、主区域、顶栏、输入框、用户消息、助手消息、审批卡片和弹窗均已按稳定选择器覆盖。
 - 原始 ASAR 已备份到 `/Users/blakexu/Library/Application Support/Codex Miku Theme/backups/b5da51e5df6e996076e4cb19045cec46dd4c08cf61c19cdbc5cb426b8413b73c.asar`。
-- 安装后 ASAR 仍为 `195116466` 字节，主题 CSS 为 `7953 / 8003` 字节。
-- 自动测试为 `34 passed，0 failed`，包含真实 CLI 子进程的安装、失败回滚、同尺寸更新拒绝、v2 恢复、运行进程门禁、原子 CAS 前后竞态保护与完整往返测试。
-- 已用隔离临时 HOME 冷启动真实 Codex 进程，并生成最终实机截图。
+- 安装后 ASAR 字节数保持不变，主题 CSS 为 `7997 / 8003` 字节。
+- 自动测试包含真实 CLI 子进程的安装、宠物资源替换、失败回滚、同尺寸更新拒绝、v2 恢复、运行进程门禁、原子 CAS 前后竞态保护与完整往返测试。
 
 ## 生效方法
 
-当前正在运行的 Codex 仍使用启动时加载的旧资源。完成手头工作后，使用 `Command + Q` 完全退出 Codex，再从 Dock 重新打开。
+使用 `Command + Q` 完全退出 Codex，双击安装器，安装成功后再从 Dock 重新打开。打开「设置 > 宠物」并选择 `Codex`，显示的就是初音未来动画宠物。
 
 ## 最终实机截图
 
 ```bash
-open '/Users/blakexu/Documents/Codex 皮肤/output/playwright/codex-miku-theme-preview-v3-final.png'
+open '/Users/blakexu/Documents/Codex 皮肤/output/playwright/codex-miku-theme-v4-full-canvas-pet.png'
 ```
 
 ## 检查状态
@@ -39,7 +38,7 @@ npm run check
 open '/Users/blakexu/Documents/Codex 皮肤/scripts/install.command'
 ```
 
-安装器只接受已验证的 `26.707.72221（5307）`。它会校验当前完整 ASAR、CSS 容量和 4 个图片槽，再用 macOS 原子交换完成 CAS 提交。若交换瞬间目标已变化，它会原子换回并拒绝覆盖；若状态文件写入失败，它会把 ASAR 回滚到本次安装前的精确字节。
+安装器只接受已验证的 `26.707.72221（5307）`。它会校验当前完整 ASAR、CSS 容量、4 个背景图片槽和 1 个原生宠物槽，再用 macOS 原子交换完成 CAS 提交。若交换瞬间目标已变化，它会原子换回并拒绝覆盖；若状态文件写入失败，它会把 ASAR 回滚到本次安装前的精确字节。
 
 Codex 官方升级后不要直接套用旧主题。安装器会拒绝未适配的新构建，避免用旧备份覆盖同尺寸更新；需要先按新构建重新确认入口与资源槽。
 

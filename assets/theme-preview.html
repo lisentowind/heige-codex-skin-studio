@@ -130,6 +130,9 @@
         grid-template-rows: auto 1fr auto;
         gap: 22px;
         overflow: hidden;
+        background:
+          linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(219 244 252 / 0.64) 70%, rgb(231 219 245 / 0.78)),
+          url("./miku-full-canvas.png") center / 100% 100% no-repeat;
       }
 
       .workspace::before {
@@ -163,6 +166,18 @@
           url("./miku-hero.png") center / cover no-repeat;
         box-shadow: 0 18px 44px rgb(62 149 215 / 0.24), 0 0 34px rgb(245 139 216 / 0.2), 0 0 0 2px white inset;
         filter: saturate(1.22) contrast(1.03);
+      }
+
+      .pet {
+        position: absolute;
+        right: 26px;
+        bottom: 92px;
+        z-index: 3;
+        width: 154px;
+        height: 229px;
+        pointer-events: none;
+        background: url("./miku-pet-spritesheet.webp") 0 0 / 800% 1000% no-repeat;
+        filter: drop-shadow(0 10px 14px rgb(15 75 125 / 0.24)) drop-shadow(0 0 12px rgb(237 110 193 / 0.28));
       }
 
       .hero::after {
@@ -281,14 +296,15 @@
           </div>
           <div class="conversation">
             <div class="message user">把我的 Codex 前端换成参考图的主题风格。</div>
-            <div class="message ai"><strong>PIXEL MATCH v3 已安装。</strong>参考图被拆成 Hero、角色、侧栏纹理和拍立得四层，真实 Codex token 与稳定选择器均已覆盖。
-              <div class="code">✓ 21 tests passed<br />✓ 4 Miku crops embedded<br />✓ isolated cold launch verified</div>
+            <div class="message ai"><strong>FULL CANVAS PET v4 已就绪。</strong>主视觉已延伸为全高聊天画布，并接入同款初音未来 Q 版动画宠物。
+              <div class="code">✓ full-height canvas<br />✓ native animated pet slot<br />✓ original restore preserved</div>
             </div>
           </div>
           <div class="composer">
             <div class="placeholder">给 Codex 一个新任务……</div>
             <div class="send">↑</div>
           </div>
+          <div class="pet" aria-label="初音未来动画宠物"></div>
         </section>
       </main>
     </div>

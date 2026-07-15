@@ -15,7 +15,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { readEntry, replaceEntriesFixedSize } from "../src/asar.mjs";
-import { THEME_ASSETS } from "../src/theme-patch.mjs";
+import { PET_ASSETS, THEME_ASSETS } from "../src/theme-patch.mjs";
+
+const APP_ASSETS = [...THEME_ASSETS, ...PET_ASSETS];
 
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -56,7 +58,7 @@ function makeArchiveEntries(entries) {
 
 async function makeOfficialArchive(version = "old-build") {
   const sourceSizes = await Promise.all(
-    THEME_ASSETS.map(({ sourceName }) =>
+    APP_ASSETS.map(({ sourceName }) =>
       readFile(join(PROJECT_ROOT, "assets", sourceName)).then((source) => source.length),
     ),
   );
@@ -65,7 +67,7 @@ async function makeOfficialArchive(version = "old-build") {
   );
   return makeArchiveEntries([
     [ENTRY_PATH, html],
-    ...THEME_ASSETS.map(({ entryPath }, index) => [
+    ...APP_ASSETS.map(({ entryPath }, index) => [
       entryPath,
       Buffer.alloc(sourceSizes[index] + 64, index + 1),
     ]),
@@ -101,7 +103,7 @@ test("CLI install and restore round-trip preserves the exact official ASAR", asy
 
     await runPatcher("install", target, home);
     const themed = await readFile(target);
-    assert.match(readEntry(themed, ENTRY_PATH).toString("utf8"), /CODEX_MIKU_THEME v3 PIXEL MATCH/);
+    assert.match(readEntry(themed, ENTRY_PATH).toString("utf8"), /CODEX_MIKU_THEME v4 FULL CANVAS PET/);
 
     await runPatcher("restore", target, home);
     assert.deepEqual(await readFile(target), original);

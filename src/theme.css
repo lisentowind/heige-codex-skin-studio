@@ -1,4 +1,4 @@
-/* CODEX_MIKU_THEME v3 PIXEL MATCH */
+/* CODEX_MIKU_THEME v4 FULL CANVAS PET */
 @layer theme, base, components, utilities;
 
 :root[data-codex-window-type="electron"] {
@@ -142,11 +142,12 @@ body {
 
 .main-surface,
 .browser-main-surface {
+  min-height: 100%;
   background:
     url("./assets/dialog-artwork-waiting-phone-UTYmfLHs.png") right 18px bottom 18px / 190px auto no-repeat,
-    linear-gradient(180deg, transparent 0 34%, #f8f8fc5c 47%, #f8f8fce8 62%, #f8f8fcf7 100%),
-    url("./assets/dialog-artwork-connected-NZKCls7p.png") center top / 100% auto no-repeat,
-    #f8f8fcd6 !important;
+    linear-gradient(180deg, #ffffff08 0 29%, #f8f8fc68 46%, #dbf4fcb8 68%, #e7dbf5d9 100%),
+    url("./assets/dialog-artwork-connected-NZKCls7p.png") center / 100% 100% no-repeat,
+    linear-gradient(135deg, #dbf4fc, #f5f6fc 52%, #e7dbf5) !important;
   border: 2px solid #7ed9ebb8 !important;
   border-radius: 22px 0 0 0 !important;
   box-shadow: 0 0 0 2px #fff9 inset, 0 8px 18px #1c99cd29, 0 2px 6px #ab6ddc1a !important;

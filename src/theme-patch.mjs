@@ -22,7 +22,7 @@ import {
 } from "./asar.mjs";
 
 const ENTRY_PATH = "webview/index.html";
-const THEME_MARKER = "CODEX_MIKU_THEME v3 PIXEL MATCH";
+const THEME_MARKER = "CODEX_MIKU_THEME v4 FULL CANVAS PET";
 const DEFAULT_ASAR = "/Applications/ChatGPT.app/Contents/Resources/app.asar";
 const INFO_PLIST = "/Applications/ChatGPT.app/Contents/Info.plist";
 const SUPPORTED_APP_VERSION = "26.707.72221";
@@ -47,7 +47,7 @@ if result != 0:
 export const THEME_ASSETS = Object.freeze([
   Object.freeze({
     role: "hero",
-    sourceName: "miku-hero.png",
+    sourceName: "miku-full-canvas.png",
     entryPath: "webview/assets/dialog-artwork-connected-NZKCls7p.png",
   }),
   Object.freeze({
@@ -67,6 +67,16 @@ export const THEME_ASSETS = Object.freeze([
   }),
 ]);
 
+export const PET_ASSETS = Object.freeze([
+  Object.freeze({
+    role: "pet",
+    sourceName: "miku-pet-spritesheet.webp",
+    entryPath: "webview/assets/codex-spritesheet-v6-BRBFriCM.webp",
+  }),
+]);
+
+const APP_ASSETS = Object.freeze([...THEME_ASSETS, ...PET_ASSETS]);
+
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -79,6 +89,7 @@ export function minifyThemeCss(source) {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\s+/g, " ")
     .replace(/\s*([{}:;,>])\s*/g, "$1")
+    .replace(/\s*\/\s*/g, "/")
     .replace(/\s*!important/g, "!important")
     .replace(/;}/g, "}")
     .trim();
@@ -136,7 +147,7 @@ async function loadContext(asarPath) {
   const [archive, rawThemeCss, ...sources] = await Promise.all([
     readFile(asarPath),
     readFile(THEME_PATH, "utf8"),
-    ...THEME_ASSETS.map(({ sourceName }) =>
+    ...APP_ASSETS.map(({ sourceName }) =>
       readFile(join(PROJECT_ROOT, "assets", sourceName)),
     ),
   ]);
@@ -144,7 +155,7 @@ async function loadContext(asarPath) {
   const entry = findEntry(archive, ENTRY_PATH);
   const originalHtml = readEntry(archive, ENTRY_PATH).toString("utf8");
   const { styleCapacity } = inspectHtml(originalHtml);
-  const assets = THEME_ASSETS.map((definition, index) => {
+  const assets = APP_ASSETS.map((definition, index) => {
     const source = sources[index];
     const entryInfo = findEntry(archive, definition.entryPath);
     const padded = buildPaddedAsset(source, entryInfo.size);
@@ -491,7 +502,9 @@ async function check(asarPath) {
     entryBytes: context.entry.size,
     installed: context.themeInstalled && context.assets.every(({ installed }) => installed),
     installedVersion: hasMarker
-      ? 3
+      ? 4
+      : context.originalHtml.includes("CODEX_MIKU_THEME v3 PIXEL MATCH")
+        ? 3
       : context.originalHtml.includes("CODEX_MIKU_THEME v2 MAXIMAL")
         ? 2
         : context.originalHtml.includes("CODEX_MIKU_THEME")
@@ -567,7 +580,7 @@ async function install(asarPath) {
       sourceBytes: source.length,
     })),
     installedAt: new Date().toISOString(),
-    installedVersion: 3,
+    installedVersion: 4,
     themedArchiveSha256,
     themedEntrySha256: digest(Buffer.from(patchedHtml)),
   };
