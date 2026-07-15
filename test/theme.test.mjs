@@ -7,6 +7,8 @@ const themePath = new URL("../src/theme.css", import.meta.url);
 test("defines the Miku palette and Codex surface tokens", async () => {
   const css = await readFile(themePath, "utf8");
 
+  assert.match(css, /CODEX_MIKU_THEME v2 MAXIMAL/);
+
   for (const token of [
     "--miku-cyan",
     "--miku-pink",
@@ -34,6 +36,17 @@ test("styles stable Codex shell, composer, and interaction surfaces", async () =
   ]) {
     assert.ok(css.includes(selector), `missing selector: ${selector}`);
   }
+});
+
+test("uses the supplied Miku artwork and maximal decorative layers", async () => {
+  const css = await readFile(themePath, "utf8");
+
+  assert.match(css, /dialog-artwork-connected-NZKCls7p\.png/);
+  assert.match(css, /body::after/);
+  assert.match(css, /#root::before/);
+  assert.match(css, /[✦♡♪☆]/u);
+  assert.match(css, /saturate\(/);
+  assert.match(css, /drop-shadow\(/);
 });
 
 test("does not load remote assets or force motion", async () => {

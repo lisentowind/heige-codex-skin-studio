@@ -15,9 +15,11 @@ import { fileURLToPath } from "node:url";
 import { findEntry, readEntry } from "./asar.mjs";
 
 const ENTRY_PATH = "webview/index.html";
+const ARTWORK_ENTRY_PATH = "webview/assets/dialog-artwork-connected-NZKCls7p.png";
 const DEFAULT_ASAR = "/Applications/ChatGPT.app/Contents/Resources/app.asar";
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const THEME_PATH = join(PROJECT_ROOT, "src", "theme.css");
+const ARTWORK_PATH = join(PROJECT_ROOT, "assets", "miku-reference.png");
 const STATE_DIR = join(homedir(), "Library", "Application Support", "Codex Miku Theme");
 const STATE_PATH = join(STATE_DIR, "state.json");
 
@@ -26,10 +28,6 @@ function digest(bytes) {
 }
 
 export function buildPatchedHtml(originalHtml, themeCss) {
-  if (originalHtml.includes("CODEX_MIKU_THEME")) {
-    return originalHtml;
-  }
-
   const openTag = originalHtml.indexOf("<style>");
   const contentStart = openTag < 0 ? -1 : openTag + "<style>".length;
   const contentEnd = contentStart < 0 ? -1 : originalHtml.indexOf("</style>", contentStart);
@@ -40,6 +38,11 @@ export function buildPatchedHtml(originalHtml, themeCss) {
 
   const originalCss = originalHtml.slice(contentStart, contentEnd);
   const nextCss = `\n${themeCss.trim()}\n`;
+
+  if (originalCss.trim() === themeCss.trim()) {
+    return originalHtml;
+  }
+
   const capacity = Buffer.byteLength(originalCss);
   const required = Buffer.byteLength(nextCss);
 
@@ -57,12 +60,25 @@ export function buildPatchedHtml(originalHtml, themeCss) {
   return patched;
 }
 
+export function buildPaddedAsset(source, slotSize) {
+  const bytes = Buffer.from(source);
+  if (bytes.length > slotSize) {
+    throw new Error(`Artwork exceeds asset slot: ${bytes.length} > ${slotSize} bytes`);
+  }
+
+  const padded = Buffer.alloc(slotSize);
+  bytes.copy(padded);
+  return padded;
+}
+
 async function loadContext(asarPath) {
-  const [archive, themeCss] = await Promise.all([
+  const [archive, themeCss, artwork] = await Promise.all([
     readFile(asarPath),
     readFile(THEME_PATH, "utf8"),
+    readFile(ARTWORK_PATH),
   ]);
   const entry = findEntry(archive, ENTRY_PATH);
+  const artworkEntry = findEntry(archive, ARTWORK_ENTRY_PATH);
   const originalHtml = readEntry(archive, ENTRY_PATH).toString("utf8");
   const styleStart = originalHtml.indexOf("<style>") + "<style>".length;
   const styleEnd = originalHtml.indexOf("</style>", styleStart);
@@ -73,6 +89,11 @@ async function loadContext(asarPath) {
 
   return {
     archive,
+    artwork,
+    artworkEntry,
+    artworkInstalled:
+      digest(readEntry(archive, ARTWORK_ENTRY_PATH)) ===
+      digest(buildPaddedAsset(artwork, artworkEntry.size)),
     entry,
     originalHtml,
     styleCapacity: Buffer.byteLength(originalHtml.slice(styleStart, styleEnd)),
@@ -103,8 +124,16 @@ async function check(asarPath) {
   const result = {
     appAsar: asarPath,
     archiveBytes: context.archive.length,
+    artworkBytes: context.artwork.length,
+    artworkInstalled: context.artworkInstalled,
+    artworkSlotBytes: context.artworkEntry.size,
     entryBytes: context.entry.size,
-    installed: context.originalHtml.includes("CODEX_MIKU_THEME"),
+    installed: context.originalHtml.includes("CODEX_MIKU_THEME v2 MAXIMAL"),
+    installedVersion: context.originalHtml.includes("CODEX_MIKU_THEME v2 MAXIMAL")
+      ? 2
+      : context.originalHtml.includes("CODEX_MIKU_THEME")
+        ? 1
+        : 0,
     styleCapacity: context.styleCapacity,
     themeBytes: Buffer.byteLength(context.themeCss.trim()) + 2,
   };
@@ -114,36 +143,65 @@ async function check(asarPath) {
 
 async function install(asarPath) {
   const context = await loadContext(asarPath);
-  if (context.originalHtml.includes("CODEX_MIKU_THEME")) {
-    console.log("Codex Miku theme is already installed.");
+  if (
+    context.originalHtml.includes("CODEX_MIKU_THEME v2 MAXIMAL") &&
+    context.artworkInstalled
+  ) {
+    console.log("Codex Miku maximal theme is already installed.");
     return;
   }
 
   const patchedHtml = buildPatchedHtml(context.originalHtml, context.themeCss);
-  const archiveHash = digest(context.archive);
   const backupDir = join(STATE_DIR, "backups");
-  const backupPath = join(backupDir, `${archiveHash}.asar`);
-
   await mkdir(backupDir, { recursive: true });
-  await copyFile(asarPath, backupPath, fsConstants.COPYFILE_FICLONE);
-  const backupInfo = await stat(backupPath);
-  if (backupInfo.size !== context.archive.length) {
-    throw new Error("Backup verification failed: file size mismatch");
+
+  let state = null;
+  try {
+    state = JSON.parse(await readFile(STATE_PATH, "utf8"));
+    const existingBackup = await readFile(state.backupPath);
+    if (digest(existingBackup) !== state.originalArchiveSha256) {
+      throw new Error("Existing original backup SHA-256 mismatch");
+    }
+  } catch (error) {
+    if (context.originalHtml.includes("CODEX_MIKU_THEME")) {
+      throw new Error(`Cannot upgrade without a valid original backup: ${error.message}`);
+    }
+
+    const archiveHash = digest(context.archive);
+    const backupPath = join(backupDir, `${archiveHash}.asar`);
+    await copyFile(asarPath, backupPath, fsConstants.COPYFILE_FICLONE);
+    const backupInfo = await stat(backupPath);
+    if (backupInfo.size !== context.archive.length) {
+      throw new Error("Backup verification failed: file size mismatch");
+    }
+    state = {
+      appAsar: asarPath,
+      archiveBytes: context.archive.length,
+      backupPath,
+      originalArchiveSha256: archiveHash,
+      originalEntrySha256: digest(Buffer.from(context.originalHtml)),
+    };
   }
 
+  const paddedArtwork = buildPaddedAsset(context.artwork, context.artworkEntry.size);
+  await writeEntryInPlace(asarPath, context.artworkEntry, paddedArtwork);
   await writeEntryInPlace(asarPath, context.entry, patchedHtml);
   const verified = await loadContext(asarPath);
-  if (!verified.originalHtml.includes("CODEX_MIKU_THEME")) {
+  if (
+    !verified.originalHtml.includes("CODEX_MIKU_THEME v2 MAXIMAL") ||
+    !verified.artworkInstalled
+  ) {
     throw new Error("Theme verification failed after write");
   }
 
-  const state = {
+  state = {
+    ...state,
     appAsar: asarPath,
     archiveBytes: context.archive.length,
-    backupPath,
+    artworkEntryPath: ARTWORK_ENTRY_PATH,
+    artworkSha256: digest(paddedArtwork),
     installedAt: new Date().toISOString(),
-    originalArchiveSha256: archiveHash,
-    originalEntrySha256: digest(Buffer.from(context.originalHtml)),
+    installedVersion: 2,
     themedEntrySha256: digest(Buffer.from(patchedHtml)),
   };
   await writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, "utf8");
@@ -171,7 +229,10 @@ async function restore(asarPath) {
   }
 
   const entry = findEntry(current, ENTRY_PATH);
+  const artworkEntry = findEntry(current, ARTWORK_ENTRY_PATH);
   const originalHtml = readEntry(backup, ENTRY_PATH);
+  const originalArtwork = readEntry(backup, ARTWORK_ENTRY_PATH);
+  await writeEntryInPlace(asarPath, artworkEntry, originalArtwork);
   await writeEntryInPlace(asarPath, entry, originalHtml);
   console.log(`Restored original Codex theme from ${state.backupPath}`);
 }

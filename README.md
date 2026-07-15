@@ -1,14 +1,16 @@
 # Codex Miku Theme
 
-本项目把本机 Codex Desktop 改造成冰蓝、青绿和粉紫色的半透明玻璃主题。
+本项目把本机 Codex Desktop 改造成角色中心、高饱和、冰蓝青绿与粉紫霓虹叠加的初音未来主题。
 
 ## 当前状态
 
 - 已适配 Codex Desktop `26.707.72221`。
 - 已安装到 `/Applications/ChatGPT.app/Contents/Resources/app.asar`。
+- 当前安装版本为 `MAXIMAL v2`，并已把用户提供的初音参考图嵌入 Codex 内置图片资源槽。
 - 原始 ASAR 已备份到 `/Users/blakexu/Library/Application Support/Codex Miku Theme/backups/b5da51e5df6e996076e4cb19045cec46dd4c08cf61c19cdbc5cb426b8413b73c.asar`。
 - 安装后 ASAR 仍为 `195116466` 字节，其他资源偏移未改变。
-- 自动测试为 `12 passed，0 failed`。
+- 自动测试为 `18 passed，0 failed`。
+- 初音图片在 ASAR 中占用 `902530` 字节的固定资源槽，并已通过 macOS PNG 解码验证。
 
 ## 生效方法
 

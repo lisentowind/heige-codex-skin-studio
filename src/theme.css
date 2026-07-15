@@ -1,4 +1,4 @@
-/* CODEX_MIKU_THEME v1 */
+/* CODEX_MIKU_THEME v2 MAXIMAL */
 :root,
 :root.electron-light,
 :root.electron-dark {
@@ -9,17 +9,17 @@
   --miku-pink: #f58bd8;
   --miku-violet: #b59af7;
   --miku-ice: #eafaff;
-  --miku-paper: rgb(255 255 255 / 0.86);
-  --miku-line: rgb(95 184 239 / 0.46);
+  --miku-paper: rgb(255 255 255 / 0.78);
+  --miku-line: rgb(62 181 241 / 0.7);
   --miku-ink: #123f68;
   --miku-muted: #55769a;
-  --corner-radius-scale: 1.22 !important;
+  --corner-radius-scale: 1.5 !important;
   --startup-background: #edfaff !important;
   --startup-logo-shimmer-base: #13bcca !important;
-  --color-background-surface: rgb(251 254 255 / 0.91) !important;
-  --color-background-surface-under: #eaf9ff !important;
+  --color-background-surface: rgb(251 254 255 / 0.72) !important;
+  --color-background-surface-under: rgb(224 248 255 / 0.76) !important;
   --color-background-editor-opaque: #f4fcff !important;
-  --color-background-elevated-primary: rgb(255 255 255 / 0.84) !important;
+  --color-background-elevated-primary: rgb(255 255 255 / 0.73) !important;
   --color-background-elevated-primary-opaque: #fbfeff !important;
   --color-background-elevated-secondary: rgb(224 247 255 / 0.82) !important;
   --color-background-elevated-secondary-opaque: #e8f9ff !important;
@@ -40,9 +40,9 @@
   --color-decoration-added: #079c83 !important;
   --color-decoration-modified: #6c69d9 !important;
   --color-decoration-deleted: #d85695 !important;
-  --vscode-editor-background: rgb(251 254 255 / 0.88) !important;
+  --vscode-editor-background: rgb(251 254 255 / 0.68) !important;
   --vscode-editor-foreground: var(--miku-ink) !important;
-  --vscode-sideBar-background: rgb(232 249 255 / 0.9) !important;
+  --vscode-sideBar-background: rgb(225 249 255 / 0.78) !important;
   --vscode-sideBar-foreground: var(--miku-ink) !important;
   --vscode-input-background: rgb(255 255 255 / 0.82) !important;
   --vscode-input-foreground: var(--miku-ink) !important;
@@ -80,12 +80,29 @@ body::before {
   z-index: 0;
   pointer-events: none;
   content: "";
-  opacity: 0.32;
+  opacity: 0.7;
   background-image:
     radial-gradient(circle, rgb(255 255 255 / 0.95) 0 1px, transparent 1.5px),
     radial-gradient(circle, rgb(92 194 235 / 0.45) 0 1px, transparent 1.5px);
   background-position: 0 0, 17px 19px;
-  background-size: 34px 34px;
+  background-size: 26px 26px;
+}
+
+body::after {
+  position: fixed;
+  inset: 5% 2% 9% 17%;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  opacity: 0.48;
+  border: 2px solid rgb(255 255 255 / 0.84);
+  border-radius: 32px;
+  background: url("./assets/dialog-artwork-connected-NZKCls7p.png") center / cover no-repeat;
+  box-shadow:
+    0 0 0 2px rgb(72 194 245 / 0.42),
+    0 0 42px rgb(67 197 234 / 0.32),
+    0 0 58px rgb(245 139 216 / 0.25);
+  filter: saturate(1.35) contrast(1.04) drop-shadow(0 18px 34px rgb(39 137 201 / 0.2));
 }
 
 #root {
@@ -93,22 +110,47 @@ body::before {
   z-index: 1;
 }
 
+#root::before {
+  position: fixed;
+  inset: 54px 24px auto auto;
+  z-index: 3;
+  max-width: 38vw;
+  pointer-events: none;
+  content: "✦  ♡  ♪  ☆  MIKU  ✧  ♫  ♡";
+  color: #d85ec2;
+  font-size: clamp(13px, 1.25vw, 21px);
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-shadow: 0 0 8px #fff, 0 0 18px #f58bd8, 0 0 24px #57dbef;
+}
+
 .app-shell-left-panel {
-  background: linear-gradient(180deg, rgb(242 252 255 / 0.96), rgb(224 248 255 / 0.9)) !important;
-  border-right: 1px solid var(--miku-line) !important;
-  box-shadow: 10px 0 30px rgb(61 178 222 / 0.08) !important;
-  backdrop-filter: blur(18px) saturate(1.12);
+  background: linear-gradient(180deg, rgb(244 252 255 / 0.9), rgb(208 246 255 / 0.82) 64%, rgb(247 226 255 / 0.76)) !important;
+  border-right: 2px solid var(--miku-line) !important;
+  box-shadow: 10px 0 36px rgb(61 178 222 / 0.2), 2px 0 0 rgb(255 255 255 / 0.8) inset !important;
+  backdrop-filter: blur(20px) saturate(1.35);
 }
 
 .main-surface,
 .browser-main-surface {
-  background: linear-gradient(145deg, rgb(255 255 255 / 0.93), rgb(247 252 255 / 0.84)) !important;
-  border: 1px solid var(--miku-line) !important;
+  background: linear-gradient(145deg, rgb(255 255 255 / 0.75), rgb(232 250 255 / 0.62) 62%, rgb(253 232 255 / 0.62)) !important;
+  border: 2px solid var(--miku-line) !important;
   box-shadow:
     0 0 0 1px rgb(255 255 255 / 0.7) inset,
-    0 14px 38px rgb(62 149 215 / 0.14),
-    0 0 26px rgb(245 139 216 / 0.07) !important;
-  backdrop-filter: blur(22px) saturate(1.16);
+    0 14px 38px rgb(62 149 215 / 0.22),
+    0 0 34px rgb(245 139 216 / 0.2) !important;
+  backdrop-filter: blur(18px) saturate(1.32);
+}
+
+.app-shell-left-panel button,
+.app-shell-left-panel [role="button"] {
+  border-radius: 999px !important;
+}
+
+.app-shell-left-panel [aria-selected="true"],
+.app-shell-left-panel [data-state="active"] {
+  background: linear-gradient(90deg, rgb(33 207 218 / 0.28), rgb(114 190 255 / 0.2), rgb(245 139 216 / 0.2)) !important;
+  box-shadow: 0 0 0 1px rgb(65 189 237 / 0.45), 0 7px 18px rgb(47 160 209 / 0.16) !important;
 }
 
 [role="dialog"],
@@ -134,11 +176,12 @@ input:focus,
 }
 
 button {
-  border-color: rgb(75 174 228 / 0.22);
+  border-color: rgb(75 174 228 / 0.48);
+  text-shadow: 0 1px 0 rgb(255 255 255 / 0.54);
 }
 
 button:hover:not(:disabled) {
-  box-shadow: 0 5px 16px rgb(37 175 206 / 0.12);
+  box-shadow: 0 0 0 1px rgb(245 139 216 / 0.42), 0 7px 22px rgb(37 175 206 / 0.24);
 }
 
 button:focus-visible,
