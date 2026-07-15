@@ -60,16 +60,30 @@ export function readEntry(archive, entryPath) {
 }
 
 export function replaceEntryFixedSize(archive, entryPath, replacement) {
-  const entry = findEntry(archive, entryPath);
-  const bytes = Buffer.from(replacement);
+  return replaceEntriesFixedSize(archive, [{ entryPath, replacement }]);
+}
 
-  if (bytes.length !== entry.size) {
-    throw new Error(
-      `Replacement for ${entryPath} must be exactly ${entry.size} bytes; received ${bytes.length}`,
-    );
-  }
+export function replaceEntriesFixedSize(archive, replacements) {
+  const seen = new Set();
+  const prepared = replacements.map(({ entryPath, replacement }) => {
+    if (seen.has(entryPath)) {
+      throw new Error(`Duplicate ASAR replacement path: ${entryPath}`);
+    }
+    seen.add(entryPath);
+
+    const entry = findEntry(archive, entryPath);
+    const bytes = Buffer.from(replacement);
+    if (bytes.length !== entry.size) {
+      throw new Error(
+        `Replacement for ${entryPath} must be exactly ${entry.size} bytes; received ${bytes.length}`,
+      );
+    }
+    return { bytes, entry };
+  });
 
   const patched = Buffer.from(archive);
-  bytes.copy(patched, entry.start);
+  for (const { bytes, entry } of prepared) {
+    bytes.copy(patched, entry.start);
+  }
   return patched;
 }

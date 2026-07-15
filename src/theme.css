@@ -1,228 +1,281 @@
-/* CODEX_MIKU_THEME v2 MAXIMAL */
-:root,
-:root.electron-light,
-:root.electron-dark {
+/* CODEX_MIKU_THEME v3 PIXEL MATCH */
+@layer theme, base, components, utilities;
+
+:root[data-codex-window-type="electron"] {
   color-scheme: light !important;
-  --miku-cyan: #19c7d3;
-  --miku-cyan-deep: #0799b7;
-  --miku-blue: #4a8df6;
-  --miku-pink: #f58bd8;
-  --miku-violet: #b59af7;
-  --miku-ice: #eafaff;
-  --miku-paper: rgb(255 255 255 / 0.78);
-  --miku-line: rgb(62 181 241 / 0.7);
-  --miku-ink: #123f68;
-  --miku-muted: #55769a;
-  --corner-radius-scale: 1.5 !important;
-  --startup-background: #edfaff !important;
-  --startup-logo-shimmer-base: #13bcca !important;
-  --color-background-surface: rgb(251 254 255 / 0.72) !important;
-  --color-background-surface-under: rgb(224 248 255 / 0.76) !important;
-  --color-background-editor-opaque: #f4fcff !important;
-  --color-background-elevated-primary: rgb(255 255 255 / 0.73) !important;
-  --color-background-elevated-primary-opaque: #fbfeff !important;
-  --color-background-elevated-secondary: rgb(224 247 255 / 0.82) !important;
-  --color-background-elevated-secondary-opaque: #e8f9ff !important;
-  --color-background-button-primary: #18bcca !important;
-  --color-background-button-primary-hover: #0ca7bb !important;
-  --color-background-button-primary-active: #078da9 !important;
-  --color-background-button-secondary: rgb(255 255 255 / 0.72) !important;
-  --color-background-accent: rgb(29 196 210 / 0.15) !important;
-  --color-background-accent-hover: rgb(29 196 210 / 0.22) !important;
-  --color-background-accent-active: rgb(245 139 216 / 0.2) !important;
-  --color-text-foreground: var(--miku-ink) !important;
-  --color-text-secondary: var(--miku-muted) !important;
-  --color-text-accent: #078fab !important;
-  --color-text-link: #087fb2 !important;
-  --color-border: rgb(76 171 231 / 0.32) !important;
-  --color-border-heavy: rgb(54 161 224 / 0.48) !important;
-  --color-focus-ring: rgb(245 139 216 / 0.9) !important;
-  --color-decoration-added: #079c83 !important;
-  --color-decoration-modified: #6c69d9 !important;
-  --color-decoration-deleted: #d85695 !important;
-  --vscode-editor-background: rgb(251 254 255 / 0.68) !important;
-  --vscode-editor-foreground: var(--miku-ink) !important;
-  --vscode-sideBar-background: rgb(225 249 255 / 0.78) !important;
-  --vscode-sideBar-foreground: var(--miku-ink) !important;
-  --vscode-input-background: rgb(255 255 255 / 0.82) !important;
-  --vscode-input-foreground: var(--miku-ink) !important;
-  --vscode-input-border: var(--miku-line) !important;
-  --vscode-input-placeholderForeground: #7090b0 !important;
-  --vscode-focusBorder: var(--miku-pink) !important;
-  --vscode-button-background: var(--miku-cyan) !important;
-  --vscode-button-foreground: #fff !important;
-  --vscode-button-hoverBackground: var(--miku-cyan-deep) !important;
-  --vscode-list-hoverBackground: rgb(68 205 220 / 0.12) !important;
-  --vscode-list-activeSelectionBackground: rgb(79 201 231 / 0.2) !important;
-  --vscode-list-activeSelectionForeground: #064d75 !important;
-  --vscode-textLink-foreground: #078fab !important;
-  --vscode-textLink-activeForeground: #d853ae !important;
-  --vscode-scrollbarSlider-background: rgb(45 185 209 / 0.18) !important;
-  --vscode-scrollbarSlider-hoverBackground: rgb(45 185 209 / 0.34) !important;
+  --miku-cyan: #19c9e5;
+  --miku-blue: #186ec2;
+  --miku-pink: #ed6ec1;
+  --miku-violet: #ad7ed5;
+  --miku-ice: #f5f6fc;
+  --miku-ink: #122c60;
+  --corner-radius-scale: 1.55 !important;
+  --startup-background: #f5f6fc !important;
+  --startup-logo-shimmer-base: #19c9e5 !important;
+  --color-background-surface: #f8f8fce8 !important;
+  --color-background-surface-under: #d2dafb !important;
+  --color-background-editor-opaque: #f5f6fc !important;
+  --color-background-elevated-primary: #fafaffed !important;
+  --color-background-elevated-primary-opaque: #fafaff !important;
+  --color-background-elevated-secondary: #e9f3fce8 !important;
+  --color-background-elevated-secondary-opaque: #e9f3fc !important;
+  --color-background-control: #fafaffdf !important;
+  --color-background-control-opaque: #fafaff !important;
+  --color-background-panel: #f8f8fcf2 !important;
+  --color-background-button-primary: #19c9e5 !important;
+  --color-background-button-primary-hover: #4bc2e0 !important;
+  --color-background-button-primary-active: #186ec2 !important;
+  --color-background-button-secondary: #e9f3fce8 !important;
+  --color-background-button-secondary-hover: #dbf4fc !important;
+  --color-background-button-secondary-active: #c9def8 !important;
+  --color-background-accent: #19c9e526 !important;
+  --color-background-accent-hover: #90b3fa38 !important;
+  --color-background-accent-active: #ed6ec13d !important;
+  --color-text-foreground: #122c60 !important;
+  --color-text-foreground-secondary: #426c8d !important;
+  --color-text-foreground-tertiary: #5c76aa !important;
+  --color-text-accent: #0e438d !important;
+  --color-text-link: #186ec2 !important;
+  --color-icon-primary: #0e438d !important;
+  --color-icon-secondary: #426c8d !important;
+  --color-icon-tertiary: #5c76aa !important;
+  --color-border: #90b3fa70 !important;
+  --color-border-light: #c9def8a8 !important;
+  --color-border-heavy: #4bc2e0b8 !important;
+  --color-border-focus: #ed6ec1 !important;
+  --vscode-editor-background: #f8f8fcd9 !important;
+  --vscode-sideBar-background: #dbf4fce8 !important;
+  --vscode-input-background: #fafaffe8 !important;
+  --vscode-input-border: #7ed9eb !important;
+  --vscode-input-placeholderForeground: #5c76aa !important;
+  --vscode-dropdown-background: #fafafff2 !important;
+  --vscode-focusBorder: #ed6ec1 !important;
+  --vscode-button-background: #19c9e5 !important;
+  --vscode-button-hoverBackground: #4bc2e0 !important;
+  --vscode-list-hoverBackground: #90b3fa24 !important;
+  --vscode-list-activeSelectionBackground: #19c9e536 !important;
+  --vscode-textLink-foreground: #186ec2 !important;
+  --vscode-scrollbarSlider-background: #19c9e52e !important;
   --vscode-terminal-background: #102c4a !important;
   --vscode-terminal-foreground: #e9fbff !important;
+  --color-token-main-surface-primary: #f8f8fc54 !important;
+  --color-token-side-bar-background: #dbf4fce8 !important;
+  --color-token-foreground: #122c60 !important;
+  --color-token-input-background: #fafaffe8 !important;
 }
 
 html,
-body,
-#root {
-  background-color: var(--miku-ice) !important;
-  background-image:
-    radial-gradient(circle at 78% 8%, rgb(181 154 247 / 0.22), transparent 29%),
-    radial-gradient(circle at 16% 92%, rgb(25 199 211 / 0.18), transparent 31%),
-    linear-gradient(135deg, #f6fcff 0%, #e8f9ff 52%, #f8efff 100%) !important;
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: #d2dafb !important;
   color: var(--miku-ink) !important;
 }
 
-body::before {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  content: "";
-  opacity: 0.7;
-  background-image:
-    radial-gradient(circle, rgb(255 255 255 / 0.95) 0 1px, transparent 1.5px),
-    radial-gradient(circle, rgb(92 194 235 / 0.45) 0 1px, transparent 1.5px);
-  background-position: 0 0, 17px 19px;
-  background-size: 26px 26px;
-}
-
-body::after {
-  position: fixed;
-  inset: 5% 2% 9% 17%;
-  z-index: 0;
-  pointer-events: none;
-  content: "";
-  opacity: 0.48;
-  border: 2px solid rgb(255 255 255 / 0.84);
-  border-radius: 32px;
-  background: url("./assets/dialog-artwork-connected-NZKCls7p.png") center / cover no-repeat;
-  box-shadow:
-    0 0 0 2px rgb(72 194 245 / 0.42),
-    0 0 42px rgb(67 197 234 / 0.32),
-    0 0 58px rgb(245 139 216 / 0.25);
-  filter: saturate(1.35) contrast(1.04) drop-shadow(0 18px 34px rgb(39 137 201 / 0.2));
+body {
+  outline: none;
 }
 
 #root {
   position: relative;
-  z-index: 1;
+  width: 100%;
+  height: 100%;
+  isolation: isolate;
+  color: var(--miku-ink) !important;
+  background:
+    radial-gradient(circle, #fff 0 1px, transparent 1.6px) 0 0 / 31px 31px,
+    radial-gradient(circle, #19c9e566 0 1px, transparent 1.7px) 15px 18px / 37px 37px,
+    linear-gradient(90deg, #e9f3fcdf 0 19.8%, #ffffff38 19.8% 100%),
+    url("./assets/page-artwork-allow-host-CPm7eJR2.png") 74% 7% / 46% auto no-repeat,
+    linear-gradient(135deg, #f5f6fc 0%, #dbf4fc 46%, #e7dbf5 76%, #d2dafb 100%) !important;
 }
 
 #root::before {
   position: fixed;
-  inset: 54px 24px auto auto;
-  z-index: 3;
-  max-width: 38vw;
+  inset: 52px 26px auto auto;
+  z-index: 20;
   pointer-events: none;
   content: "✦  ♡  ♪  ☆  MIKU  ✧  ♫  ♡";
-  color: #d85ec2;
-  font-size: clamp(13px, 1.25vw, 21px);
+  color: #ed6ec1;
+  font-size: clamp(12px, 1.1vw, 20px);
   font-weight: 800;
-  letter-spacing: 0.22em;
-  text-shadow: 0 0 8px #fff, 0 0 18px #f58bd8, 0 0 24px #57dbef;
+  letter-spacing: .2em;
+  text-shadow: 0 0 5px #fff, 0 0 13px #f397e0, 0 0 20px #7ed9eb;
+}
+
+#root::after {
+  position: fixed;
+  inset: auto 28px 24px auto;
+  z-index: 20;
+  padding: 7px 14px;
+  pointer-events: none;
+  content: "MIKU 01  ♡";
+  color: #0e438d;
+  font: 800 11px/1.2 ui-monospace, monospace;
+  letter-spacing: .16em;
+  border: 1px solid #ed6ec1b8;
+  border-radius: 999px;
+  background: #fafaffc9;
+  box-shadow: 0 0 0 2px #fff9, 0 0 18px #f397e066;
 }
 
 .app-shell-left-panel {
-  background: linear-gradient(180deg, rgb(244 252 255 / 0.9), rgb(208 246 255 / 0.82) 64%, rgb(247 226 255 / 0.76)) !important;
-  border-right: 2px solid var(--miku-line) !important;
-  box-shadow: 10px 0 36px rgb(61 178 222 / 0.2), 2px 0 0 rgb(255 255 255 / 0.8) inset !important;
-  backdrop-filter: blur(20px) saturate(1.35);
+  background:
+    linear-gradient(180deg, #eef8fcec, #cdf5fce5 64%, #e7dbf5df),
+    url("./assets/page-artwork-waiting-pzj85BPm.png") 100% 24% / auto 72% no-repeat !important;
+  border-right: 2px solid #7ed9ebcc !important;
+  box-shadow: 2px 0 0 #fff inset, 10px 0 28px #1c99cd24 !important;
+  backdrop-filter: blur(16px) saturate(1.15);
+}
+
+[data-app-action-sidebar-thread-row],
+[data-app-action-sidebar-project-row] {
+  border-radius: 13px !important;
+}
+
+[data-app-action-sidebar-thread-active="true"] {
+  color: #0e438d !important;
+  background: linear-gradient(90deg, #19c9e538, #90b3fa32 58%, #f397e03d) !important;
+  box-shadow: 0 0 0 1px #4bc2e080, 0 7px 18px #1c99cd24 !important;
 }
 
 .main-surface,
 .browser-main-surface {
-  background: linear-gradient(145deg, rgb(255 255 255 / 0.75), rgb(232 250 255 / 0.62) 62%, rgb(253 232 255 / 0.62)) !important;
-  border: 2px solid var(--miku-line) !important;
-  box-shadow:
-    0 0 0 1px rgb(255 255 255 / 0.7) inset,
-    0 14px 38px rgb(62 149 215 / 0.22),
-    0 0 34px rgb(245 139 216 / 0.2) !important;
-  backdrop-filter: blur(18px) saturate(1.32);
+  background:
+    url("./assets/dialog-artwork-waiting-phone-UTYmfLHs.png") right 18px bottom 18px / 190px auto no-repeat,
+    linear-gradient(180deg, transparent 0 34%, #f8f8fc5c 47%, #f8f8fce8 62%, #f8f8fcf7 100%),
+    url("./assets/dialog-artwork-connected-NZKCls7p.png") center top / 100% auto no-repeat,
+    #f8f8fcd6 !important;
+  border: 2px solid #7ed9ebb8 !important;
+  border-radius: 22px 0 0 0 !important;
+  box-shadow: 0 0 0 2px #fff9 inset, 0 8px 18px #1c99cd29, 0 2px 6px #ab6ddc1a !important;
+  backdrop-filter: blur(16px) saturate(1.15);
 }
 
-.app-shell-left-panel button,
-.app-shell-left-panel [role="button"] {
-  border-radius: 999px !important;
+.app-header-tint {
+  background: linear-gradient(90deg, #f8f8fcf2, #bfd7fbeb 58%, #e7dbf5e5) !important;
+  border-bottom: 1px solid #90b3fa70 !important;
+  backdrop-filter: blur(16px) saturate(1.15);
 }
 
-.app-shell-left-panel [aria-selected="true"],
-.app-shell-left-panel [data-state="active"] {
-  background: linear-gradient(90deg, rgb(33 207 218 / 0.28), rgb(114 190 255 / 0.2), rgb(245 139 216 / 0.2)) !important;
-  box-shadow: 0 0 0 1px rgb(65 189 237 / 0.45), 0 7px 18px rgb(47 160 209 / 0.16) !important;
+.app-header-divider {
+  background: linear-gradient(90deg, transparent, #4bc2e0, #ed6ec1, transparent) !important;
+  opacity: .7;
 }
 
-[role="dialog"],
-[role="menu"],
+[data-thread-title] {
+  color: #0e438d !important;
+  font-weight: 700 !important;
+  text-shadow: 0 1px 0 #fff;
+}
+
+.composer-surface-chrome {
+  background: #fafaffed !important;
+  border: 2px solid #7ed9eb !important;
+  border-radius: 22px !important;
+  box-shadow: 0 0 0 2px #fff inset, 0 8px 18px #1c99cd29, 0 0 24px #f397e029 !important;
+  backdrop-filter: blur(18px) saturate(1.18);
+}
+
+[data-user-message-bubble] {
+  color: #122c60 !important;
+  background: linear-gradient(135deg, #dbf4fcf2, #e9f3fcf2 48%, #e7dbf5ed) !important;
+  border: 1px solid #90b3fa99 !important;
+  border-radius: 18px !important;
+  box-shadow: 0 6px 16px #1c99cd1f !important;
+}
+
+[data-local-conversation-final-assistant] {
+  padding: 16px 18px;
+  color: #122c60 !important;
+  border: 1px solid #7ed9eb80;
+  border-radius: 20px;
+  background: #fafaffd9;
+  box-shadow: 0 8px 18px #1c99cd1f, 0 2px 6px #ab6ddc14;
+  backdrop-filter: blur(14px) saturate(1.12);
+}
+
+[data-codex-approval-surface],
+[data-mcp-app-card],
+[data-composer-attachment-pill],
+.codex-review-diff-card {
+  border: 1px solid #90b3fa80 !important;
+  border-radius: 18px !important;
+  background: #fafaffe8 !important;
+  box-shadow: 0 8px 18px #1c99cd1f, 0 2px 6px #ab6ddc14 !important;
+}
+
+[role="dialog"][data-state="open"],
+[role="menu"][data-state="open"],
+[role="listbox"][data-state="open"],
+[data-radix-menu-content],
 [data-radix-popper-content-wrapper] > div {
-  background: rgb(252 254 255 / 0.94) !important;
-  border-color: var(--miku-line) !important;
-  box-shadow: 0 18px 44px rgb(46 125 184 / 0.2) !important;
-  backdrop-filter: blur(22px) saturate(1.14);
+  color: #122c60 !important;
+  border-color: #7ed9eb99 !important;
+  background: #fafafff2 !important;
+  box-shadow: 0 14px 38px #1c99cd29, 0 0 24px #f397e029 !important;
+  backdrop-filter: blur(20px) saturate(1.15);
 }
 
 textarea,
 input,
 [contenteditable="true"] {
-  caret-color: var(--miku-cyan-deep) !important;
-  border-color: var(--miku-line) !important;
-}
-
-textarea:focus,
-input:focus,
-[contenteditable="true"]:focus {
-  box-shadow: 0 0 0 2px rgb(25 199 211 / 0.12), 0 0 22px rgb(245 139 216 / 0.11) !important;
-}
-
-button {
-  border-color: rgb(75 174 228 / 0.48);
-  text-shadow: 0 1px 0 rgb(255 255 255 / 0.54);
-}
-
-button:hover:not(:disabled) {
-  box-shadow: 0 0 0 1px rgb(245 139 216 / 0.42), 0 7px 22px rgb(37 175 206 / 0.24);
+  color: #122c60 !important;
+  caret-color: #19c9e5 !important;
 }
 
 button:focus-visible,
 a:focus-visible,
 [tabindex]:focus-visible {
-  outline: 2px solid var(--miku-pink) !important;
+  outline: 2px solid #ed6ec1 !important;
   outline-offset: 2px !important;
 }
 
 pre,
 .monaco-editor,
 .xterm {
-  border: 1px solid rgb(49 177 206 / 0.28) !important;
+  border: 1px solid #4bc2e052 !important;
   border-radius: 14px !important;
-  box-shadow: 0 8px 22px rgb(16 63 104 / 0.1) !important;
+  box-shadow: 0 8px 18px #102c4a1a !important;
 }
 
 ::selection {
-  color: #123f68;
-  background: rgb(245 139 216 / 0.34);
+  color: #122c60;
+  background: #f397e070;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(var(--miku-cyan), var(--miku-violet)) !important;
   border: 3px solid transparent;
   border-radius: 999px;
-  background-clip: padding-box !important;
+  background: linear-gradient(#19c9e5, #90b3fa, #ad7ed5, #ed6ec1) padding-box !important;
 }
 
 .startup-loader {
-  background: linear-gradient(135deg, #f4fdff, #e7f9ff 55%, #f9efff) !important;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #f5f6fc, #dbf4fc 52%, #e7dbf5) !important;
+  -webkit-app-region: drag;
+}
+
+.startup-loader__logo {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+
+.startup-loader__base,
+.startup-loader__overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .startup-loader__base {
-  color: var(--miku-cyan) !important;
-  filter: drop-shadow(0 0 18px rgb(245 139 216 / 0.35));
-}
-
-@media (prefers-contrast: more) {
-  :root {
-    --miku-line: rgb(13 124 173 / 0.72);
-    --miku-muted: #365d82;
-  }
+  color: #19c9e5 !important;
+  filter: drop-shadow(0 0 16px #ed6ec166);
 }

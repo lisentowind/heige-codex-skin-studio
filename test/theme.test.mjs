@@ -7,19 +7,40 @@ const themePath = new URL("../src/theme.css", import.meta.url);
 test("defines the Miku palette and Codex surface tokens", async () => {
   const css = await readFile(themePath, "utf8");
 
-  assert.match(css, /CODEX_MIKU_THEME v2 MAXIMAL/);
+  assert.match(css, /CODEX_MIKU_THEME v3 PIXEL MATCH/);
 
   for (const token of [
     "--miku-cyan",
+    "--miku-blue",
     "--miku-pink",
+    "--miku-violet",
     "--miku-ice",
     "--color-background-surface",
     "--color-background-surface-under",
+    "--color-background-control",
+    "--color-background-panel",
+    "--color-background-button-secondary",
     "--color-text-foreground",
+    "--color-text-foreground-secondary",
+    "--color-text-foreground-tertiary",
+    "--color-icon-primary",
     "--vscode-editor-background",
     "--vscode-sideBar-background",
+    "--color-token-main-surface-primary",
   ]) {
     assert.match(css, new RegExp(token.replaceAll("-", "\\-")));
+  }
+
+  for (const color of [
+    "#f5f6fc",
+    "#dbf4fc",
+    "#19c9e5",
+    "#90b3fa",
+    "#ed6ec1",
+    "#ad7ed5",
+    "#122c60",
+  ]) {
+    assert.ok(css.toLowerCase().includes(color), `missing reference color: ${color}`);
   }
 });
 
@@ -27,26 +48,39 @@ test("styles stable Codex shell, composer, and interaction surfaces", async () =
   const css = await readFile(themePath, "utf8");
 
   for (const selector of [
+    ':root[data-codex-window-type="electron"]',
     ".app-shell-left-panel",
     ".main-surface",
-    "textarea",
-    "button",
-    "pre",
+    ".app-header-tint",
+    ".composer-surface-chrome",
+    '[data-app-action-sidebar-thread-active="true"]',
+    "[data-user-message-bubble]",
+    "[data-local-conversation-final-assistant]",
+    "[data-codex-approval-surface]",
     "::-webkit-scrollbar-thumb",
   ]) {
     assert.ok(css.includes(selector), `missing selector: ${selector}`);
   }
 });
 
-test("uses the supplied Miku artwork and maximal decorative layers", async () => {
+test("uses all four deterministic Miku crops and maximal decorative layers", async () => {
   const css = await readFile(themePath, "utf8");
 
-  assert.match(css, /dialog-artwork-connected-NZKCls7p\.png/);
-  assert.match(css, /body::after/);
+  for (const asset of [
+    "dialog-artwork-connected-NZKCls7p.png",
+    "page-artwork-allow-host-CPm7eJR2.png",
+    "page-artwork-waiting-pzj85BPm.png",
+    "dialog-artwork-waiting-phone-UTYmfLHs.png",
+  ]) {
+    assert.ok(css.includes(asset), `missing embedded artwork: ${asset}`);
+  }
+
+  assert.match(css, /#root\s*\{/);
   assert.match(css, /#root::before/);
+  assert.match(css, /#root::after/);
   assert.match(css, /[✦♡♪☆]/u);
   assert.match(css, /saturate\(/);
-  assert.match(css, /drop-shadow\(/);
+  assert.match(css, /backdrop-filter/);
 });
 
 test("does not load remote assets or force motion", async () => {

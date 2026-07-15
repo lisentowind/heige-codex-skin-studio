@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "generator": "ffmpeg 8.1",
+  "source": {
+    "file": "miku-reference.png",
+    "sha256": "f51a2754354a301d1fef129b6ca6d90726e99942c6130c8d55a8eafe24bd29b0",
+    "width": 1672,
+    "height": 941
+  },
+  "crops": [
+    {
+      "role": "hero",
+      "file": "miku-hero.png",
+      "x": 382,
+      "y": 159,
+      "width": 1240,
+      "height": 342,
+      "filter": "eq=saturation=1.35:contrast=1.05:brightness=0.01",
+      "sha256": "ee1bf7a95b69441d7116df5ba308a2fa0a3b94966c1c9539add4756ed2f02405"
+    },
+    {
+      "role": "character",
+      "file": "miku-character.png",
+      "x": 840,
+      "y": 128,
+      "width": 608,
+      "height": 375,
+      "filter": "eq=saturation=1.32:contrast=1.05:brightness=0.01",
+      "sha256": "0e549285b237c6eef148152b6fe6296a21f391eab5d2e1e51b24e19820e95114"
+    },
+    {
+      "role": "sidebar",
+      "file": "miku-sidebar-wash.png",
+      "x": 236,
+      "y": 170,
+      "width": 98,
+      "height": 644,
+      "filter": null,
+      "sha256": "f5be49bf2ac12919ee2cc8de377c4856c19f907d8e40c2fbe3ca4cc33e53833f"
+    },
+    {
+      "role": "polaroid",
+      "file": "miku-polaroid.png",
+      "x": 1409,
+      "y": 704,
+      "width": 228,
+      "height": 230,
+      "filter": null,
+      "sha256": "dc90154c0f244ff4ff1cd3ec45c4190d8550d0d99bc85bc1ccf0d6f91c51d07f"
+    }
+  ]
+}
