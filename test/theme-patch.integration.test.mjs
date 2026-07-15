@@ -15,9 +15,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { readEntry, replaceEntriesFixedSize } from "../src/asar.mjs";
-import { PET_ASSETS, THEME_ASSETS } from "../src/theme-patch.mjs";
+import { THEME_ASSETS } from "../src/theme-patch.mjs";
 
-const APP_ASSETS = [...THEME_ASSETS, ...PET_ASSETS];
+const APP_ASSETS = THEME_ASSETS;
 
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));

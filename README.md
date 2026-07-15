@@ -24,7 +24,7 @@ unzip codex-miku-theme.skill -d ~/.agents/skills
 - 已适配 macOS Codex Desktop `26.707.72221`，构建号 `5307`。
 - v4 源码、可分发 Skill 与安装包均已完成。
 - 用户参考图已裁成全高主画布、角色、侧栏纹理和拍立得 4 张独立素材，并嵌入 4 个低频 PNG 资源槽。裁剪坐标、源图与目标图 SHA-256 记录在 `assets/miku-crops.json`。
-- 原生 `Codex` 宠物槽已替换成与壁纸人物一致的 Q 版初音未来，保留待机、奔跑、跳跃、等待、审查、失败和转身动画。
+- 已按 Codex Desktop 原生自定义宠物规范安装独立的 `Miku Future`，不再覆盖内置 `Codex` 宠物槽；包含待机、左右奔跑、跳跃、等待、审查、失败和 16 向观察动画。
 - 真实根节点、侧栏选中态、主区域、顶栏、输入框、用户消息、助手消息、审批卡片和弹窗均已按稳定选择器覆盖。
 - 首次安装会在 `~/Library/Application Support/Codex Miku Theme/backups/` 创建经过 SHA-256 校验的原始 ASAR 备份。
 - 安装后 ASAR 字节数保持不变，主题 CSS 为 `7997 / 8003` 字节。
@@ -32,7 +32,13 @@ unzip codex-miku-theme.skill -d ~/.agents/skills
 
 ## 生效方法
 
-使用 `Command + Q` 完全退出 Codex，双击安装器，安装成功后再从 Dock 重新打开。打开「设置 > 宠物」并选择 `Codex`，显示的就是初音未来动画宠物。
+宠物可以在 Codex 运行时独立安装：
+
+```bash
+open scripts/install-pet.command
+```
+
+然后打开「设置 > 宠物」，点击刷新并选择 `Miku Future`。完整主题仍需使用 `Command + Q` 完全退出 Codex后安装。
 
 ## 检查状态
 
@@ -48,7 +54,7 @@ npm run check
 open scripts/install.command
 ```
 
-安装器只接受已验证的 `26.707.72221（5307）`。它会校验当前完整 ASAR、CSS 容量、4 个背景图片槽和 1 个原生宠物槽，再用 macOS 原子交换完成 CAS 提交。若交换瞬间目标已变化，它会原子换回并拒绝覆盖；若状态文件写入失败，它会把 ASAR 回滚到本次安装前的精确字节。
+安装器只接受已验证的 `26.707.72221（5307）`。它会校验当前完整 ASAR、CSS 容量和 4 个背景图片槽，再用 macOS 原子交换完成 CAS 提交。`Miku Future` 通过 Codex 官方自定义宠物目录独立安装。若交换瞬间目标已变化，它会原子换回并拒绝覆盖；若状态文件写入失败，它会把 ASAR 回滚到本次安装前的精确字节。
 
 Codex 官方升级后不要直接套用旧主题。安装器会拒绝未适配的新构建，避免用旧备份覆盖同尺寸更新；需要先按新构建重新确认入口与资源槽。
 

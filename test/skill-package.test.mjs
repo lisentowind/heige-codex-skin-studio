@@ -25,7 +25,9 @@ test("ships a standard Codex skill with the complete v4 theme payload", async ()
     "payload/assets/miku-character.png",
     "payload/assets/miku-sidebar-wash.png",
     "payload/assets/miku-polaroid.png",
-    "payload/assets/miku-pet-spritesheet.webp",
+    "payload/custom-pet/miku-future/pet.json",
+    "payload/custom-pet/miku-future/spritesheet.webp",
+    "scripts/install-pet.command",
   ];
 
   await Promise.all(required.map((path) => access(new URL(path, skillRoot), fsConstants.R_OK)));
@@ -50,7 +52,7 @@ test("queued installer waits for Codex to quit and never bypasses compatibility 
   assert.doesNotMatch(`${installer}\n${runner}`, /killall|pkill|codesign/);
 });
 
-test("bundled theme stays self-contained and includes the full-canvas pet marker", async () => {
+test("bundled theme stays self-contained and includes the full-canvas marker", async () => {
   const css = await text("payload/src/theme.css");
   const patcher = await text("payload/src/theme-patch.mjs");
   assert.match(css, /CODEX_MIKU_THEME v4 FULL CANVAS PET/);

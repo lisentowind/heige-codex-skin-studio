@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
-import { PET_ASSETS, THEME_ASSETS } from "../src/theme-patch.mjs";
+import { THEME_ASSETS } from "../src/theme-patch.mjs";
 
 const expectedAssets = [
   ["hero", "miku-full-canvas.png", 1240, 889],
@@ -50,21 +50,25 @@ test("keeps every crop valid, non-empty, and at its specified geometry", async (
   }
 });
 
-test("maps a matching animated pet spritesheet into the native Codex pet slot", async () => {
-  assert.deepEqual(PET_ASSETS, [
-    {
-      role: "pet",
-      sourceName: "miku-pet-spritesheet.webp",
-      entryPath: "webview/assets/codex-spritesheet-v6-BRBFriCM.webp",
-    },
-  ]);
+test("packages a native v2 custom pet for Codex Desktop", async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL("../custom-pet/miku-future/pet.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(manifest, {
+    id: "miku-future",
+    displayName: "Miku Future",
+    description: "与主题壁纸同款的初音未来 Q 版动画桌面宠物",
+    spriteVersionNumber: 2,
+    spritesheetPath: "spritesheet.webp",
+  });
 
-  const bytes = await readFile(new URL("../assets/miku-pet-spritesheet.webp", import.meta.url));
+  const bytes = await readFile(new URL("../custom-pet/miku-future/spritesheet.webp", import.meta.url));
   assert.ok(bytes.length > 100_000, "pet spritesheet is unexpectedly empty");
   assert.equal(bytes.subarray(0, 4).toString(), "RIFF");
-  assert.equal(bytes.subarray(8, 16).toString(), "WEBPVP8X");
-  const readUInt24LE = (offset) =>
-    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
-  assert.equal(readUInt24LE(24) + 1, 1536, "pet spritesheet width drifted");
-  assert.equal(readUInt24LE(27) + 1, 2288, "pet spritesheet height drifted");
+  assert.equal(bytes.subarray(8, 12).toString(), "WEBP");
+  assert.equal(bytes.subarray(12, 16).toString(), "VP8L");
+  assert.equal(bytes[20], 0x2f, "lossless WebP signature drifted");
+  const sizeBits = bytes.readUInt32LE(21);
+  assert.equal((sizeBits & 0x3fff) + 1, 1536, "pet spritesheet width drifted");
+  assert.equal(((sizeBits >>> 14) & 0x3fff) + 1, 2288, "pet spritesheet height drifted");
 });

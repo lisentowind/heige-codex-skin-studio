@@ -15,6 +15,7 @@ done
 if [[ "$ACTION" == "install" ]]; then
   node "$PATCHER" check
   node "$PATCHER" install
+  "${PATCHER:h:h:h}/scripts/install-pet.command"
 elif [[ "$ACTION" == "restore" ]]; then
   node "$PATCHER" restore
 else
@@ -24,4 +25,3 @@ fi
 
 echo "[$(/bin/date -Iseconds)] $ACTION completed"
 /usr/bin/open /Applications/ChatGPT.app
-

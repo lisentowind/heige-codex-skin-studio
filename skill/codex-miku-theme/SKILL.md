@@ -8,7 +8,7 @@ compatibility: macOS, Codex Desktop 26.707.72221 build 5307, Node.js 20 or newer
 
 ## Overview
 
-Install the complete v4 full-canvas Miku theme and matching animated pet. The bundled installer validates the exact Codex build, creates a verified original backup, patches fixed-size ASAR entries atomically, and refuses unsafe version mismatches.
+Install the complete v4 full-canvas Miku theme and matching native custom pet. The bundled installer validates the exact Codex build, creates a verified original backup, patches fixed-size ASAR entries atomically, installs `Miku Future` under the supported custom-pet directory, and refuses unsafe version mismatches.
 
 ## Use the bundled commands
 
@@ -17,11 +17,12 @@ Resolve every path relative to this `SKILL.md`. Do not copy the payload elsewher
 | User intent | Action |
 |---|---|
 | Install or enable the theme | Run `open scripts/install-after-quit.command`, then ask the user to press `Command + Q` once. The detached helper installs after Codex exits and reopens it. |
+| Install or refresh only the pet | Run `scripts/install-pet.command`; then refresh the pet list and select `Miku Future`. |
 | Check whether it is installed | Run `scripts/check.command` and summarize the JSON result. |
 | Restore the official appearance | Run `open scripts/restore-after-quit.command`, then ask the user to press `Command + Q` once. |
 | Codex is already fully closed | `scripts/install-now.command` may be run from Terminal or Finder. |
 
-After installation, tell the user to open `设置 > 宠物` and select the native `Codex` pet slot; that slot now contains the matching Miku animation.
+After installation, tell the user to open `设置 > 宠物`, refresh the list, and select the independent `Miku Future` pet.
 
 ## Safety boundary
 
@@ -40,4 +41,3 @@ Confirm these points concisely:
 3. The original appearance remains recoverable with `restore-after-quit.command`.
 
 If installation fails, read `~/Library/Logs/Codex Miku Theme/install.log` and report the exact error without weakening the safety checks.
-

@@ -67,15 +67,7 @@ export const THEME_ASSETS = Object.freeze([
   }),
 ]);
 
-export const PET_ASSETS = Object.freeze([
-  Object.freeze({
-    role: "pet",
-    sourceName: "miku-pet-spritesheet.webp",
-    entryPath: "webview/assets/codex-spritesheet-v6-BRBFriCM.webp",
-  }),
-]);
-
-const APP_ASSETS = Object.freeze([...THEME_ASSETS, ...PET_ASSETS]);
+const APP_ASSETS = THEME_ASSETS;
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
