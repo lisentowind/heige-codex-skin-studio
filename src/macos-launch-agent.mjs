@@ -15,6 +15,7 @@ export const LEGACY_WATCHDOG_LABEL = "com.heige.codex-skin-watchdog";
 
 const TEST_LABEL_PREFIX = `${CONTROLLER_LAUNCH_AGENT_LABEL}.test.`;
 const LEGACY_TEST_LABEL_PREFIX = `${LEGACY_WATCHDOG_LABEL}.test.`;
+const UNREGISTER_HELPER_LABEL_PREFIX = `${CONTROLLER_LAUNCH_AGENT_LABEL}.unregister.`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const HANDSHAKE_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -59,9 +60,98 @@ const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
   "oldPlistPath",
   "nodePath",
   "controllerPath",
+  "currentPid",
   "legacyRoots",
   "identifiedLegacyRoots",
 ];
+
+const UNREGISTER_HELPER_SOURCE = String.raw`
+import { execFile as execFileCallback } from "node:child_process";
+import { lstat, open } from "node:fs/promises";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
+const [target, expectedPidText, helperTarget, plistPath, readyPath, readyNonce] = process.argv.slice(1);
+const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const targetMatch = new RegExp("^gui/(\\d+)/(com\\.heige\\.codex-skin-controller(?:\\.test\\." + uuid + ")?)$").exec(target ?? "");
+const helperMatch = new RegExp("^gui/(\\d+)/com\\.heige\\.codex-skin-controller\\.unregister\\." + uuid + "$").exec(helperTarget ?? "");
+const expectedPid = Number(expectedPidText);
+if (
+  targetMatch === null ||
+  helperMatch === null ||
+  targetMatch[1] !== helperMatch[1] ||
+  !Number.isSafeInteger(expectedPid) ||
+  expectedPid <= 0 ||
+  typeof plistPath !== "string" ||
+  !plistPath.startsWith("/") ||
+  plistPath.includes("\0") ||
+  typeof readyPath !== "string" ||
+  !readyPath.startsWith("/") ||
+  readyPath.includes("\0") ||
+  !(new RegExp("^" + uuid + "$")).test(readyNonce ?? "")
+) throw new Error("deferred unregister helper arguments are invalid");
+
+const exactNotFound = (error, inspectedTarget, label, uid) => {
+  const stderr = "Bad request.\nCould not find service \"" + label +
+    "\" in domain for user gui: " + uid + "\n";
+  return [3, 113, "3", "113"].includes(error?.code) &&
+    error?.stdout === "" &&
+    error?.stderr === stderr &&
+    error?.message === "Command failed: /bin/launchctl print " + inspectedTarget + "\n" + stderr;
+};
+const inspect = async (inspectedTarget, label, uid) => {
+  try {
+    const { stdout } = await execFile("/bin/launchctl", ["print", inspectedTarget]);
+    const match = /(?:^|\n)\s*pid\s*=\s*(\d+)\s*(?:\n|$)/.exec(String(stdout ?? ""));
+    const pid = match === null ? null : Number(match[1]);
+    return { loaded: true, pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null };
+  } catch (error) {
+    if (exactNotFound(error, inspectedTarget, label, uid)) return { loaded: false, pid: null };
+    throw error;
+  }
+};
+const pathAbsent = async () => {
+  try {
+    await lstat(plistPath);
+    return false;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+};
+const initial = await inspect(target, targetMatch[2], targetMatch[1]);
+if (!initial.loaded || initial.pid !== expectedPid || await pathAbsent()) {
+  throw new Error("deferred unregister target prestate changed");
+}
+const readyDocument = JSON.stringify({
+  schemaVersion: 1,
+  target,
+  expectedPid,
+  helperTarget,
+  readyNonce,
+}) + "\n";
+const readyHandle = await open(readyPath, "wx", 0o600);
+try {
+  await readyHandle.writeFile(readyDocument);
+  await readyHandle.sync();
+} finally {
+  await readyHandle.close();
+}
+while (true) {
+  if (await pathAbsent()) {
+    const job = await inspect(target, targetMatch[2], targetMatch[1]);
+    if (!job.loaded || job.pid !== expectedPid) break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if ((await inspect(target, targetMatch[2], targetMatch[1])).loaded) {
+  await execFile("/bin/launchctl", ["bootout", target]);
+}
+if ((await inspect(target, targetMatch[2], targetMatch[1])).loaded) {
+  throw new Error("deferred unregister target remained loaded");
+}
+await execFile("/bin/launchctl", ["bootout", helperTarget]);
+`;
 
 const CONTROLLER_PLIST_KEYS = new Set([
   "KeepAlive",
@@ -443,6 +533,12 @@ async function resolveProgramArguments(options) {
 
 function normalizedOptions(options = {}) {
   assertProductionPlatformIsNotInjected(options);
+  if (
+    hasOwn(options, "deferIfCurrentProcess") &&
+    typeof options.deferIfCurrentProcess !== "boolean"
+  ) {
+    throw new TypeError("deferIfCurrentProcess must be boolean");
+  }
   const testMode = options.testMode === true;
   const home = testMode ? (options.home ?? homedir()) : trustedUserHome();
   const label = options.label ?? CONTROLLER_LAUNCH_AGENT_LABEL;
@@ -479,6 +575,8 @@ function normalizedOptions(options = {}) {
     runtimePathsExplicit: hasOwn(options, "nodePath") && hasOwn(options, "controllerPath"),
     plistPath: join(launchAgentsDir, `${label}.plist`),
     processUid: testMode ? (options.processUid ?? process.getuid?.()) : process.getuid?.(),
+    currentPid: testMode ? (options.currentPid ?? process.pid) : process.pid,
+    deferIfCurrentProcess: options.deferIfCurrentProcess === true,
     execFile: testMode ? (options.execFile ?? execFileAsync) : execFileAsync,
     fs: testMode ? (options.fs ?? nodeFs) : nodeFs,
     readPlist: testMode ? options.readPlist : undefined,
@@ -587,6 +685,110 @@ async function bootout(options, label, { knownLoaded = false } = {}) {
     throw error;
   }
   return true;
+}
+
+async function stopUnregisterHelper(options, helperLabel) {
+  if (!(await isLoaded(options, helperLabel))) return;
+  await bootout(options, helperLabel, { knownLoaded: true });
+}
+
+async function startUnregisterHelper(options, programArguments, targetPid) {
+  const readyNonce = randomUUID();
+  const helperLabel = `${UNREGISTER_HELPER_LABEL_PREFIX}${readyNonce}`;
+  assertLabel(helperLabel);
+  const target = launchTarget(options);
+  const helperTarget = launchTarget(options, helperLabel);
+  const readyPath = join(options.stateDir, `.controller-unregister-helper-ready.${readyNonce}`);
+  const expectedReady = Buffer.from(`${JSON.stringify({
+    schemaVersion: 1,
+    target,
+    expectedPid: targetPid,
+    helperTarget,
+    readyNonce,
+  })}\n`);
+  await assertSnapshotCurrent(options.fs, readyPath, null);
+  await command(options, "/bin/launchctl", [
+    "submit",
+    "-l",
+    helperLabel,
+    "-o",
+    "/dev/null",
+    "-e",
+    "/dev/null",
+    "--",
+    programArguments[0],
+    "--input-type=module",
+    "--eval",
+    UNREGISTER_HELPER_SOURCE,
+    target,
+    String(targetPid),
+    helperTarget,
+    options.plistPath,
+    readyPath,
+    readyNonce,
+  ]);
+  let readySnapshot = null;
+  try {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const helper = await inspectLoadedJob(options, helperLabel);
+      if (helper.loaded && helper.pid !== null) {
+        if (helper.pid === targetPid) {
+          throw new Error("deferred unregister helper reused the controller PID");
+        }
+        break;
+      }
+      await options.wait(50);
+      if (attempt === 39) throw new Error("deferred unregister helper did not start");
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const candidate = await snapshotFile(options.fs, readyPath);
+      if (candidate !== null) {
+        if (!candidate.bytes.equals(expectedReady) || candidate.mode !== 0o600) {
+          throw new Error("deferred unregister helper readiness is invalid");
+        }
+        readySnapshot = candidate;
+        await removeSnapshotPath(options.fs, readyPath, readySnapshot);
+        readySnapshot = null;
+        return helperLabel;
+      }
+      await options.wait(50);
+    }
+    throw new Error("deferred unregister helper readiness timed out");
+  } catch (primaryError) {
+    const cleanupErrors = [];
+    try {
+      await stopUnregisterHelper(options, helperLabel);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (readySnapshot === null) {
+      try {
+        const candidate = await snapshotFile(options.fs, readyPath);
+        if (
+          candidate !== null &&
+          candidate.bytes.equals(expectedReady) &&
+          candidate.mode === 0o600
+        ) readySnapshot = candidate;
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (readySnapshot !== null) {
+      try {
+        await removeSnapshotPath(options.fs, readyPath, readySnapshot);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        "deferred unregister helper failed and cleanup also failed",
+        { cause: primaryError },
+      );
+    }
+    throw primaryError;
+  }
 }
 
 async function syncDirectory(fs, path) {
@@ -1977,7 +2179,8 @@ export async function unregisterControllerAgent(input = {}) {
   launchDomain(options);
   const programArguments = await resolveProgramArguments(options);
   const snapshot = await snapshotFile(options.fs, options.plistPath);
-  const loaded = await isLoaded(options);
+  const job = await inspectLoadedJob(options, options.label);
+  const loaded = job.loaded;
   if (loaded && !snapshot) {
     const error = new Error("loaded controller has no trusted canonical plist");
     error.code = "CONTROLLER_PRESTATE_INVALID";
@@ -1986,6 +2189,15 @@ export async function unregisterControllerAgent(input = {}) {
   if (snapshot) {
     const plist = await readPlistSnapshot(options, options.plistPath, snapshot);
     assertControllerPlistAttribution(options, plist, programArguments);
+  }
+  if (
+    loaded &&
+    options.deferIfCurrentProcess &&
+    job.pid !== options.currentPid
+  ) {
+    const error = new Error("current controller LaunchAgent PID could not be verified");
+    error.code = "CONTROLLER_PROCESS_IDENTITY_UNVERIFIED";
+    throw error;
   }
   const launchAgentsCapability = snapshot
     ? await captureDirectoryCapability(
@@ -1997,6 +2209,39 @@ export async function unregisterControllerAgent(input = {}) {
   await assertSnapshotCurrent(options.fs, options.plistPath, snapshot);
   if (launchAgentsCapability) {
     await assertDirectoryCapability(options.fs, launchAgentsCapability);
+  }
+  if (loaded && job.pid === options.currentPid) {
+    const stateCapability = await ensurePrivateDirectory(options.fs, options.stateDir);
+    await assertDirectoryCapability(options.fs, stateCapability);
+    const helperLabel = await startUnregisterHelper(options, programArguments, job.pid);
+    let removed;
+    try {
+      await assertDirectoryCapability(options.fs, stateCapability);
+      await assertSnapshotCurrent(options.fs, options.plistPath, snapshot);
+      await assertDirectoryCapability(options.fs, launchAgentsCapability);
+      removed = await removeSnapshotPath(options.fs, options.plistPath, snapshot);
+      await assertDirectoryCapability(options.fs, stateCapability);
+      await assertDirectoryCapability(options.fs, launchAgentsCapability);
+    } catch (primaryError) {
+      try {
+        await stopUnregisterHelper(options, helperLabel);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          "controller plist removal failed and the unregister helper could not be removed",
+          { cause: primaryError },
+        );
+      }
+      throw primaryError;
+    }
+    return {
+      label: options.label,
+      plistPath: options.plistPath,
+      loaded: true,
+      removed,
+      deferred: true,
+      helperLabel,
+    };
   }
   if (loaded) {
     await bootout(options, options.label, { knownLoaded: true });

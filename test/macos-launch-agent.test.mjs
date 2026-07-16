@@ -313,6 +313,24 @@ async function fixture(t, overrides = {}) {
       loaded.add(label);
       return { stdout: "", stderr: "" };
     }
+    if (args[0] === "submit") {
+      const label = args[args.indexOf("-l") + 1];
+      await overrides.onSubmit?.({ args, label });
+      if (overrides.submitFailure) throw overrides.submitFailure;
+      loaded.add(label);
+      if (overrides.publishHelperReady !== false) {
+        const [target, expectedPid, helperTarget, , readyPath, readyNonce] = args.slice(-6);
+        const readyBytes = overrides.helperReadyBytes ?? `${JSON.stringify({
+          schemaVersion: 1,
+          target,
+          expectedPid: Number(expectedPid),
+          helperTarget,
+          readyNonce,
+        })}\n`;
+        await writeFile(readyPath, readyBytes, { mode: 0o600 });
+      }
+      return { stdout: "", stderr: "" };
+    }
     if (args[0] === "bootout") {
       const label = args[1].split("/").at(-1);
       loaded.delete(label);
@@ -340,6 +358,7 @@ async function fixture(t, overrides = {}) {
     controllerPlistPath,
     journalPath,
     processUid: UID,
+    currentPid: overrides.currentPid,
     testMode: true,
     fs: trackingFs,
     execFile,
@@ -1140,6 +1159,143 @@ test("unregister verifies absence and deletes only its matching generated plist"
     ["/bin/launchctl", "bootout", `gui/${UID}/${deps.label}`],
     ["/bin/launchctl", "print", `gui/${UID}/${deps.label}`],
   ]);
+});
+
+test("self-unregister removes persistence only after a distinct one-shot helper is running", async (t) => {
+  const currentPid = 4321;
+  let plistPresentWhenHelperSubmitted = false;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    onSubmit: async () => {
+      plistPresentWhenHelperSubmitted = await pathExists(deps.controllerPlistPath);
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+  deps.commands.length = 0;
+
+  const result = await unregisterControllerAgent(deps);
+
+  assert.equal(plistPresentWhenHelperSubmitted, true);
+  assert.equal(result.label, deps.label);
+  assert.equal(result.plistPath, deps.controllerPlistPath);
+  assert.equal(result.loaded, true, "the current launchd job remains loaded until its HTTP ACK can finish");
+  assert.equal(result.removed, true);
+  assert.equal(result.deferred, true);
+  assert.match(
+    result.helperLabel,
+    /^com\.heige\.codex-skin-controller\.unregister\.[0-9a-f-]{36}$/,
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(deps.loaded.has(result.helperLabel), true);
+  const submit = deps.commands.find((command) => command[1] === "submit");
+  assert.ok(submit);
+  assert.equal(submit.includes(`gui/${UID}/${deps.label}`), true);
+  assert.equal(submit.includes(String(currentPid)), true);
+  assert.equal(submit.includes(`gui/${UID}/${result.helperLabel}`), true);
+  assert.equal(
+    deps.commands.some((command) => command[1] === "bootout" && command[2].endsWith(`/${deps.label}`)),
+    false,
+    "the current job must not boot itself out before returning",
+  );
+});
+
+test("self-unregister never removes the canonical plist when the helper cannot be submitted", async (t) => {
+  const currentPid = 4321;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: () => currentPid,
+    submitFailure: new Error("helper submit failed"),
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper submit failed/);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    deps.commands.some((command) => command[1] === "bootout" && command[2].endsWith(`/${deps.label}`)),
+    false,
+  );
+});
+
+test("self-unregister fails closed and removes a submitted helper that never starts", async (t) => {
+  const currentPid = 4321;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? undefined : currentPid,
+    wait: async () => {},
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper did not start/i);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    false,
+  );
+});
+
+test("self-unregister keeps persistence when a running helper never publishes readiness", async (t) => {
+  const currentPid = 4321;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    publishHelperReady: false,
+    wait: async () => {},
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper readiness timed out/i);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    false,
+  );
+});
+
+test("self-unregister preserves a foreign readiness file and keeps persistence", async (t) => {
+  const currentPid = 4321;
+  const foreign = "foreign readiness\n";
+  let readyPath;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    helperReadyBytes: foreign,
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper readiness is invalid/i);
+  assert.equal(await readFile(readyPath, "utf8"), foreign);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+});
+
+test("background self-unregister fails closed when launchd omits the exact current PID", async (t) => {
+  const deps = await fixture(t, {
+    currentPid: 4321,
+    printPid: () => undefined,
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(
+    unregisterControllerAgent({ ...deps, deferIfCurrentProcess: true }),
+    (error) => error.code === "CONTROLLER_PROCESS_IDENTITY_UNVERIFIED",
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(deps.commands.some((command) => command[1] === "bootout"), false);
 });
 
 test("unregister refuses to delete a plist owned by another label", async (t) => {

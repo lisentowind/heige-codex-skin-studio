@@ -1165,14 +1165,16 @@ export async function productionController({
     unregisterBackground: async () => {
       readiness.discard();
       if (platform === "darwin") {
-        const value = await unregisterControllerAgent();
+        const value = await unregisterControllerAgent({
+          deferIfCurrentProcess: background,
+        });
         await removeBackgroundStartRequest({ stateRoot: paths.stateRoot }).catch((error) => {
           if (error?.code !== "ENOENT") throw error;
         });
         await removeBackgroundHandshake({ stateRoot: paths.stateRoot }).catch((error) => {
           if (error?.code !== "ENOENT") throw error;
         });
-        return { ...value, registered: false, loaded: false };
+        return { ...value, registered: false };
       }
       if (startupHandshake !== null) {
         deferredWindowsUnregister = true;

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -87,4 +88,132 @@ test("isolated random-label LaunchAgent can be registered and removed", { skip: 
   assert.equal((await inspectLaunchAgent(options)).loaded, true);
   await unregisterControllerAgent(options);
   assert.equal((await inspectLaunchAgent(options)).loaded, false);
+});
+
+test("isolated random-label LaunchAgent self-unregisters through a distinct helper", { skip: !enabled }, async (t) => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "heige-launchd-self-unregister-")),
+  );
+  const label = `com.heige.codex-skin-controller.test.${randomUUID()}`;
+  const processUid = process.getuid();
+  const stateDir = join(root, "state");
+  const scriptPath = join(root, "self-unregister.mjs");
+  const configPath = join(root, "config.json");
+  const triggerPath = join(root, "trigger");
+  const resultPath = join(root, "result.json");
+  const moduleUrl = pathToFileURL(join(
+    import.meta.dirname,
+    "..",
+    "src",
+    "macos-launch-agent.mjs",
+  )).href;
+  const programArguments = [process.execPath, scriptPath, configPath];
+  const options = {
+    home: root,
+    launchAgentsDir: join(root, "Library", "LaunchAgents"),
+    stateDir,
+    label,
+    processUid,
+    programArguments,
+    testMode: true,
+  };
+  await writeFile(configPath, JSON.stringify({
+    ...options,
+    triggerPath,
+    resultPath,
+  }));
+  await writeFile(scriptPath, `
+import { readFile, stat, writeFile } from "node:fs/promises";
+import { unregisterControllerAgent } from ${JSON.stringify(moduleUrl)};
+const config = JSON.parse(await readFile(process.argv[2], "utf8"));
+while (true) {
+  try { await stat(config.triggerPath); break; }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+const result = await unregisterControllerAgent({
+  ...config,
+  currentPid: process.pid,
+  deferIfCurrentProcess: true,
+});
+await writeFile(config.resultPath, JSON.stringify(result));
+`);
+
+  let helperLabel = null;
+  t.after(async () => {
+    const errors = [];
+    const labels = [label, helperLabel].filter(Boolean);
+    for (const cleanupLabel of labels) {
+      try {
+        await execFileAsync("/bin/launchctl", [
+          "bootout",
+          `gui/${processUid}/${cleanupLabel}`,
+        ]);
+      } catch (error) {
+        try {
+          await execFileAsync("/bin/launchctl", [
+            "print",
+            `gui/${processUid}/${cleanupLabel}`,
+          ]);
+          errors.push(error);
+        } catch (inspectionError) {
+          if (!isExactLaunchctlPrintNotFound(inspectionError, {
+            label: cleanupLabel,
+            processUid,
+          })) errors.push(inspectionError);
+        }
+      }
+    }
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "isolated self-unregister cleanup failed");
+    }
+  });
+
+  await registerControllerAgent(options);
+  assert.equal((await inspectLaunchAgent(options)).loaded, true);
+  await writeFile(triggerPath, "go\n");
+
+  let result = null;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      result = JSON.parse(await readFile(resultPath, "utf8"));
+      break;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(result?.deferred, true);
+  assert.equal(result?.loaded, true);
+  helperLabel = result.helperLabel;
+  assert.match(
+    helperLabel,
+    /^com\.heige\.codex-skin-controller\.unregister\.[0-9a-f-]{36}$/,
+  );
+
+  let finalInspection = null;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    finalInspection = await inspectLaunchAgent(options);
+    if (!finalInspection.loaded && !finalInspection.plistExists) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(finalInspection?.plistExists, false);
+  assert.equal(finalInspection?.loaded, false);
+  let helperRemoved = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      await execFileAsync("/bin/launchctl", ["print", `gui/${processUid}/${helperLabel}`]);
+    } catch (error) {
+      if (!isExactLaunchctlPrintNotFound(error, { label: helperLabel, processUid })) throw error;
+      helperRemoved = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(helperRemoved, true);
 });
