@@ -49,10 +49,24 @@ test("applies a single style to every Codex renderer and closes sessions", async
   assert.match(FakeSession.expressions[0], /data:image\/png;base64/);
 });
 
+test("injects the in-app switcher menu with every loaded theme", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+  const second = structuredClone(loaded);
+  second.manifest.id = "night-city";
+  second.manifest.name = "Night City";
+  const result = await applySkin({ loadedTheme: loaded, themes: [loaded, second], port: 9341, deps });
+  assert.deepEqual(result.menuThemes, ["demo", "night-city"]);
+  assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
+  assert.match(FakeSession.expressions[0], /"activeId":"demo"/);
+  assert.match(FakeSession.expressions[0], /"night-city"/);
+});
+
 test("removes and checks the live style without persistent machinery", async () => {
   FakeSession.expressions = [];
   const { deps } = await fixture();
   assert.equal((await removeSkin({ port: 9341, deps })).removed, 1);
   assert.deepEqual(await skinStatus({ port: 9341, deps }), [{ installed: true, themeId: "demo" }]);
   assert.match(FakeSession.expressions[0], /remove\(\)/);
+  assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
 });

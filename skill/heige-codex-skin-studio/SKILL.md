@@ -48,13 +48,17 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "主题
 open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-488137"
 ```
 
+## 界面内切换菜单
+
+应用任意主题后，Codex 右上角会出现一个 🎨 按钮。点开可以在所有已装主题和原生界面之间即时切换，不需要再跑命令。新建主题后重新执行一次 `apply.command`，菜单列表会刷新。
+
 ## 暂停或恢复原界面
 
 ```bash
 open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 ```
 
-这里只移除实时注入的 `<style>`，因为工具从未修改 Codex 应用文件。
+这里只移除实时注入的 `<style>` 和切换菜单，因为工具从未修改 Codex 应用文件。
 
 ## 可选宠物
 

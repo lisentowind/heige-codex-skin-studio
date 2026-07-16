@@ -67,7 +67,19 @@ export async function runCli(argv, overrides = {}) {
     const selected = themes.find((theme) => theme.id === themeId);
     if (!selected) throw new Error(`找不到主题：${themeId}`);
     const loadedTheme = await deps.loadTheme(selected.path);
-    return deps.applySkin({ loadedTheme, port: portFrom(args.port) });
+    const menuThemes = [];
+    for (const theme of themes) {
+      if (theme.id === themeId) {
+        menuThemes.push(loadedTheme);
+        continue;
+      }
+      try {
+        menuThemes.push(await deps.loadTheme(theme.path));
+      } catch {
+        // 坏主题不阻塞换肤，只是不进菜单
+      }
+    }
+    return deps.applySkin({ loadedTheme, themes: menuThemes, port: portFrom(args.port) });
   }
   if (command === "pause" || command === "restore") {
     return deps.removeSkin({ port: portFrom(args.port) });
