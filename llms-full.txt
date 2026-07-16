@@ -40,6 +40,7 @@
 - **AI 生成主题**：把 Skill 交给 Codex，让它先用生图能力产出主图，再自动做成皮肤，无需额外 API Key。
 - **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
 - **随时还原**：暂停皮肤或切回原生界面，官方安装包始终原封不动。
+- **常驻模式**：可选的 launchd 看门狗让皮肤和顶部菜单跨重启常驻，界面重载自动补注入（macOS）。
 
 | 项目 | 参数 |
 |---|---|
@@ -78,7 +79,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/customize.command"
 open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 ```
 
-注意：Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。
+注意：默认模式下 Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。不想手动重跑就运行 `enable-persist.command` 开启常驻模式（macOS）：launchd 看门狗每 15 秒巡逻，界面重载补注入、普通启动的 Codex 自动带调试端口重开一次再上皮肤（10 分钟冷却防循环），关闭用 `disable-persist.command`。Windows 常驻暂未提供。
 
 ### Windows（新增，待实机验收）
 
@@ -159,6 +160,10 @@ node src/cli.mjs doctor
 ### 怎么用自己的图片做主题？
 
 三条路：顶部中间的 🎨 菜单选「＋ 自定义图片」直接上传（自动按图片取色）；双击 `customize.command` 走图形界面；或用命令行 `node src/cli.mjs create --image 图片路径 --name 主题名`。
+
+### 怎么让皮肤重启后也一直在？
+
+运行 `enable-persist.command` 开启常驻模式（macOS）。launchd 看门狗每 15 秒检查一次，界面重载或 Codex 重启后自动恢复皮肤和顶部菜单，不用再手动 apply。
 
 ### Codex 更新版本后主题还能用吗？
 

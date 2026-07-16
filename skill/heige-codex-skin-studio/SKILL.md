@@ -60,6 +60,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-4
 1. 安装阶段一律用 `HEIGE_SKIP_APPLY=1` 环境变量跳过自动应用。
 2. 把 apply 作为整个任务的最后一步执行，执行前告知用户「Codex 即将重启，重启后皮肤生效」。
 3. 重启后绝对不要重试 install 或 apply，否则会造成无限重启循环。验证交给用户肉眼确认，或由 Codex 外部的工具执行。
+4. 用户想要皮肤「常驻/重启不丢」时，让用户运行 `scripts/enable-persist.command`（macOS）。它装一个带 10 分钟冷却的 launchd 看门狗负责自动恢复，Codex 内的 Agent 仍然不得自行重试 apply。关闭用 `scripts/disable-persist.command`。
 
 ## 界面内切换菜单
 

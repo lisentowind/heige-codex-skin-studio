@@ -29,6 +29,7 @@
 - **AI 生成主题**：把 Skill 交给 Codex，让它先用生图能力产出主图，再自动做成皮肤，无需额外 API Key。
 - **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
 - **随时还原**：暂停皮肤或切回原生界面，官方安装包始终原封不动。
+- **常驻模式**：可选的 launchd 看门狗让皮肤和顶部菜单跨重启常驻，界面重载自动补注入（macOS）。
 
 | 项目 | 参数 |
 |---|---|
@@ -67,7 +68,21 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/customize.command"
 open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 ```
 
-注意：Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。
+注意：默认模式下 Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。不想手动重跑就开常驻模式：
+
+### 常驻模式（macOS）
+
+```bash
+open "$HOME/.codex/heige-codex-skin-studio/scripts/enable-persist.command"
+```
+
+开启后一个每 15 秒巡逻的 launchd 看门狗会自动兜底：界面重载了补注入，普通方式启动的 Codex 自动带调试端口重开一次再上皮肤（带 10 分钟冷却，绝不循环重启），Codex 没在运行时什么都不做。皮肤和顶部 🎨 菜单从此常驻。关闭：
+
+```bash
+open "$HOME/.codex/heige-codex-skin-studio/scripts/disable-persist.command"
+```
+
+Windows 的常驻模式暂未提供，欢迎 PR。
 
 ### Windows（新增，待实机验收）
 
@@ -156,6 +171,10 @@ node src/cli.mjs doctor
 ### Codex 更新版本后主题还能用吗？
 
 能。CDP 注入不依赖 Codex 安装包的内部结构，Codex 升级后不需要重新适配，重跑一次 `apply.command` 即可。这是相对修改 `app.asar` 方案的核心优势：那类方案每次应用更新都要重新打补丁，还会破坏签名。
+
+### 怎么让皮肤重启后也一直在？
+
+运行 `enable-persist.command` 开启常驻模式（macOS）。launchd 看门狗每 15 秒检查一次，界面重载或 Codex 重启后自动恢复皮肤和顶部菜单，不用再手动 apply。
 
 ## 设计边界
 

@@ -1,6 +1,27 @@
 ﻿# HeiGe Codex Skin Studio 公共函数（Windows）
 $ErrorActionPreference = "Stop"
 
+function Resolve-CodexLaunchTarget {
+    param([string]$AppPath)
+    # 微软商店（MSIX）版的包内 exe 禁止按原始路径启动，Start-Process 会报「拒绝访问」，
+    # 必须改用系统生成的应用执行别名启动，别名会原样转发命令行参数
+    $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
+    if (-not $AppPath.StartsWith($windowsApps, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $AppPath
+    }
+    $aliasDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+    $names = @((Split-Path $AppPath -Leaf), "ChatGPT.exe", "Codex.exe") | Select-Object -Unique
+    foreach ($name in $names) {
+        $alias = Join-Path $aliasDir $name
+        if (Test-Path $alias) { return $alias }
+    }
+    throw @"
+检测到微软商店版 Codex：$AppPath
+商店版不能按文件路径直接启动，需要先开启「应用执行别名」：
+设置 -> 应用 -> 高级应用设置 -> 应用执行别名，打开 ChatGPT / Codex 的开关，然后重新运行本脚本。
+"@
+}
+
 function Get-CodexApp {
     # 用户显式指定的路径优先，装在非默认位置时用这个兜底
     if ($env:HEIGE_CODEX_APP) {
@@ -10,9 +31,9 @@ function Get-CodexApp {
 
     $exeNames = @("ChatGPT.exe", "Codex.exe")
 
-    # 正在运行的客户端进程路径最可信
+    # 正在运行的客户端进程路径最可信；商店版进程路径在 WindowsApps 下，须翻译成可启动的别名
     foreach ($proc in (Get-Process -Name "ChatGPT", "Codex" -ErrorAction SilentlyContinue)) {
-        if ($proc.Path -and (Test-Path $proc.Path)) { return $proc.Path }
+        if ($proc.Path -and (Test-Path $proc.Path)) { return Resolve-CodexLaunchTarget -AppPath $proc.Path }
     }
 
     # 常见安装根目录，含 Squirrel 风格的 app-x.y.z 子目录
@@ -78,9 +99,16 @@ function Get-CodexApp {
         foreach ($lnk in $links) {
             $target = $shell.CreateShortcut($lnk.FullName).TargetPath
             if ($target -and $target -like "*.exe" -and $target -notmatch "unins|setup|update" -and (Test-Path $target)) {
-                return $target
+                return Resolve-CodexLaunchTarget -AppPath $target
             }
         }
+    }
+
+    # 微软商店（MSIX）安装没有常规安装目录，也不写卸载注册表项，认应用执行别名
+    $aliasDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+    foreach ($name in $exeNames) {
+        $alias = Join-Path $aliasDir $name
+        if (Test-Path $alias) { return $alias }
     }
 
     throw @"
@@ -118,25 +146,46 @@ function Test-Cdp {
     }
 }
 
+function Get-RunningCodex {
+    param([string]$AppPath)
+    # 按进程名 + 精确路径双路匹配：商店版走别名启动时，进程真身路径和别名路径不相等，只靠路径会漏
+    $byName = @(Get-Process -Name "ChatGPT", "Codex" -ErrorAction SilentlyContinue)
+    $byPath = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $AppPath })
+    return @($byName + $byPath | Sort-Object Id -Unique)
+}
+
 function Start-CodexWithCdp {
     param([int]$Port = 9341)
     if (Test-Cdp -Port $Port) { return }
 
     $app = Get-CodexApp
-    $running = Get-Process | Where-Object { $_.Path -eq $app } -ErrorAction SilentlyContinue
+    $running = Get-RunningCodex -AppPath $app
     if ($running) {
         Write-Host "正在正常退出 Codex，以调试端口重新打开……"
         $running | ForEach-Object { $_.CloseMainWindow() | Out-Null }
         for ($i = 0; $i -lt 60; $i++) {
-            if (-not (Get-Process | Where-Object { $_.Path -eq $app } -ErrorAction SilentlyContinue)) { break }
+            if (-not (Get-RunningCodex -AppPath $app)) { break }
             Start-Sleep -Milliseconds 250
         }
     }
 
-    Start-Process -FilePath $app -ArgumentList @(
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-debugging-port=$Port"
-    )
+    try {
+        Start-Process -FilePath $app -ArgumentList @(
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=$Port"
+        )
+    } catch {
+        throw @"
+启动 Codex 失败：$app
+系统报错：$($_.Exception.Message)
+常见原因与解法：
+1. 微软商店版：开启「应用执行别名」（设置 -> 应用 -> 高级应用设置 -> 应用执行别名，
+   打开 ChatGPT / Codex 的开关），然后重新运行本脚本。
+2. 安装位置特殊：命令行执行 setx HEIGE_CODEX_APP "完整exe路径"，关掉窗口重开再试。
+3. 正在用内置 Administrator 账户：系统默认禁止该账户启动商店版应用，请换普通用户账户运行。
+本脚本不需要管理员权限，用普通权限的命令行运行即可。
+"@
+    }
     for ($i = 0; $i -lt 80; $i++) {
         if (Test-Cdp -Port $Port) { return }
         Start-Sleep -Milliseconds 250
