@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("All", "Resolver", "ScheduledTask")]
+    [ValidateSet("All", "Resolver", "ScheduledTask", "Entrypoints")]
     [string]$Suite = "All"
 )
 
@@ -10,6 +10,9 @@ if ($Suite -eq "All" -or $Suite -eq "Resolver") {
 }
 if ($Suite -eq "All" -or $Suite -eq "ScheduledTask") {
     $suites += (Join-Path $PSScriptRoot "scheduled-task.test.ps1")
+}
+if ($Suite -eq "All" -or $Suite -eq "Entrypoints") {
+    $suites += (Join-Path $PSScriptRoot "entrypoints.test.ps1")
 }
 
 try {
