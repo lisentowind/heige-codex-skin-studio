@@ -67,7 +67,7 @@ async function themeEntry(loadedTheme) {
   };
 }
 
-export async function applySkin({ loadedTheme, themes, port, preferStored = false, deps = {} }) {
+export async function applySkin({ loadedTheme, themes, port, preferStored = false, control = null, deps = {} }) {
   const wait = deps.waitForRendererTargets ?? waitForRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const menuThemes = themes?.length ? themes : [loadedTheme];
@@ -96,6 +96,7 @@ export async function applySkin({ loadedTheme, themes, port, preferStored = fals
     menuId: MENU_ID,
     cssTemplate,
     preferStored,
+    control,
   });
   const targets = await waitForMainTargets(wait, port, {
     timeoutMs: deps.waitTimeoutMs ?? 20_000,

@@ -134,3 +134,34 @@ test("preferStored restores selection only when asked, else activeId wins", () =
   });
   assert.match(explicit, /"preferStored":false/, "explicit apply must let activeId win");
 });
+
+test("accepts only the narrow canonical loopback control descriptor", () => {
+  const token = Buffer.alloc(32, 7).toString("base64url");
+  const input = {
+    ...base,
+    activeId: "a",
+    entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
+    control: {
+      available: true,
+      persistenceEnabled: true,
+      revision: 4,
+      endpoint: "http://127.0.0.1:43123/v1/persistence",
+      token,
+      launcherName: "HeiGe 皮肤启动器",
+    },
+  };
+  const script = buildSkinMenuScript(input);
+  assert.match(script, /data\.control\?\.available/);
+  assert.match(script, /"persistenceEnabled":true/);
+
+  for (const control of [
+    { ...input.control, endpoint: "http://localhost:43123/v1/persistence" },
+    { ...input.control, endpoint: "http://127.0.0.1:43123/v1/persistence?command=open" },
+    { ...input.control, token: "not-canonical" },
+    { ...input.control, revision: -1 },
+    { ...input.control, launcherName: "其他启动器" },
+    { ...input.control, command: "open" },
+  ]) {
+    assert.throws(() => buildSkinMenuScript({ ...input, control }), /控制描述/);
+  }
+});

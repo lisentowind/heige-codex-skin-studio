@@ -1,6 +1,8 @@
 import { HEX_COLOR } from "./constants.mjs";
 
 const DEFAULT_ACCENT = "#24c9d7";
+const CONTROL_ENDPOINT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/v1\/persistence$/;
+const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 // 客户端 CSS 由 Node 端模板加哨兵生成，替换后与内置主题同源，避免两套模板漂移
 export const CSS_SENTINELS = {
@@ -12,7 +14,60 @@ export const CSS_SENTINELS = {
   text: "#0a0b0c",
 };
 
-export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTemplate = "", preferStored = false }) {
+function normalizeControl(control) {
+  if (control === undefined || control === null) return null;
+  if (typeof control !== "object" || Array.isArray(control)) {
+    throw new Error("菜单控制描述必须是对象");
+  }
+  const keys = Object.keys(control).sort();
+  const expectedKeys = [
+    "available",
+    "endpoint",
+    "launcherName",
+    "persistenceEnabled",
+    "revision",
+    "token",
+  ];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error("菜单控制描述字段无效");
+  }
+  const endpointMatch = typeof control.endpoint === "string"
+    ? CONTROL_ENDPOINT.exec(control.endpoint)
+    : null;
+  const port = endpointMatch === null ? 0 : Number(endpointMatch[1]);
+  if (
+    control.available !== true ||
+    typeof control.persistenceEnabled !== "boolean" ||
+    !Number.isSafeInteger(control.revision) ||
+    control.revision < 0 ||
+    endpointMatch === null ||
+    port > 65_535 ||
+    !CONTROL_TOKEN.test(control.token ?? "") ||
+    Buffer.from(control.token, "base64url").length !== 32 ||
+    Buffer.from(control.token, "base64url").toString("base64url") !== control.token ||
+    control.launcherName !== "HeiGe 皮肤启动器"
+  ) {
+    throw new Error("菜单控制描述无效");
+  }
+  return {
+    available: true,
+    persistenceEnabled: control.persistenceEnabled,
+    revision: control.revision,
+    endpoint: control.endpoint,
+    token: control.token,
+    launcherName: control.launcherName,
+  };
+}
+
+export function buildSkinMenuScript({
+  entries,
+  activeId,
+  styleId,
+  menuId,
+  cssTemplate = "",
+  preferStored = false,
+  control = null,
+}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error("皮肤菜单至少需要一个主题");
   }
@@ -41,6 +96,7 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     selectedKey: "heigeCodexSkinSelected",
     nativeSel: "__heige_native__",
     preferStored,
+    control: normalizeControl(control),
   });
 
   return `(() => {
@@ -67,7 +123,7 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   button.style.cssText = "display:block;margin:0 auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
 
   const panel = document.createElement("div");
-  panel.style.cssText = "display:none;margin-top:8px;min-width:200px;padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
+  panel.style.cssText = "display:none;margin-top:8px;width:330px;max-width:calc(100vw - 24px);padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
 
   const rows = new Map();
   const paint = (id) => {
@@ -277,6 +333,191 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   const native = row("\\u539f\\u751f\\u754c\\u9762", "rgba(0,0,0,.24)", () => { clearTheme(); panel.style.display = "none"; });
   rows.set(null, native);
 
+  // ---- 常驻开关：只显示控制器确认的真实状态，不使用 localStorage 伪造持久化 ----
+  let getPersistenceState = () => null;
+  if (data.control?.available === true) {
+    const section = document.createElement("section");
+    section.dataset.heigeRole = "persistence-section";
+    section.style.cssText = "margin-top:6px;padding:10px;border-top:1px solid rgba(23,52,79,.1);background:rgba(36,201,215,.055);border-radius:9px;";
+
+    const heading = document.createElement("div");
+    heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;";
+    const headingCopy = document.createElement("div");
+    headingCopy.style.cssText = "min-width:0;";
+    const headingTitle = document.createElement("div");
+    headingTitle.textContent = "皮肤常驻";
+    headingTitle.style.cssText = "font-weight:750;letter-spacing:.01em;color:#17344f;";
+    const headingState = document.createElement("div");
+    headingState.dataset.heigeRole = "persistence-state";
+    headingState.style.cssText = "margin-top:1px;font-size:11px;color:rgba(23,52,79,.68);";
+    headingCopy.append(headingTitle, headingState);
+
+    const persistenceSwitch = document.createElement("button");
+    persistenceSwitch.type = "button";
+    persistenceSwitch.dataset.heigeRole = "persistence-switch";
+    persistenceSwitch.setAttribute("role", "switch");
+    persistenceSwitch.setAttribute("tabindex", "0");
+    persistenceSwitch.setAttribute("aria-label", "皮肤常驻");
+    persistenceSwitch.style.cssText = "position:relative;flex:none;width:42px;height:24px;padding:0;border:1px solid rgba(23,52,79,.2);border-radius:999px;cursor:pointer;-webkit-app-region:no-drag;";
+    const switchKnob = document.createElement("span");
+    switchKnob.setAttribute("aria-hidden", "true");
+    switchKnob.style.cssText = "position:absolute;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.24);";
+    persistenceSwitch.appendChild(switchKnob);
+    heading.append(headingCopy, persistenceSwitch);
+
+    const helper = document.createElement("p");
+    helper.dataset.heigeRole = "persistence-helper";
+    helper.textContent = "关闭后本次继续使用；下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。";
+    helper.style.cssText = "margin:8px 0 0;white-space:pre-line;font-size:11px;line-height:1.55;color:rgba(23,52,79,.74);";
+
+    const confirmation = document.createElement("div");
+    confirmation.dataset.heigeRole = "persistence-confirmation";
+    confirmation.hidden = true;
+    confirmation.style.cssText = "margin-top:9px;padding:9px;border:1px solid rgba(187,72,50,.24);border-radius:8px;background:rgba(255,244,240,.92);";
+    const confirmationText = document.createElement("div");
+    confirmationText.textContent = "确认关闭常驻？本次会话仍继续使用皮肤，下次启动将恢复原生界面。";
+    confirmationText.style.cssText = "font-size:11px;line-height:1.55;color:#713a31;";
+    const confirmationActions = document.createElement("div");
+    confirmationActions.style.cssText = "display:flex;justify-content:flex-end;gap:7px;margin-top:8px;";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.dataset.heigeRole = "persistence-cancel";
+    cancel.textContent = "取消";
+    cancel.style.cssText = "padding:4px 9px;border:1px solid rgba(23,52,79,.18);border-radius:6px;background:#fff;color:#17344f;cursor:pointer;";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.dataset.heigeRole = "persistence-confirm";
+    confirm.textContent = "确认关闭";
+    confirm.style.cssText = "padding:4px 9px;border:1px solid #a84232;border-radius:6px;background:#a84232;color:#fff;cursor:pointer;";
+    confirmationActions.append(cancel, confirm);
+    confirmation.append(confirmationText, confirmationActions);
+
+    const alert = document.createElement("div");
+    alert.dataset.heigeRole = "persistence-alert";
+    alert.setAttribute("role", "alert");
+    alert.setAttribute("aria-live", "polite");
+    alert.hidden = true;
+    alert.style.cssText = "margin-top:8px;padding:7px 8px;border-radius:7px;background:rgba(23,52,79,.07);font-size:11px;line-height:1.5;color:#17344f;white-space:pre-line;";
+
+    section.append(heading, helper, confirmation, alert);
+    panel.appendChild(section);
+
+    let persistenceEnabled = data.control.persistenceEnabled;
+    let controlRevision = data.control.revision;
+    let pending = false;
+
+    const showAlert = (message, kind = "error") => {
+      alert.textContent = message;
+      alert.style.background = kind === "success" ? "rgba(26,132,103,.10)" : "rgba(187,72,50,.10)";
+      alert.style.color = kind === "success" ? "#175f4d" : "#713a31";
+      alert.hidden = false;
+    };
+    const hideAlert = () => { alert.hidden = true; alert.textContent = ""; };
+    const paintPersistence = () => {
+      persistenceSwitch.setAttribute("aria-checked", String(persistenceEnabled));
+      persistenceSwitch.setAttribute("aria-busy", String(pending));
+      persistenceSwitch.disabled = pending;
+      persistenceSwitch.style.background = persistenceEnabled ? "#1aaab8" : "rgba(23,52,79,.18)";
+      persistenceSwitch.style.opacity = pending ? ".64" : "1";
+      switchKnob.style.left = persistenceEnabled ? "21px" : "4px";
+      headingState.textContent = pending ? "正在等待后台确认…" : persistenceEnabled ? "已开启，下次启动继续使用" : "已关闭，仅保留本次会话";
+    };
+    const safeClientError = (error) => {
+      if (error?.name === "AbortError") return "控制器请求超时，请重试";
+      let detail = typeof error?.message === "string" ? error.message : "无法连接后台控制器";
+      detail = detail.split(data.control.token).join("[已隐去]").split(data.control.endpoint).join("本机控制端点");
+      detail = detail.replace(/[\\r\\n\\t]+/g, " ").slice(0, 160);
+      return detail.includes("控制器不可用") ? detail : "控制器不可用：" + detail;
+    };
+    const isRevision = (value) => Number.isSafeInteger(value) && value >= 0;
+    const requestPersistence = async (target) => {
+      if (pending || target === persistenceEnabled) return;
+      const previousEnabled = persistenceEnabled;
+      const requestRevision = controlRevision;
+      pending = true;
+      confirmation.hidden = true;
+      hideAlert();
+      paintPersistence();
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 3000);
+      try {
+        const response = await fetch(data.control.endpoint, {
+          method: "POST",
+          mode: "cors",
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          headers: {
+            "Content-Type": "application/json",
+            "X-HeiGe-Control-Token": data.control.token,
+          },
+          body: JSON.stringify({ revision: requestRevision, persistenceEnabled: target }),
+          signal: abortController.signal,
+        });
+        const body = await response.json();
+        if (response.ok) {
+          if (
+            body?.ok !== true ||
+            body.persistenceEnabled !== target ||
+            !isRevision(body.revision) ||
+            body.revision <= requestRevision
+          ) {
+            throw new Error("后台响应无效，开关未更改");
+          }
+          persistenceEnabled = target;
+          controlRevision = body.revision;
+          showAlert(target
+            ? "常驻已开启，下次启动继续使用皮肤。"
+            : "常驻已关闭。本次继续使用，下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。",
+          "success");
+        } else {
+          if (
+            body?.ok === false &&
+            body.persistenceEnabled === previousEnabled &&
+            isRevision(body.revision) &&
+            body.revision > requestRevision
+          ) {
+            controlRevision = body.revision;
+          }
+          const message = typeof body?.message === "string" && body.message.length <= 160
+            ? body.message
+            : "后台拒绝了常驻设置，开关未更改";
+          showAlert(message);
+        }
+      } catch (error) {
+        showAlert(error?.message?.includes("后台响应无效") ? error.message : safeClientError(error));
+      } finally {
+        clearTimeout(timeoutId);
+        pending = false;
+        paintPersistence();
+      }
+    };
+    const activatePersistenceSwitch = () => {
+      if (pending) return;
+      if (persistenceEnabled) {
+        hideAlert();
+        confirmation.hidden = false;
+        cancel.focus();
+      } else {
+        void requestPersistence(true);
+      }
+    };
+    persistenceSwitch.addEventListener("click", activatePersistenceSwitch);
+    persistenceSwitch.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activatePersistenceSwitch();
+    });
+    cancel.addEventListener("click", () => {
+      confirmation.hidden = true;
+      persistenceSwitch.focus();
+    });
+    confirm.addEventListener("click", () => { void requestPersistence(false); });
+    getPersistenceState = () => ({ persistenceEnabled, revision: controlRevision, pending });
+    paintPersistence();
+  }
+
   // ---- 隐藏按钮：收成半透明小圆点少占地方，点圆点恢复，状态跨重启保留 ----
   const readHidden = () => { try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
   const writeHidden = (value) => { try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
@@ -325,7 +566,7 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   if (readHidden()) setHidden(true, false);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
-  window.__heigeCodexSkin = { importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden };
+  window.__heigeCodexSkin = { importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden, getPersistenceState };
   return true;
 })()`;
 }

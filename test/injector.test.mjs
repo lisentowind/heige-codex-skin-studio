@@ -80,6 +80,23 @@ test("injects the in-app switcher menu with every loaded theme", async () => {
   assert.match(FakeSession.expressions[0], /"night-city"/);
 });
 
+test("passes the read-only persistence control descriptor into every main menu", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+  const control = {
+    available: true,
+    persistenceEnabled: false,
+    revision: 3,
+    endpoint: "http://127.0.0.1:43123/v1/persistence",
+    token: Buffer.alloc(32, 7).toString("base64url"),
+    launcherName: "HeiGe 皮肤启动器",
+  };
+  await applySkin({ loadedTheme: loaded, port: 9341, control, deps });
+  assert.match(FakeSession.expressions[0], /"persistenceEnabled":false/);
+  assert.match(FakeSession.expressions[0], /127\.0\.0\.1:43123\/v1\/persistence/);
+  assert.match(FakeSession.expressions[0], /persistence-switch/);
+});
+
 test("removes and checks the live style without persistent machinery", async () => {
   FakeSession.expressions = [];
   const { deps } = await fixture();

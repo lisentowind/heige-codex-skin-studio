@@ -12,5 +12,8 @@
     "status": "node src/cli.mjs status",
     "list": "node src/cli.mjs list",
     "apply": "node src/cli.mjs apply"
+  },
+  "devDependencies": {
+    "happy-dom": "20.10.6"
   }
 }
