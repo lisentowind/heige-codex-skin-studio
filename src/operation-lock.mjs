@@ -35,6 +35,7 @@ const SUPPORTED_FAULTS = new Set([
   "after-compact-sync",
   "after-compact-cleanup",
 ]);
+const leaseCapabilities = new WeakMap();
 
 class OperationLockError extends Error {
   constructor(code, message, options = undefined) {
@@ -108,11 +109,12 @@ function validatePaths(lockPathValue, stateRootValue) {
     withinRoot.startsWith(`..${sep}`) ||
     isAbsolute(withinRoot) ||
     basename(lockPath) === "" ||
-    dirname(lockPath) === parse(lockPath).root
+    dirname(lockPath) === parse(lockPath).root ||
+    lockPath !== join(stateRoot, "operation.lock")
   ) {
     throw lockError(
       "LOCK_PATH_INVALID",
-      "lockPath must be a file path strictly below the trusted stateRoot",
+      "lockPath must be the unique operation.lock directly below the trusted stateRoot",
     );
   }
   return { lockPath, stateRoot };
@@ -1077,6 +1079,7 @@ async function writeHeartbeat({ lockPath, claim, heartbeat, durability }) {
 
 function createLease({
   lockPath,
+  stateRoot,
   claim,
   now,
   durability,
@@ -1091,7 +1094,8 @@ function createLease({
         ? null
         : Object.freeze({ ...claim.owner.predecessor }),
   };
-  return Object.freeze({
+  let lease;
+  lease = Object.freeze({
     chainDepth,
     heartbeatPath,
     lockPath,
@@ -1106,35 +1110,129 @@ function createLease({
       return heartbeat;
     },
     async release() {
-      try {
-        await runStage(options, "before-release", { claim });
-        await assertClaimOwned(lockPath, claim);
-        return await publishReleaseMarker({
-          lockPath,
-          claim,
-          now,
-          durability,
-          options,
-        });
-      } catch (error) {
-        if (
-          error instanceof OperationLockError &&
-          error.code === "LOCK_NOT_OWNED" &&
-          error.ownershipLost === true
-        ) {
-          return false;
-        }
-        if (error instanceof OperationLockError && error.code === "LOCK_RELEASE_FAILED") {
-          throw error;
-        }
-        throw lockError(
-          "LOCK_RELEASE_FAILED",
-          `could not release operation lock claim ${claim.owner.nonce}`,
-          error,
-        );
-      }
+      return releaseOperationLease(lease);
     },
   });
+  leaseCapabilities.set(lease, {
+    claim,
+    commitTail: Promise.resolve(),
+    durability,
+    lifecycle: "active",
+    lockPath,
+    now,
+    options,
+    releasePromise: null,
+    stateRoot,
+  });
+  return lease;
+}
+
+function requireLeaseCapability(lease) {
+  const capability =
+    lease !== null && typeof lease === "object"
+      ? leaseCapabilities.get(lease)
+      : undefined;
+  if (
+    capability === undefined ||
+    capability.lockPath !== join(capability.stateRoot, "operation.lock")
+  ) {
+    throw lockError(
+      "LOCK_CAPABILITY_INVALID",
+      "a genuine operation lease for the unique trusted state-root lock is required",
+    );
+  }
+  return capability;
+}
+
+export function assertOperationLeaseCapability(lease) {
+  const capability = requireLeaseCapability(lease);
+  return Object.freeze({
+    lockPath: capability.lockPath,
+    stateRoot: capability.stateRoot,
+  });
+}
+
+async function assertCapabilityOwned(capability) {
+  await verifyRealDirectoryAncestors(capability.stateRoot);
+  const rootMetadata = await lstat(capability.stateRoot);
+  requirePrivateDirectory(rootMetadata, `trusted stateRoot ${capability.stateRoot}`);
+  return assertClaimOwned(capability.lockPath, capability.claim);
+}
+
+export async function guardOperationLease(lease) {
+  const capability = requireLeaseCapability(lease);
+  if (capability.lifecycle !== "active") {
+    throw notOwnedError("lease release has already started", { definitive: true });
+  }
+  await assertCapabilityOwned(capability);
+  return Object.freeze({
+    lockPath: capability.lockPath,
+    stateRoot: capability.stateRoot,
+  });
+}
+
+export function commitWithOperationLease(lease, commit) {
+  if (typeof commit !== "function") {
+    throw lockError("LOCK_COMMIT_INVALID", "lease commit callback must be a function");
+  }
+  const capability = requireLeaseCapability(lease);
+  if (capability.lifecycle !== "active") {
+    throw notOwnedError("lease release has already started", { definitive: true });
+  }
+
+  const previous = capability.commitTail;
+  const operation = (async () => {
+    await previous;
+    await assertCapabilityOwned(capability);
+    return commit();
+  })();
+  capability.commitTail = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+function releaseOperationLease(lease) {
+  const capability = requireLeaseCapability(lease);
+  if (capability.releasePromise !== null) return capability.releasePromise;
+  capability.lifecycle = "releasing";
+  capability.releasePromise = (async () => {
+    await capability.commitTail;
+    try {
+      await runStage(capability.options, "before-release", {
+        claim: capability.claim,
+      });
+      await assertClaimOwned(capability.lockPath, capability.claim);
+      const released = await publishReleaseMarker({
+        lockPath: capability.lockPath,
+        claim: capability.claim,
+        now: capability.now,
+        durability: capability.durability,
+        options: capability.options,
+      });
+      capability.lifecycle = "released";
+      return released;
+    } catch (error) {
+      if (
+        error instanceof OperationLockError &&
+        error.code === "LOCK_NOT_OWNED" &&
+        error.ownershipLost === true
+      ) {
+        capability.lifecycle = "released";
+        return false;
+      }
+      if (error instanceof OperationLockError && error.code === "LOCK_RELEASE_FAILED") {
+        throw error;
+      }
+      throw lockError(
+        "LOCK_RELEASE_FAILED",
+        `could not release operation lock claim ${capability.claim.owner.nonce}`,
+        error,
+      );
+    }
+  })();
+  return capability.releasePromise;
 }
 
 function ownerRecord({
@@ -1462,6 +1560,7 @@ export async function acquireOperationLock(options) {
         }
         const lease = createLease({
           lockPath,
+          stateRoot,
           claim,
           now,
           durability,

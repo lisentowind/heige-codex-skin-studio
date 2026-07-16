@@ -6,6 +6,7 @@ import {
   realpath,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -930,4 +931,121 @@ test("checkpoint failure and checkpoint rollback failure are both preserved", as
       return true;
     },
   );
+});
+
+test("a trusted state root has exactly one canonical operation lock path", async (t) => {
+  const { root } = await fixture(t);
+  const stateRoot = join(root, "state");
+
+  for (const name of ["a.lock", "b.lock"]) {
+    await assert.rejects(
+      acquireOperationLock(acquisitionOptions(join(stateRoot, name), { stateRoot })),
+      (error) => error.code === "LOCK_PATH_INVALID",
+    );
+  }
+  assert.equal(await exists(stateRoot), false);
+});
+
+test("lease capabilities cannot be forged or copied", async (t) => {
+  const { lockPath } = await fixture(t);
+  const module = await import("../src/operation-lock.mjs");
+  assert.equal(typeof module.assertOperationLeaseCapability, "function");
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+  t.after(() => lease.release());
+
+  const trusted = module.assertOperationLeaseCapability(lease);
+  assert.equal(trusted.stateRoot, dirname(lockPath));
+  assert.equal(trusted.lockPath, lockPath);
+  assert.throws(
+    () => module.assertOperationLeaseCapability({ ...lease }),
+    (error) => error.code === "LOCK_CAPABILITY_INVALID",
+  );
+});
+
+test("lease commit fences concurrent release until the atomic callback finishes", async (t) => {
+  const { lockPath } = await fixture(t);
+  const module = await import("../src/operation-lock.mjs");
+  assert.equal(typeof module.commitWithOperationLease, "function");
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+  const commitEntered = deferred();
+  const allowRename = deferred();
+  const stagedPath = join(dirname(lockPath), "state.tmp");
+  const statePath = join(dirname(lockPath), "state.json");
+  const order = [];
+  await writeFile(stagedPath, "new-state", { mode: 0o600 });
+
+  const commit = module.commitWithOperationLease(lease, async () => {
+    commitEntered.resolve();
+    await allowRename.promise;
+    await rename(stagedPath, statePath);
+    order.push("rename");
+  });
+  await commitEntered.promise;
+
+  let releaseSettled = false;
+  const release = lease.release().then((value) => {
+    releaseSettled = true;
+    order.push("release");
+    return value;
+  });
+  let successorSettled = false;
+  const successor = (async () => {
+    while (true) {
+      try {
+        const acquired = await acquireOperationLock(acquisitionOptions(lockPath, {
+          identity: OWNER,
+          readProcessIdentity: async (pid) =>
+            pid === lease.owner.pid ? lease.owner : null,
+        }));
+        successorSettled = true;
+        order.push("successor");
+        return acquired;
+      } catch (error) {
+        if (error.code !== "LOCK_HELD") throw error;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+  })();
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releaseSettled, false);
+  assert.equal(successorSettled, false);
+  assert.equal(await exists(statePath), false);
+
+  allowRename.resolve();
+  await commit;
+  assert.equal(await release, true);
+  const successorLease = await successor;
+  t.after(() => successorLease.release());
+  assert.deepEqual(order, ["rename", "release", "successor"]);
+  assert.equal(await readFile(statePath, "utf8"), "new-state");
+});
+
+test("release drains every commit accepted before release started", async (t) => {
+  const { lockPath } = await fixture(t);
+  const { commitWithOperationLease } = await import("../src/operation-lock.mjs");
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+  const entered = deferred();
+  const unblock = deferred();
+  const order = [];
+
+  const first = commitWithOperationLease(lease, async () => {
+    entered.resolve();
+    await unblock.promise;
+    order.push("first");
+  });
+  await entered.promise;
+  const second = commitWithOperationLease(lease, async () => {
+    order.push("second");
+  });
+  const release = lease.release().then((value) => {
+    order.push("release");
+    return value;
+  });
+
+  unblock.resolve();
+  await first;
+  await second;
+  assert.equal(await release, true);
+  assert.deepEqual(order, ["first", "second", "release"]);
 });

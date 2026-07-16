@@ -10,7 +10,7 @@ import {
   rm,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, parse, sep } from "node:path";
 
 import {
   DEFAULT_THEME_ID,
@@ -18,6 +18,11 @@ import {
   STATE_SCHEMA_VERSION,
 } from "./constants.mjs";
 import { sameProcessIdentity } from "./codex-app.mjs";
+import {
+  assertOperationLeaseCapability,
+  commitWithOperationLease,
+  guardOperationLease,
+} from "./operation-lock.mjs";
 
 const STATE_KEYS = [
   "schemaVersion",
@@ -53,6 +58,9 @@ const TRANSITION_STAGES = new Set(["prepared", "state-committed", "session-commi
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const TRANSITION_NONCE = /^[A-Za-z0-9_-]{1,256}$/;
+const STATE_FILE_NAME = "state.json";
+const SESSION_FILE_NAME = "session.json";
+const TRANSITION_FILE_NAME = "transition.json";
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -71,31 +79,23 @@ function isNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function requireLeaseForPaths(lease, paths) {
-  if (
-    lease === null ||
-    typeof lease !== "object" ||
-    typeof lease.lockPath !== "string" ||
-    typeof lease.assertOwned !== "function"
-  ) {
-    throw new Error("an operation lease with assertOwned() is required");
+async function mutationPath(lease, path, fileName) {
+  const capability = assertOperationLeaseCapability(lease);
+  if (process.platform === "win32") {
+    throw statePathError(
+      "STATE_MUTATION_UNSUPPORTED",
+      "Windows durability and ACL enforcement are not implemented; refusing before filesystem access",
+    );
   }
-  const parent = dirname(paths[0]);
-  if (
-    dirname(lease.lockPath) !== parent ||
-    paths.some((path) => dirname(path) !== parent)
-  ) {
-    throw new Error("operation lease and protected files must share the same state directory");
+  const expectedPath = join(capability.stateRoot, fileName);
+  if (path !== expectedPath) {
+    throw statePathError(
+      "STATE_PATH_INVALID",
+      `state mutation path must be the canonical ${fileName} below the leased stateRoot`,
+    );
   }
-  return lease;
-}
-
-async function assertLeaseOwned(lease) {
-  await lease.assertOwned();
-}
-
-function leaseWriteOptions(lease) {
-  return { beforeCommit: () => assertLeaseOwned(lease) };
+  await guardOperationLease(lease);
+  return expectedPath;
 }
 
 function validateThemeId(value, { allowNative = false, field = "主题 ID" } = {}) {
@@ -171,7 +171,44 @@ function enforcePosixFileSecurity(stats, kind) {
   }
 }
 
+function ancestorPaths(path) {
+  const root = parse(path).root;
+  const components = path.slice(root.length).split(sep).filter(Boolean);
+  const paths = [];
+  let current = root;
+  for (const component of components) {
+    current = join(current, component);
+    paths.push(current);
+  }
+  return paths;
+}
+
+async function verifyDirectoryAncestors(path) {
+  for (const current of ancestorPaths(path)) {
+    let stats;
+    try {
+      stats = await lstat(current);
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    if (stats.isSymbolicLink()) {
+      throw statePathError(
+        "STATE_PARENT_SYMLINK",
+        `状态路径祖先不得是符号链接：${current}`,
+      );
+    }
+    if (!stats.isDirectory()) {
+      throw statePathError(
+        "STATE_PARENT_TYPE_INVALID",
+        `状态路径祖先必须是目录：${current}`,
+      );
+    }
+  }
+}
+
 async function inspectPrivateJsonPath(path) {
+  await verifyDirectoryAncestors(dirname(path));
   let fileStats;
   try {
     fileStats = await lstat(path);
@@ -200,6 +237,7 @@ async function inspectPrivateJsonPath(path) {
 
 async function ensurePrivateParent(path) {
   const parent = dirname(path);
+  await verifyDirectoryAncestors(parent);
   const missing = [];
   let existing = parent;
 
@@ -268,12 +306,9 @@ async function syncDirectory(path) {
   }
 }
 
-async function atomicWriteJson(path, value, { faultAt, beforeCommit } = {}) {
+async function atomicWriteJson(path, value, { faultAt } = {}) {
   if (faultAt !== undefined && faultAt !== "after-temp-sync") {
     throw new Error("unknown state write fault injection point");
-  }
-  if (beforeCommit !== undefined && typeof beforeCommit !== "function") {
-    throw new Error("beforeCommit 必须是函数");
   }
   const parent = await ensurePrivateParent(path);
   const temporary = join(
@@ -297,10 +332,6 @@ async function atomicWriteJson(path, value, { faultAt, beforeCommit } = {}) {
         "injected crash after temporary state file sync",
       );
     }
-    // The lock cannot be reclaimed while its exact process identity is live.
-    // Keep this check immediately before rename so staging never widens that boundary.
-    if (beforeCommit !== undefined) await beforeCommit();
-
     await rename(temporary, path);
     renamed = true;
     await syncDirectory(parent);
@@ -403,9 +434,18 @@ export async function readStudioState(path) {
   });
 }
 
-export async function writeStudioState(path, value, options = undefined) {
+export async function writeStudioState(path, value, { lease, faultAt } = {}) {
   const state = validateStudioState(value);
-  return atomicWriteJson(path, state, options);
+  if (state.revision !== 0) {
+    throw new Error("state initialization requires revision 0");
+  }
+  path = await mutationPath(lease, path, STATE_FILE_NAME);
+  return commitWithOperationLease(lease, async () => {
+    if (await readStudioState(path) !== null) {
+      throw new Error("state already exists; initialization cannot overwrite it");
+    }
+    return atomicWriteJson(path, state, { faultAt });
+  });
 }
 
 async function readRequiredStudioState(path) {
@@ -427,27 +467,38 @@ export class StateConflictError extends Error {
   }
 }
 
-export async function compareAndUpdateStudioState(
+async function compareAndUpdateStudioStateWithinCommit(
   path,
-  { lease, expectedRevision, mutate } = {},
+  { expectedRevision, mutate, faultAt },
 ) {
-  requireLeaseForPaths(lease, [path]);
-  if (!isNonNegativeInteger(expectedRevision)) {
-    throw new Error("expectedRevision 必须是非负安全整数");
-  }
-  if (typeof mutate !== "function") throw new Error("mutate 必须是函数");
-
-  await assertLeaseOwned(lease);
   const current = await readRequiredStudioState(path);
-  await assertLeaseOwned(lease);
   if (current.revision !== expectedRevision) throw new StateConflictError(current);
   const mutated = mutate(structuredClone(current));
   const next = validateStudioState({
     ...mutated,
     revision: current.revision + 1,
   });
-  await assertLeaseOwned(lease);
-  return writeStudioState(path, next, leaseWriteOptions(lease));
+  return atomicWriteJson(path, next, { faultAt });
+}
+
+export async function compareAndUpdateStudioState(
+  path,
+  { lease, expectedRevision, mutate, faultAt } = {},
+) {
+  if (!isNonNegativeInteger(expectedRevision)) {
+    throw new Error("expectedRevision 必须是非负安全整数");
+  }
+  if (typeof mutate !== "function") throw new Error("mutate 必须是函数");
+
+  path = await mutationPath(lease, path, STATE_FILE_NAME);
+  return commitWithOperationLease(
+    lease,
+    () => compareAndUpdateStudioStateWithinCommit(path, {
+      expectedRevision,
+      mutate,
+      faultAt,
+    }),
+  );
 }
 
 function generateControlToken(randomBytes) {
@@ -467,58 +518,55 @@ export async function migrateLegacyState({
   defaultThemeId = DEFAULT_THEME_ID,
   randomBytes = cryptoRandomBytes,
 }) {
-  requireLeaseForPaths(lease, [statePath]);
-  await assertLeaseOwned(lease);
-  const existing = await readStudioState(statePath);
-  await assertLeaseOwned(lease);
-  if (existing !== null) {
-    return { state: existing, migratedFrom: null };
-  }
+  statePath = await mutationPath(lease, statePath, STATE_FILE_NAME);
   if (typeof legacyAgentLoaded !== "boolean") {
     throw new Error("legacyAgentLoaded 必须是布尔值");
   }
   if (typeof themeExists !== "function") throw new Error("themeExists 必须是函数");
 
-  let themeId = defaultThemeId;
-  let persistenceEnabled = false;
-  let revision = 0;
-  let migratedFrom = null;
+  return commitWithOperationLease(lease, async () => {
+    const existing = await readStudioState(statePath);
+    if (existing !== null) {
+      return { state: existing, migratedFrom: null };
+    }
 
-  if (legacyAgentLoaded) {
-    let legacyTheme;
-    try {
-      legacyTheme = await readFile(legacyThemePath, "utf8");
-    } catch (cause) {
-      throw new Error("旧版主题状态无效：无法读取主题文件", { cause });
+    let themeId = defaultThemeId;
+    let persistenceEnabled = false;
+    let migratedFrom = null;
+    if (legacyAgentLoaded) {
+      let legacyTheme;
+      try {
+        legacyTheme = await readFile(legacyThemePath, "utf8");
+      } catch (cause) {
+        throw new Error("旧版主题状态无效：无法读取主题文件", { cause });
+      }
+      themeId = legacyTheme.trim();
+      try {
+        validateThemeId(themeId, { field: "旧版主题 ID" });
+      } catch (cause) {
+        throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
+      }
+      if (await themeExists(themeId) !== true) {
+        throw new Error("旧版主题状态无效：主题不存在");
+      }
+      persistenceEnabled = true;
+      migratedFrom = "watchdog";
+    } else {
+      validateThemeId(themeId, { field: "默认主题 ID" });
+      if (await themeExists(themeId) !== true) {
+        throw new Error("默认主题不存在，拒绝创建状态");
+      }
     }
-    themeId = legacyTheme.trim();
-    try {
-      validateThemeId(themeId, { field: "旧版主题 ID" });
-    } catch (cause) {
-      throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
-    }
-    if (await themeExists(themeId) !== true) {
-      throw new Error("旧版主题状态无效：主题不存在");
-    }
-    persistenceEnabled = true;
-    revision = 1;
-    migratedFrom = "watchdog";
-  } else {
-    validateThemeId(themeId, { field: "默认主题 ID" });
-    if (await themeExists(themeId) !== true) {
-      throw new Error("默认主题不存在，拒绝创建状态");
-    }
-  }
 
-  await assertLeaseOwned(lease);
-  const token = generateControlToken(randomBytes);
-  const state = validateStudioState({
-    ...createDefaultStudioState({ themeId, token }),
-    persistenceEnabled,
-    revision,
+    const token = generateControlToken(randomBytes);
+    const state = validateStudioState({
+      ...createDefaultStudioState({ themeId, token }),
+      persistenceEnabled,
+      revision: persistenceEnabled ? 1 : 0,
+    });
+    await atomicWriteJson(statePath, state);
+    return { state, migratedFrom };
   });
-  await writeStudioState(statePath, state, leaseWriteOptions(lease));
-  return { state, migratedFrom };
 }
 
 export function validateSessionState(value) {
@@ -572,9 +620,17 @@ export async function readSessionState(path) {
   });
 }
 
-export async function writeSessionState(path, value, options = undefined) {
+async function writeSessionStateWithinCommit(path, session, { faultAt } = {}) {
+  return atomicWriteJson(path, session, { faultAt });
+}
+
+export async function writeSessionState(path, value, { lease, faultAt } = {}) {
   const session = validateSessionState(value);
-  return atomicWriteJson(path, session, options);
+  path = await mutationPath(lease, path, SESSION_FILE_NAME);
+  return commitWithOperationLease(
+    lease,
+    () => writeSessionStateWithinCommit(path, session, { faultAt }),
+  );
 }
 
 export function validateTransitionJournal(value) {
@@ -616,19 +672,63 @@ export async function readTransitionJournal(path) {
   });
 }
 
-export async function writeTransitionJournal(path, value, options = undefined) {
-  const journal = validateTransitionJournal(value);
-  return atomicWriteJson(path, journal, options);
+async function writeTransitionJournalWithinCommit(path, journal, { faultAt } = {}) {
+  const existing = await readTransitionJournal(path);
+  if (existing === null) {
+    if (journal.stage !== "prepared") {
+      throw new Error("transition journal must begin at prepared stage");
+    }
+  } else {
+    const immutableKeys = TRANSITION_KEYS.filter((key) => key !== "stage");
+    if (immutableKeys.some((key) => existing[key] !== journal[key] &&
+      JSON.stringify(existing[key]) !== JSON.stringify(journal[key]))) {
+      throw new Error("transition journal immutable fields and nonce cannot change");
+    }
+    const stages = [...TRANSITION_STAGES];
+    const currentIndex = stages.indexOf(existing.stage);
+    const nextIndex = stages.indexOf(journal.stage);
+    if (nextIndex !== currentIndex && nextIndex !== currentIndex + 1) {
+      throw new Error("transition journal stage must advance monotonically one step");
+    }
+  }
+  return atomicWriteJson(path, journal, { faultAt });
 }
 
-export async function clearTransitionJournal(path) {
+export async function writeTransitionJournal(path, value, { lease, faultAt } = {}) {
+  const journal = validateTransitionJournal(value);
+  path = await mutationPath(lease, path, TRANSITION_FILE_NAME);
+  return commitWithOperationLease(
+    lease,
+    () => writeTransitionJournalWithinCommit(path, journal, { faultAt }),
+  );
+}
+
+async function clearTransitionJournalWithinCommit(path, nonce) {
+  const journal = await readTransitionJournal(path);
+  if (journal === null) return false;
+  if (journal.nonce !== nonce) {
+    throw new Error("transition journal nonce does not match clear request");
+  }
+  if (journal.stage !== "session-committed") {
+    throw new Error("transition journal cannot clear before session-committed stage");
+  }
   try {
     await unlink(path);
   } catch (error) {
-    if (error.code === "ENOENT") return;
+    if (error.code === "ENOENT") return false;
     throw error;
   }
   await syncDirectory(dirname(path));
+  return true;
+}
+
+export async function clearTransitionJournal(path, { lease, nonce } = {}) {
+  path = await mutationPath(lease, path, TRANSITION_FILE_NAME);
+  nonce = validateNonce(nonce);
+  return commitWithOperationLease(
+    lease,
+    () => clearTransitionJournalWithinCommit(path, nonce),
+  );
 }
 
 export class TransitionConflictError extends Error {
@@ -691,68 +791,64 @@ export async function recoverStateTransition({
   lease,
   currentProcess,
 }) {
-  requireLeaseForPaths(lease, [statePath, sessionPath, transitionPath]);
-  await assertLeaseOwned(lease);
-  let journal = await readTransitionJournal(transitionPath);
-  await assertLeaseOwned(lease);
-  if (journal === null) {
-    const state = await readStudioState(statePath);
-    const session = await readSessionState(sessionPath);
-    await assertLeaseOwned(lease);
-    return {
-      state,
-      session,
-      recovered: false,
-    };
-  }
+  statePath = await mutationPath(lease, statePath, STATE_FILE_NAME);
+  sessionPath = await mutationPath(lease, sessionPath, SESSION_FILE_NAME);
+  transitionPath = await mutationPath(lease, transitionPath, TRANSITION_FILE_NAME);
   if (currentProcess !== null && currentProcess !== undefined) {
     currentProcess = validateProcessIdentity(currentProcess);
   } else {
     currentProcess = null;
   }
+  return commitWithOperationLease(lease, async () => {
+    let journal = await readTransitionJournal(transitionPath);
+    if (journal === null) {
+      const state = await readStudioState(statePath);
+      const session = await readSessionState(sessionPath);
+      return { state, session, recovered: false };
+    }
 
-  let state = await readRequiredStudioState(statePath);
-  await assertLeaseOwned(lease);
-  if (journal.stage === "prepared" && state.revision === journal.expectedRevision) {
-    state = await compareAndUpdateStudioState(statePath, {
-      lease,
-      expectedRevision: journal.expectedRevision,
-      mutate: (current) => ({
-        ...current,
-        persistenceEnabled: journal.desiredPersistenceEnabled,
-        lastTransitionNonce: journal.nonce,
-      }),
-    });
-    await assertLeaseOwned(lease);
-    journal = await writeTransitionJournal(transitionPath, {
-      ...journal,
-      stage: "state-committed",
-    }, leaseWriteOptions(lease));
-  } else if (journal.stage === "prepared" && isCommittedTransition(state, journal)) {
-    await assertLeaseOwned(lease);
-    journal = await writeTransitionJournal(transitionPath, {
-      ...journal,
-      stage: "state-committed",
-    }, leaseWriteOptions(lease));
-  } else if (journal.stage === "prepared") {
-    throw new TransitionConflictError(state, journal);
-  }
+    let state = await readRequiredStudioState(statePath);
+    if (journal.stage === "prepared" && state.revision === journal.expectedRevision) {
+      state = await compareAndUpdateStudioStateWithinCommit(statePath, {
+        expectedRevision: journal.expectedRevision,
+        mutate: (current) => ({
+          ...current,
+          persistenceEnabled: journal.desiredPersistenceEnabled,
+          lastTransitionNonce: journal.nonce,
+        }),
+      });
+      journal = validateTransitionJournal({
+        ...journal,
+        stage: "state-committed",
+      });
+      await writeTransitionJournalWithinCommit(transitionPath, journal);
+    } else if (journal.stage === "prepared" && isCommittedTransition(state, journal)) {
+      journal = validateTransitionJournal({
+        ...journal,
+        stage: "state-committed",
+      });
+      await writeTransitionJournalWithinCommit(transitionPath, journal);
+    } else if (journal.stage === "prepared") {
+      throw new TransitionConflictError(state, journal);
+    }
 
-  if (!isCommittedTransition(state, journal)) {
-    throw new TransitionConflictError(state, journal);
-  }
+    if (!isCommittedTransition(state, journal)) {
+      throw new TransitionConflictError(state, journal);
+    }
 
-  const session = sessionForTransition(state, journal, currentProcess);
-  await assertLeaseOwned(lease);
-  await writeSessionState(sessionPath, session, leaseWriteOptions(lease));
-  if (journal.stage !== "session-committed") {
-    await assertLeaseOwned(lease);
-    journal = await writeTransitionJournal(transitionPath, {
-      ...journal,
-      stage: "session-committed",
-    }, leaseWriteOptions(lease));
-  }
-  await assertLeaseOwned(lease);
-  await clearTransitionJournal(transitionPath);
-  return { state, session, recovered: true };
+    const session = sessionForTransition(state, journal, currentProcess);
+    await writeSessionStateWithinCommit(
+      sessionPath,
+      validateSessionState(session),
+    );
+    if (journal.stage !== "session-committed") {
+      journal = validateTransitionJournal({
+        ...journal,
+        stage: "session-committed",
+      });
+      await writeTransitionJournalWithinCommit(transitionPath, journal);
+    }
+    await clearTransitionJournalWithinCommit(transitionPath, journal.nonce);
+    return { state, session, recovered: true };
+  });
 }
