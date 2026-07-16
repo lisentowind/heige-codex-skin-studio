@@ -337,8 +337,55 @@ async function fixture(t, overrides = {}) {
     openCalls,
     deletedPaths,
     faultAt: overrides.faultAt,
+    hardCrashAt: overrides.hardCrashAt,
     rollbackFaultAt: overrides.rollbackFaultAt,
   };
+}
+
+async function installKnownHermesController(deps, {
+  extraArguments = [],
+  nodeVersion = "v22.17.0",
+  symlinkNode = false,
+  mode = 0o640,
+} = {}) {
+  const hermesNode = join(deps.home, ".hermes", "node", "bin", "node");
+  await fsPromises.mkdir(dirname(hermesNode), { recursive: true });
+  if (symlinkNode) {
+    const backing = join(deps.home, ".hermes", "node", "bin", "node-real");
+    await writeFile(backing, "#!/bin/sh\n", { mode: 0o755 });
+    await fsPromises.chmod(backing, 0o755);
+    await symlink(backing, hermesNode);
+  } else {
+    await writeFile(hermesNode, "#!/bin/sh\n", { mode: 0o755 });
+    await fsPromises.chmod(hermesNode, 0o755);
+  }
+  const bytes = Buffer.from(renderControllerPlist({
+    label: deps.label,
+    programArguments: [hermesNode, deps.controllerPath, "controller", ...extraArguments],
+    stateDir: deps.stateDir,
+  }));
+  await writeFile(deps.controllerPlistPath, bytes, { mode });
+  await fsPromises.chmod(deps.controllerPlistPath, mode);
+  deps.loaded.add(deps.label);
+  const originalExecFile = deps.execFile;
+  deps.execFile = async (file, args) => {
+    if (file === hermesNode && args[0] === "--input-type=module" && args[1] === "--eval") {
+      const nonce = args.at(-1);
+      return {
+        stdout: `${JSON.stringify({
+          nonce,
+          pid: 4343,
+          execPath: hermesNode,
+          version: nodeVersion,
+          release: "node",
+          controllerPath: deps.controllerPath,
+        })}\n`,
+        stderr: "",
+      };
+    }
+    return originalExecFile(file, args);
+  };
+  return { bytes, hermesNode, mode };
 }
 
 test("test mode refuses both production labels", async (t) => {
@@ -1318,6 +1365,162 @@ const MIGRATION_BOUNDARIES = [
   "after-old-remove",
 ];
 
+const DURABLE_MIGRATION_BOUNDARIES = [
+  "after-journal",
+  "after-new-stage",
+  "after-new-lint",
+  "after-new-publish",
+  "after-new-bootstrap",
+  "after-new-verify",
+  "after-old-bootout",
+  "after-old-verify",
+  "after-old-remove",
+];
+
+for (const hardCrashAt of DURABLE_MIGRATION_BOUNDARIES) {
+  test(`next migration durably recovers a hard crash after ${hardCrashAt}`, async (t) => {
+    const deps = await fixture(t, { hardCrashAt, oldLoaded: true });
+    await assert.rejects(
+      migrateLegacyWatchdog(deps),
+      (error) => error.code === "SIMULATED_HARD_CRASH" && error.phase === hardCrashAt,
+    );
+    assert.equal(await pathExists(deps.journalPath), true);
+
+    await assert.rejects(
+      migrateLegacyWatchdog({
+        ...deps,
+        hardCrashAt: undefined,
+        faultAt: "after-journal",
+      }),
+      /INJECTED_MIGRATION_FAILURE/,
+    );
+
+    assert.equal(deps.loaded.has(deps.oldLabel), true);
+    assert.equal(deps.loaded.has(deps.label), false);
+    assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+    assert.equal((await stat(deps.oldPlistPath)).mode & 0o777, 0o640);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+    assert.equal(await pathExists(deps.journalPath), false);
+  });
+}
+
+test("hard-crash recovery restores an existing Hermes controller pre-state", async (t) => {
+  const deps = await fixture(t, { hardCrashAt: "after-old-remove" });
+  const legacy = await installKnownHermesController(deps, { mode: 0o640 });
+
+  await assert.rejects(
+    migrateLegacyWatchdog(deps),
+    (error) => error.code === "SIMULATED_HARD_CRASH",
+  );
+  await assert.rejects(
+    migrateLegacyWatchdog({
+      ...deps,
+      hardCrashAt: undefined,
+      faultAt: "after-journal",
+    }),
+    /INJECTED_MIGRATION_FAILURE/,
+  );
+
+  assert.deepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+  assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+  assert.equal(await pathExists(deps.journalPath), false);
+});
+
+test("hard-crash recovery preserves a foreign staged path and fails closed", async (t) => {
+  const deps = await fixture(t, { hardCrashAt: "after-new-stage" });
+  await assert.rejects(migrateLegacyWatchdog(deps), /SIMULATED_HARD_CRASH/);
+  const journal = JSON.parse(await readFile(deps.journalPath, "utf8"));
+  const foreign = Buffer.from("foreign staged path\n");
+  await writeFile(journal.forward.stagedPath, foreign, { mode: 0o600 });
+  deps.commands.length = 0;
+
+  await assert.rejects(
+    migrateLegacyWatchdog({ ...deps, hardCrashAt: undefined }),
+    (error) => error.code === "MIGRATION_RECOVERY_CONFLICT",
+  );
+
+  assert.deepEqual(await readFile(journal.forward.stagedPath), foreign);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+  assert.equal(deps.loaded.has(deps.label), false);
+  assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+});
+
+test("hard-crash recovery preserves a foreign canonical controller and fails closed", async (t) => {
+  const deps = await fixture(t, { hardCrashAt: "after-new-publish" });
+  await assert.rejects(migrateLegacyWatchdog(deps), /SIMULATED_HARD_CRASH/);
+  const foreign = Buffer.from("foreign canonical controller\n");
+  await writeFile(deps.controllerPlistPath, foreign, { mode: 0o600 });
+  deps.commands.length = 0;
+
+  await assert.rejects(
+    migrateLegacyWatchdog({ ...deps, hardCrashAt: undefined }),
+    (error) => error.code === "MIGRATION_RECOVERY_CONFLICT",
+  );
+
+  assert.deepEqual(await readFile(deps.controllerPlistPath), foreign);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+  assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+});
+
+test("migration refuses a non-private or symlinked recovery journal before service mutation", async (t) => {
+  await t.test("mode 0644", async (t) => {
+    const deps = await fixture(t, { hardCrashAt: "after-journal" });
+    await assert.rejects(migrateLegacyWatchdog(deps), /SIMULATED_HARD_CRASH/);
+    await fsPromises.chmod(deps.journalPath, 0o644);
+    deps.commands.length = 0;
+    await assert.rejects(
+      migrateLegacyWatchdog({ ...deps, hardCrashAt: undefined }),
+      (error) => error.code === "MIGRATION_INCOMPLETE",
+    );
+    assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+  });
+
+  await t.test("symlink", async (t) => {
+    const deps = await fixture(t);
+    await fsPromises.mkdir(deps.stateDir, { recursive: true });
+    const backing = join(deps.stateDir, "journal-backing.json");
+    await writeFile(backing, "{}\n", { mode: 0o600 });
+    await symlink(backing, deps.journalPath);
+    deps.commands.length = 0;
+    await assert.rejects(migrateLegacyWatchdog(deps), /non-regular file/i);
+    assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+  });
+});
+
+test("migration aborts if loaded state changes immediately before the first mutation", async (t) => {
+  const deps = await fixture(t);
+  const originalExecFile = deps.execFile;
+  let oldPrints = 0;
+  deps.execFile = async (file, args) => {
+    if (
+      file === "/bin/launchctl" &&
+      args[0] === "print" &&
+      args[1].endsWith(`/${deps.oldLabel}`)
+    ) {
+      oldPrints += 1;
+      if (oldPrints === 2) deps.loaded.delete(deps.oldLabel);
+    }
+    return originalExecFile(file, args);
+  };
+
+  await assert.rejects(
+    migrateLegacyWatchdog(deps),
+    (error) => error.code === "MIGRATION_PRESTATE_CHANGED",
+  );
+
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), false, "external state change is not undone");
+  assert.equal(deps.loaded.has(deps.label), false);
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(await pathExists(deps.journalPath), false);
+  assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+});
+
 for (const faultAt of MIGRATION_BOUNDARIES) {
   test(`migration rolls back byte-for-byte after ${faultAt}`, async (t) => {
     const deps = await fixture(t, { faultAt, oldLoaded: true });
@@ -1355,6 +1558,62 @@ test("migration rollback restores an existing controller plist, mode, and loaded
 
   await assert.rejects(migrateLegacyWatchdog(deps), /INJECTED_MIGRATION_FAILURE/);
   assert.deepEqual(await readFile(deps.controllerPlistPath), previous);
+  assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+});
+
+test("migration upgrades only the exact known Hermes controller tuple", async (t) => {
+  const deps = await fixture(t);
+  const legacy = await installKnownHermesController(deps);
+
+  const result = await migrateLegacyWatchdog(deps);
+
+  assert.equal(result.controllerRegistered, true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.notDeepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+  assert.deepEqual(
+    renderedProgramArguments(await readFile(deps.controllerPlistPath, "utf8")),
+    [
+      deps.nodePath,
+      deps.controllerPath,
+      "controller",
+      "--background",
+      "--platform",
+      "darwin",
+      "--task-name",
+      deps.label,
+    ],
+  );
+});
+
+for (const [name, options, pattern] of [
+  ["extra argument", { extraArguments: ["--foreign"] }, /attribution failed/i],
+  ["symlinked node", { symlinkNode: true }, /regular executable|attribution/i],
+  ["Node below 22", { nodeVersion: "v20.19.4" }, /Node 22/i],
+]) {
+  test(`migration rejects known Hermes tuple with ${name}`, async (t) => {
+    const deps = await fixture(t);
+    const legacy = await installKnownHermesController(deps, options);
+    deps.commands.length = 0;
+
+    await assert.rejects(migrateLegacyWatchdog(deps), pattern);
+
+    assert.deepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+    assert.equal(deps.loaded.has(deps.label), true);
+    assert.equal(deps.loaded.has(deps.oldLabel), true);
+    assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+  });
+}
+
+test("migration rollback restores the known Hermes controller bytes, mode, and loaded state", async (t) => {
+  const deps = await fixture(t, { faultAt: "after-old-bootout" });
+  const legacy = await installKnownHermesController(deps, { mode: 0o640 });
+
+  await assert.rejects(migrateLegacyWatchdog(deps), /INJECTED_MIGRATION_FAILURE/);
+
+  assert.deepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
   assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
   assert.equal(deps.loaded.has(deps.label), true);
   assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);

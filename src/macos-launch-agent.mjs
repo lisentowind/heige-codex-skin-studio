@@ -17,6 +17,22 @@ const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const HANDSHAKE_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const NOT_FOUND_CODES = new Set([3, 113, "3", "113"]);
 const PLIST_BACKUP_MAX_BYTES = 256 * 1024;
+const MIGRATION_JOURNAL_MAX_BYTES = 1024 * 1024;
+const MIGRATION_PHASES = new Set([
+  "prepared",
+  "after-journal",
+  "after-new-stage",
+  "after-new-lint",
+  "after-existing-new-bootout",
+  "after-new-publish",
+  "after-new-bootstrap",
+  "after-new-verify",
+  "after-old-bootout",
+  "after-old-verify",
+  "after-old-remove",
+  "awaiting-outer-commit",
+  "rollback-failed",
+]);
 const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
   "home",
   "launchAgentsDir",
@@ -27,6 +43,7 @@ const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
   "execFile",
   "readPlist",
   "faultAt",
+  "hardCrashAt",
   "rollbackFaultAt",
   "journalPath",
   "oldPlistPath",
@@ -129,6 +146,15 @@ function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  return isRecord(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
 function assertProductionPlatformIsNotInjected(input) {
   if (input.testMode === true) return;
   if (PRODUCTION_PLATFORM_OVERRIDE_KEYS.some((key) => hasOwn(input, key))) {
@@ -169,38 +195,25 @@ function validateProgramArguments(programArguments) {
   }
 }
 
-async function resolveStableRuntime(options) {
-  const resolvedRuntime = options.runtimePathsExplicit
-    ? { nodePath: options.nodePath, controllerPath: options.controllerPath }
-    : await resolveTrustedProductionRuntime(options);
-  assertAbsolutePath(resolvedRuntime.nodePath, "nodePath");
-  assertAbsolutePath(resolvedRuntime.controllerPath, "controllerPath");
-  assertAbsolutePath(options.stableInstallRoot, "stableInstallRoot");
-
-  const expectedController = resolve(join(options.stableInstallRoot, "src", "cli.mjs"));
-  if (resolve(resolvedRuntime.controllerPath) !== expectedController) {
-    throw new Error("production LaunchAgent must use the stable controller entrypoint");
+async function validateControllerRuntime(options, {
+  nodePath,
+  controllerPath,
+  requireCanonicalNode = false,
+}) {
+  assertAbsolutePath(nodePath, "nodePath");
+  assertAbsolutePath(controllerPath, "controllerPath");
+  const nodePathInfo = await options.fs.lstat(nodePath);
+  if (
+    nodePathInfo.isSymbolicLink() ||
+    !nodePathInfo.isFile() ||
+    (nodePathInfo.mode & 0o111) === 0
+  ) {
+    throw new Error("nodePath must be a real regular executable");
   }
-
-  const rootInfo = await options.fs.lstat(options.stableInstallRoot);
-  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
-    throw new Error("stable controller entrypoint root must be a real directory");
+  const realNode = await options.fs.realpath(nodePath);
+  if (requireCanonicalNode && realNode !== resolve(nodePath)) {
+    throw new Error("nodePath must be canonical");
   }
-  const realRoot = await options.fs.realpath(options.stableInstallRoot);
-  if (realRoot !== resolve(options.stableInstallRoot)) {
-    throw new Error("stable controller entrypoint root must be canonical");
-  }
-
-  const controllerInfo = await options.fs.lstat(resolvedRuntime.controllerPath);
-  if (controllerInfo.isSymbolicLink() || !controllerInfo.isFile()) {
-    throw new Error("stable controller entrypoint must be a regular file");
-  }
-  const realController = await options.fs.realpath(resolvedRuntime.controllerPath);
-  if (realController !== join(realRoot, "src", "cli.mjs")) {
-    throw new Error("production LaunchAgent must use the stable controller entrypoint");
-  }
-
-  const realNode = await options.fs.realpath(resolvedRuntime.nodePath);
   const nodeInfo = await options.fs.lstat(realNode);
   if (!nodeInfo.isFile() || (nodeInfo.mode & 0o111) === 0) {
     throw new Error("nodePath must resolve to a regular executable");
@@ -208,6 +221,12 @@ async function resolveStableRuntime(options) {
   if (!options.testMode && isTemporaryPath(realNode)) {
     throw new Error("nodePath must resolve to a stable non-temporary executable");
   }
+
+  const controllerInfo = await options.fs.lstat(controllerPath);
+  if (controllerInfo.isSymbolicLink() || !controllerInfo.isFile()) {
+    throw new Error("stable controller entrypoint must be a regular file");
+  }
+  const realController = await options.fs.realpath(controllerPath);
   const nonce = randomUUID();
   let health;
   try {
@@ -251,6 +270,38 @@ process.stdout.write(JSON.stringify({
     throw new Error("controller runtime requires Node 22 or newer");
   }
   return { nodePath: realNode, controllerPath: realController };
+}
+
+async function resolveStableRuntime(options) {
+  const resolvedRuntime = options.runtimePathsExplicit
+    ? { nodePath: options.nodePath, controllerPath: options.controllerPath }
+    : await resolveTrustedProductionRuntime(options);
+  assertAbsolutePath(resolvedRuntime.nodePath, "nodePath");
+  assertAbsolutePath(resolvedRuntime.controllerPath, "controllerPath");
+  assertAbsolutePath(options.stableInstallRoot, "stableInstallRoot");
+
+  const expectedController = resolve(join(options.stableInstallRoot, "src", "cli.mjs"));
+  if (resolve(resolvedRuntime.controllerPath) !== expectedController) {
+    throw new Error("production LaunchAgent must use the stable controller entrypoint");
+  }
+
+  const rootInfo = await options.fs.lstat(options.stableInstallRoot);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new Error("stable controller entrypoint root must be a real directory");
+  }
+  const realRoot = await options.fs.realpath(options.stableInstallRoot);
+  if (realRoot !== resolve(options.stableInstallRoot)) {
+    throw new Error("stable controller entrypoint root must be canonical");
+  }
+
+  const runtime = await validateControllerRuntime(options, {
+    nodePath: resolvedRuntime.nodePath,
+    controllerPath: resolvedRuntime.controllerPath,
+  });
+  if (runtime.controllerPath !== join(realRoot, "src", "cli.mjs")) {
+    throw new Error("production LaunchAgent must use the stable controller entrypoint");
+  }
+  return runtime;
 }
 
 async function commandText(options, file, args, stream = "stdout") {
@@ -968,9 +1019,27 @@ function safeError(error) {
   };
 }
 
-function assertControllerPlistAttribution(options, plist, programArguments) {
+function controllerPlistShapeMatches(options, plist) {
   const expectedStdout = join(options.stateDir, "controller.log");
   const expectedStderr = join(options.stateDir, "controller.error.log");
+  const exactTopLevelKeys = Object.keys(plist).length === CONTROLLER_PLIST_KEYS.size &&
+    Object.keys(plist).every((key) => CONTROLLER_PLIST_KEYS.has(key));
+  const exactKeepAliveKeys = plist.KeepAlive !== null &&
+    typeof plist.KeepAlive === "object" &&
+    !Array.isArray(plist.KeepAlive) &&
+    Object.keys(plist.KeepAlive).length === 1 &&
+    hasOwn(plist.KeepAlive, "SuccessfulExit");
+  return exactTopLevelKeys &&
+    exactKeepAliveKeys &&
+    plist.Label === options.label &&
+    plist.RunAtLoad === true &&
+    plist.KeepAlive?.SuccessfulExit === false &&
+    plist.ProcessType === "Background" &&
+    plist.StandardOutPath === expectedStdout &&
+    plist.StandardErrorPath === expectedStderr;
+}
+
+function assertControllerPlistAttribution(options, plist, programArguments) {
   const actualArguments = plist.ProgramArguments;
   const exactArguments = Array.isArray(actualArguments) &&
     actualArguments.length === programArguments.length &&
@@ -992,23 +1061,9 @@ function assertControllerPlistAttribution(options, plist, programArguments) {
     actualArguments.length === 3 &&
     actualArguments.every((value, index) => value === controllerBase[index]);
   const matchesArguments = exactArguments || safeHandshakeArguments || baseControllerArguments;
-  const exactTopLevelKeys = Object.keys(plist).length === CONTROLLER_PLIST_KEYS.size &&
-    Object.keys(plist).every((key) => CONTROLLER_PLIST_KEYS.has(key));
-  const exactKeepAliveKeys = plist.KeepAlive !== null &&
-    typeof plist.KeepAlive === "object" &&
-    !Array.isArray(plist.KeepAlive) &&
-    Object.keys(plist.KeepAlive).length === 1 &&
-    hasOwn(plist.KeepAlive, "SuccessfulExit");
   if (
-    !exactTopLevelKeys ||
-    !exactKeepAliveKeys ||
-    plist.Label !== options.label ||
     !matchesArguments ||
-    plist.RunAtLoad !== true ||
-    plist.KeepAlive?.SuccessfulExit !== false ||
-    plist.ProcessType !== "Background" ||
-    plist.StandardOutPath !== expectedStdout ||
-    plist.StandardErrorPath !== expectedStderr
+    !controllerPlistShapeMatches(options, plist)
   ) {
     const error = new Error("existing controller plist attribution failed");
     error.code = "CONTROLLER_PRESTATE_INVALID";
@@ -1016,10 +1071,52 @@ function assertControllerPlistAttribution(options, plist, programArguments) {
   }
 }
 
+async function assertMigrationControllerPlistAttribution(options, plist, programArguments) {
+  try {
+    assertControllerPlistAttribution(options, plist, programArguments);
+    return "current";
+  } catch (error) {
+    if (error?.code !== "CONTROLLER_PRESTATE_INVALID") throw error;
+  }
+
+  const expectedNode = resolve(join(options.home, ".hermes", "node", "bin", "node"));
+  const expectedController = resolve(join(options.stableInstallRoot, "src", "cli.mjs"));
+  const actualArguments = plist.ProgramArguments;
+  const exactKnownLegacyTuple = Array.isArray(actualArguments) &&
+    actualArguments.length === 3 &&
+    actualArguments[0] === expectedNode &&
+    actualArguments[1] === expectedController &&
+    actualArguments[2] === "controller";
+  if (!exactKnownLegacyTuple || !controllerPlistShapeMatches(options, plist)) {
+    const error = new Error("existing controller plist attribution failed");
+    error.code = "CONTROLLER_PRESTATE_INVALID";
+    throw error;
+  }
+  const runtime = await validateControllerRuntime(options, {
+    nodePath: expectedNode,
+    controllerPath: expectedController,
+    requireCanonicalNode: true,
+  });
+  if (runtime.nodePath !== expectedNode || runtime.controllerPath !== expectedController) {
+    const error = new Error("known Hermes controller runtime attribution failed");
+    error.code = "CONTROLLER_PRESTATE_INVALID";
+    throw error;
+  }
+  return "legacy-hermes";
+}
+
 function injectedFailure(phase) {
   const error = new Error(`INJECTED_MIGRATION_FAILURE at ${phase}`);
   error.code = "INJECTED_MIGRATION_FAILURE";
   error.phase = phase;
+  return error;
+}
+
+function injectedHardCrash(phase) {
+  const error = new Error(`SIMULATED_HARD_CRASH at ${phase}`);
+  error.code = "SIMULATED_HARD_CRASH";
+  error.phase = phase;
+  error.simulatedHardCrash = true;
   return error;
 }
 
@@ -1136,6 +1233,305 @@ function recoveryBackup(path, snapshot, loaded) {
     mode: snapshot?.mode ?? null,
     loaded,
   };
+}
+
+function migrationJournalError(message, cause = undefined) {
+  const error = new Error(`invalid LaunchAgent migration journal: ${message}`, cause === undefined
+    ? undefined
+    : { cause });
+  error.code = "MIGRATION_INCOMPLETE";
+  return error;
+}
+
+function decodeJournalBytes(value, field) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw migrationJournalError(`${field} is not canonical base64`);
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length > PLIST_BACKUP_MAX_BYTES || bytes.toString("base64") !== value) {
+    throw migrationJournalError(`${field} is not canonical bounded base64`);
+  }
+  return bytes;
+}
+
+function validateJournalBackup(value, expectedPath, field) {
+  const keys = ["bytesBase64", "existed", "loaded", "mode", "path", "sha256"];
+  if (!hasExactKeys(value, keys) || value.path !== expectedPath || typeof value.loaded !== "boolean") {
+    throw migrationJournalError(`${field} schema or path is invalid`);
+  }
+  if (typeof value.existed !== "boolean") {
+    throw migrationJournalError(`${field}.existed is invalid`);
+  }
+  if (!value.existed) {
+    if (
+      value.bytesBase64 !== null ||
+      value.sha256 !== null ||
+      value.mode !== null ||
+      value.loaded
+    ) {
+      throw migrationJournalError(`${field} absent-state invariant is invalid`);
+    }
+    return { ...value, bytes: null };
+  }
+  if (!Number.isInteger(value.mode) || value.mode < 0 || value.mode > 0o777) {
+    throw migrationJournalError(`${field}.mode is invalid`);
+  }
+  const bytes = decodeJournalBytes(value.bytesBase64, `${field}.bytesBase64`);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (!/^[a-f0-9]{64}$/.test(value.sha256) || value.sha256 !== digest) {
+    throw migrationJournalError(`${field}.sha256 is invalid`);
+  }
+  return { ...value, bytes };
+}
+
+function validateJournalForward(value, options) {
+  const keys = ["bytesBase64", "plistPath", "programArguments", "sha256", "stagedPath"];
+  if (!hasExactKeys(value, keys) || value.plistPath !== options.plistPath) {
+    throw migrationJournalError("forward schema or plistPath is invalid");
+  }
+  const stagedPrefix = `${options.plistPath}.staged.`;
+  const stagedNonce = typeof value.stagedPath === "string" && value.stagedPath.startsWith(stagedPrefix)
+    ? value.stagedPath.slice(stagedPrefix.length)
+    : "";
+  if (!UUID_PATTERN.test(stagedNonce) || dirname(value.stagedPath) !== options.launchAgentsDir) {
+    throw migrationJournalError("forward stagedPath is outside the attributed path");
+  }
+  const args = value.programArguments;
+  const expectedController = resolve(join(options.stableInstallRoot, "src", "cli.mjs"));
+  if (
+    !Array.isArray(args) ||
+    args.length !== 8 ||
+    typeof args[0] !== "string" ||
+    !isAbsolute(args[0]) ||
+    args[1] !== expectedController ||
+    args[2] !== "controller" ||
+    args[3] !== "--background" ||
+    args[4] !== "--platform" ||
+    args[5] !== "darwin" ||
+    args[6] !== "--task-name" ||
+    args[7] !== options.label
+  ) {
+    throw migrationJournalError("forward programArguments are invalid");
+  }
+  const bytes = decodeJournalBytes(value.bytesBase64, "forward.bytesBase64");
+  const expectedBytes = Buffer.from(renderControllerPlist({
+    label: options.label,
+    programArguments: args,
+    stateDir: options.stateDir,
+  }));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (
+    !bytes.equals(expectedBytes) ||
+    !/^[a-f0-9]{64}$/.test(value.sha256) ||
+    value.sha256 !== digest
+  ) {
+    throw migrationJournalError("forward bytes or digest are invalid");
+  }
+  return { ...value, bytes };
+}
+
+function validateMigrationJournal(value, options, { oldLabel, oldPlistPath }) {
+  const baseKeys = [
+    "createdAt",
+    "forward",
+    "newBackup",
+    "newLabel",
+    "nonce",
+    "oldBackup",
+    "oldLabel",
+    "operation",
+    "phase",
+    "revision",
+    "schemaVersion",
+  ];
+  const optionalKeys = new Set(["previousNonce", "primaryError", "rollbackErrors"]);
+  if (
+    !isRecord(value) ||
+    baseKeys.some((key) => !hasOwn(value, key)) ||
+    Object.keys(value).some((key) => !baseKeys.includes(key) && !optionalKeys.has(key))
+  ) {
+    throw migrationJournalError("top-level schema has unknown or missing fields");
+  }
+  if (
+    value.schemaVersion !== 2 ||
+    value.operation !== "migrate-legacy-watchdog" ||
+    !MIGRATION_PHASES.has(value.phase) ||
+    value.oldLabel !== oldLabel ||
+    value.newLabel !== options.label ||
+    typeof value.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(value.createdAt)) ||
+    !UUID_PATTERN.test(value.nonce) ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0
+  ) {
+    throw migrationJournalError("identity, phase, nonce, revision, or timestamp is invalid");
+  }
+  if (
+    (value.revision === 0 && hasOwn(value, "previousNonce")) ||
+    (value.revision > 0 && (!UUID_PATTERN.test(value.previousNonce) || value.previousNonce === value.nonce))
+  ) {
+    throw migrationJournalError("nonce chain is invalid");
+  }
+  if (value.phase === "rollback-failed") {
+    if (
+      !hasExactKeys(value.primaryError, ["code", "message"]) ||
+      typeof value.primaryError.code !== "string" ||
+      typeof value.primaryError.message !== "string" ||
+      !Array.isArray(value.rollbackErrors) ||
+      value.rollbackErrors.some((entry) =>
+        !hasExactKeys(entry, ["code", "message"]) ||
+        typeof entry.code !== "string" ||
+        typeof entry.message !== "string")
+    ) {
+      throw migrationJournalError("rollback failure detail is invalid");
+    }
+  } else if (hasOwn(value, "primaryError") || hasOwn(value, "rollbackErrors")) {
+    throw migrationJournalError("rollback fields are not valid in this phase");
+  }
+  return {
+    ...value,
+    oldBackup: validateJournalBackup(value.oldBackup, oldPlistPath, "oldBackup"),
+    newBackup: validateJournalBackup(value.newBackup, options.plistPath, "newBackup"),
+    forward: validateJournalForward(value.forward, options),
+  };
+}
+
+async function readMigrationJournal(options, journalPath, identity) {
+  const snapshot = await snapshotFile(options.fs, journalPath, {
+    required: true,
+    maxBytes: MIGRATION_JOURNAL_MAX_BYTES,
+  });
+  if (snapshot.mode !== 0o600) {
+    throw migrationJournalError("journal mode must be 0600");
+  }
+  let decoded;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
+  } catch (cause) {
+    throw migrationJournalError("journal is not valid UTF-8", cause);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch (cause) {
+    throw migrationJournalError("journal is not valid JSON", cause);
+  }
+  if (decoded !== serializedJournal(parsed)) {
+    throw migrationJournalError("journal JSON is not canonical or contains duplicate fields");
+  }
+  const journal = validateMigrationJournal(parsed, options, identity);
+  await assertSnapshotCurrent(options.fs, journalPath, snapshot);
+  return { path: journalPath, journal, snapshot };
+}
+
+function snapshotMatchesBytes(snapshot, bytes, mode) {
+  return snapshot !== null &&
+    snapshot.mode === mode &&
+    snapshot.size === bytes.length &&
+    snapshot.sha256 === createHash("sha256").update(bytes).digest("hex");
+}
+
+function assertRecoveryPathState(path, snapshot, accepted, { allowAbsent = true } = {}) {
+  if (snapshot === null && allowAbsent) return;
+  if (accepted.some(({ bytes, mode }) => snapshotMatchesBytes(snapshot, bytes, mode))) return;
+  const error = new Error(`migration recovery found a foreign path: ${path}`);
+  error.code = "MIGRATION_RECOVERY_CONFLICT";
+  throw error;
+}
+
+async function restoreJournalBackup(options, backup, accepted) {
+  let current = await snapshotFile(options.fs, backup.path);
+  assertRecoveryPathState(backup.path, current, accepted);
+  if (backup.existed && snapshotMatchesBytes(current, backup.bytes, backup.mode)) return;
+  if (current !== null) {
+    await removeSnapshotPath(
+      options.fs,
+      backup.path,
+      current,
+      "MIGRATION_RECOVERY_CONFLICT",
+    );
+  }
+  if (!backup.existed) return;
+  await atomicWrite(options.fs, backup.path, backup.bytes, backup.mode);
+  current = await snapshotFile(options.fs, backup.path, { required: true });
+  if (!snapshotMatchesBytes(current, backup.bytes, backup.mode)) {
+    const error = new Error(`migration recovery failed to restore: ${backup.path}`);
+    error.code = "MIGRATION_RECOVERY_CONFLICT";
+    throw error;
+  }
+}
+
+async function recoverMigrationJournal(options, {
+  journalPath,
+  oldLabel,
+  oldPlistPath,
+}) {
+  const existing = await snapshotFile(options.fs, journalPath, {
+    maxBytes: MIGRATION_JOURNAL_MAX_BYTES,
+  });
+  if (existing === null) return { recovered: false };
+  const transaction = await readMigrationJournal(options, journalPath, {
+    oldLabel,
+    oldPlistPath,
+  });
+  const { journal } = transaction;
+  const forwardState = { bytes: journal.forward.bytes, mode: 0o600 };
+  const oldAccepted = journal.oldBackup.existed
+    ? [{ bytes: journal.oldBackup.bytes, mode: journal.oldBackup.mode }]
+    : [];
+  const newAccepted = [forwardState];
+  if (journal.newBackup.existed) {
+    newAccepted.push({ bytes: journal.newBackup.bytes, mode: journal.newBackup.mode });
+  }
+
+  await assertDirectoryCapability(options.fs, options.stateCapability);
+  await assertDirectoryCapability(options.fs, options.launchAgentsCapability);
+  const oldCurrent = await snapshotFile(options.fs, oldPlistPath);
+  const newCurrent = await snapshotFile(options.fs, options.plistPath);
+  const stagedCurrent = await snapshotFile(options.fs, journal.forward.stagedPath);
+  assertRecoveryPathState(oldPlistPath, oldCurrent, oldAccepted);
+  assertRecoveryPathState(options.plistPath, newCurrent, newAccepted);
+  assertRecoveryPathState(journal.forward.stagedPath, stagedCurrent, [forwardState]);
+  await assertSnapshotCurrent(options.fs, journalPath, transaction.snapshot);
+
+  if (await isLoaded(options, options.label)) {
+    await bootout(options, options.label, { knownLoaded: true });
+  }
+  await restoreJournalBackup(options, journal.newBackup, newAccepted);
+  if (journal.newBackup.loaded) {
+    await bootstrap(options, options.label, options.plistPath);
+  }
+  if ((await isLoaded(options, options.label)) !== journal.newBackup.loaded) {
+    throw new Error("migration recovery did not restore controller loaded state");
+  }
+
+  if (await isLoaded(options, oldLabel)) {
+    await bootout(options, oldLabel, { knownLoaded: true });
+  }
+  await restoreJournalBackup(options, journal.oldBackup, oldAccepted);
+  if (journal.oldBackup.loaded) {
+    await bootstrap(options, oldLabel, oldPlistPath);
+  }
+  if ((await isLoaded(options, oldLabel)) !== journal.oldBackup.loaded) {
+    throw new Error("migration recovery did not restore legacy loaded state");
+  }
+
+  const staged = await snapshotFile(options.fs, journal.forward.stagedPath);
+  if (staged !== null) {
+    assertRecoveryPathState(journal.forward.stagedPath, staged, [forwardState], {
+      allowAbsent: false,
+    });
+    await removeSnapshotPath(
+      options.fs,
+      journal.forward.stagedPath,
+      staged,
+      "MIGRATION_RECOVERY_CONFLICT",
+    );
+  }
+  await assertDirectoryCapability(options.fs, options.stateCapability);
+  await assertDirectoryCapability(options.fs, options.launchAgentsCapability);
+  await removeMigrationJournal(options, transaction);
+  return { recovered: true, phase: journal.phase };
 }
 
 export function renderControllerPlist({
@@ -1518,7 +1914,16 @@ async function assertLegacyAttribution(options, oldPlistPath, plist, oldLabel) {
 
 async function advanceMigration(options, journalTransaction, phase) {
   await updateMigrationJournal(options, journalTransaction, { phase });
+  if (options.hardCrashAt === phase) throw injectedHardCrash(phase);
   inject(options, phase);
+}
+
+async function assertLoadedPrestate(options, label, expected) {
+  if ((await isLoaded(options, label)) !== expected) {
+    const error = new Error(`LaunchAgent loaded state changed before mutation: ${label}`);
+    error.code = "MIGRATION_PRESTATE_CHANGED";
+    throw error;
+  }
 }
 
 async function publishStagedPlist(
@@ -1665,8 +2070,14 @@ export async function migrateLegacyWatchdog(input = {}) {
     options.home,
     "Library",
     "LaunchAgents",
-    `${LEGACY_WATCHDOG_LABEL}.plist`,
+    `${oldLabel}.plist`,
   );
+  const journalPath = input.journalPath ?? join(options.stateDir, "launch-agent-migration.json");
+  await recoverMigrationJournal(options, {
+    journalPath,
+    oldLabel,
+    oldPlistPath,
+  });
   const oldSnapshot = await snapshotFile(options.fs, oldPlistPath);
   const oldLoaded = await isLoaded(options, oldLabel);
   if (!oldSnapshot) {
@@ -1693,11 +2104,10 @@ export async function migrateLegacyWatchdog(input = {}) {
   }
   if (newSnapshot) {
     const newPlist = await readPlistSnapshot(options, options.plistPath, newSnapshot);
-    assertControllerPlistAttribution(options, newPlist, programArguments);
+    await assertMigrationControllerPlistAttribution(options, newPlist, programArguments);
   }
   await assertSnapshotCurrent(options.fs, oldPlistPath, oldSnapshot);
   await assertSnapshotCurrent(options.fs, options.plistPath, newSnapshot);
-  const journalPath = input.journalPath ?? join(options.stateDir, "launch-agent-migration.json");
   const stagedPath = `${options.plistPath}.staged.${randomUUID()}`;
   let stagedSnapshot;
   let newPublishedTransaction;
@@ -1738,7 +2148,12 @@ export async function migrateLegacyWatchdog(input = {}) {
     await assertSnapshotCurrent(options.fs, stagedPath, stagedSnapshot);
     await advanceMigration(options, journalTransaction, "after-new-lint");
     await assertSnapshotCurrent(options.fs, options.plistPath, newSnapshot);
+    await assertLoadedPrestate(options, options.label, newLoadedBefore);
+    await assertLoadedPrestate(options, oldLabel, oldLoaded);
+    await assertSnapshotCurrent(options.fs, options.plistPath, newSnapshot);
+    await assertSnapshotCurrent(options.fs, oldPlistPath, oldSnapshot);
     if (newLoadedBefore) {
+      await assertLoadedPrestate(options, options.label, true);
       await bootout(options, options.label);
       canonicalMutationStarted = true;
       await advanceMigration(options, journalTransaction, "after-existing-new-bootout");
@@ -1767,6 +2182,7 @@ export async function migrateLegacyWatchdog(input = {}) {
     await advanceMigration(options, journalTransaction, "after-new-verify");
 
     await assertSnapshotCurrent(options.fs, oldPlistPath, oldSnapshot);
+    await assertLoadedPrestate(options, oldLabel, oldLoaded);
     if (oldLoaded) {
       await command(options, "/bin/launchctl", [
         "bootout",
@@ -1795,6 +2211,14 @@ export async function migrateLegacyWatchdog(input = {}) {
       controllerRegistered: true,
     };
   } catch (primaryError) {
+    if (primaryError?.simulatedHardCrash === true) throw primaryError;
+    if (primaryError?.code === "MIGRATION_PRESTATE_CHANGED" && !canonicalMutationStarted) {
+      if (stagedSnapshot) {
+        await removeSnapshotPath(options.fs, stagedPath, stagedSnapshot).catch(() => {});
+      }
+      await removeMigrationJournal(options, journalTransaction);
+      throw primaryError;
+    }
     if (primaryError?.code === "JOURNAL_CONFLICT" && !canonicalMutationStarted) {
       if (stagedSnapshot) {
         await removeSnapshotPath(options.fs, stagedPath, stagedSnapshot).catch(() => {});
