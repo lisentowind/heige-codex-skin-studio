@@ -1,3 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
-exec "${0:A:h}/pause.command"
+
+ROOT="${0:A:h:h}"
+PORT="${HEIGE_CODEX_SKIN_PORT:-9341}"
+exec "$ROOT/scripts/lib/run-cli.zsh" restore --port "$PORT"
