@@ -20,9 +20,189 @@
       "exclude": []
     },
     {
-      "source": "src",
-      "destination": "payload/src",
-      "recursive": true,
+      "source": "src/background-handshake.mjs",
+      "destination": "payload/src/background-handshake.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/cdp-client.mjs",
+      "destination": "payload/src/cdp-client.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/cli.mjs",
+      "destination": "payload/src/cli.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/codex-app.mjs",
+      "destination": "payload/src/codex-app.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/constants.mjs",
+      "destination": "payload/src/constants.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/control-server.mjs",
+      "destination": "payload/src/control-server.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/controller.mjs",
+      "destination": "payload/src/controller.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/image-metadata.mjs",
+      "destination": "payload/src/image-metadata.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/injector.mjs",
+      "destination": "payload/src/injector.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/install-transaction.mjs",
+      "destination": "payload/src/install-transaction.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/legacy-migration-coordinator.mjs",
+      "destination": "payload/src/legacy-migration-coordinator.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/lifecycle-helper.mjs",
+      "destination": "payload/src/lifecycle-helper.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/macos-app-repair.mjs",
+      "destination": "payload/src/macos-app-repair.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/macos-install-coordinator.mjs",
+      "destination": "payload/src/macos-install-coordinator.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/macos-install-journal.mjs",
+      "destination": "payload/src/macos-install-journal.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/macos-launch-agent.mjs",
+      "destination": "payload/src/macos-launch-agent.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/macos-launcher.mjs",
+      "destination": "payload/src/macos-launcher.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/operation-lock.mjs",
+      "destination": "payload/src/operation-lock.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/outer-transaction-validator.mjs",
+      "destination": "payload/src/outer-transaction-validator.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/pet-installer.mjs",
+      "destination": "payload/src/pet-installer.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/process-identity.mjs",
+      "destination": "payload/src/process-identity.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/resource-limits.mjs",
+      "destination": "payload/src/resource-limits.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/skin-css.mjs",
+      "destination": "payload/src/skin-css.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/skin-menu.mjs",
+      "destination": "payload/src/skin-menu.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/state-store.mjs",
+      "destination": "payload/src/state-store.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/studio-logger.mjs",
+      "destination": "payload/src/studio-logger.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/target-classifier.mjs",
+      "destination": "payload/src/target-classifier.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/theme-schema.mjs",
+      "destination": "payload/src/theme-schema.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/theme-store.mjs",
+      "destination": "payload/src/theme-store.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/windows-runtime.mjs",
+      "destination": "payload/src/windows-runtime.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/windows-secure-fs.mjs",
+      "destination": "payload/src/windows-secure-fs.mjs",
+      "recursive": false,
       "exclude": []
     },
     {
