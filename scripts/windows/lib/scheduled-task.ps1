@@ -93,6 +93,15 @@ function ConvertTo-HeiGeQuotedArgument {
     return '"' + $Value + '"'
 }
 
+function Assert-HeiGeAppIdentityToken {
+    param([Parameter(Mandatory = $true)][string]$AppIdentityToken)
+    try {
+        ConvertFrom-HeiGeCodexAppIdentityToken -IdentityToken $AppIdentityToken | Out-Null
+    } catch {
+        throw "Scheduled Task app identity token is invalid: $($_.Exception.Message)"
+    }
+}
+
 function Get-HeiGeHandshakePath {
     param(
         [Parameter(Mandatory = $true)][string]$StateDirectory,
@@ -147,11 +156,13 @@ function New-HeiGeTaskDefinition {
         [Parameter(Mandatory = $true)][string]$NodePath,
         [Parameter(Mandatory = $true)][string]$ControllerPath,
         [Parameter(Mandatory = $true)][string]$StateDirectory,
+        [Parameter(Mandatory = $true)][string]$AppIdentityToken,
         [string]$CurrentUserId,
         [string]$PowerShellPath,
         [ValidateRange(1024, 65535)][int]$Port = 9341
     )
     Assert-HeiGeKnownTaskName -TaskName $TaskName
+    Assert-HeiGeAppIdentityToken -AppIdentityToken $AppIdentityToken
     if (-not $CurrentUserId) { $CurrentUserId = Get-HeiGeCurrentUserId }
     if (-not $PowerShellPath) { $PowerShellPath = Get-HeiGeWindowsPowerShellPath }
     foreach ($entry in @(
@@ -180,7 +191,9 @@ function New-HeiGeTaskDefinition {
         "-Port",
         [string]$Port,
         "-StateDirectory",
-        (ConvertTo-HeiGeQuotedArgument -Value $StateDirectory)
+        (ConvertTo-HeiGeQuotedArgument -Value $StateDirectory),
+        "-AppIdentityToken",
+        (ConvertTo-HeiGeQuotedArgument -Value $AppIdentityToken)
     )
     $arguments = $argumentList -join " "
     return [pscustomobject][ordered]@{
@@ -339,6 +352,7 @@ function Register-HeiGeScheduledTask {
         [Parameter(Mandatory = $true)][string]$NodePath,
         [Parameter(Mandatory = $true)][string]$ControllerPath,
         [Parameter(Mandatory = $true)][string]$StateDirectory,
+        [Parameter(Mandatory = $true)][string]$AppIdentityToken,
         [string]$CurrentUserId,
         [string]$PowerShellPath,
         [ValidateRange(1024, 65535)][int]$Port = 9341,
@@ -359,6 +373,7 @@ function Register-HeiGeScheduledTask {
     [System.IO.Directory]::CreateDirectory($StateDirectory) | Out-Null
     $definition = New-HeiGeTaskDefinition -TaskName $TaskName -NodePath $NodePath `
         -ControllerPath $ControllerPath -StateDirectory $StateDirectory `
+        -AppIdentityToken $AppIdentityToken `
         -CurrentUserId $CurrentUserId -PowerShellPath $PowerShellPath -Port $Port
     if (-not (Test-Path -LiteralPath $definition.Action.Execute -PathType Leaf)) {
         throw "Windows PowerShell 可执行文件不存在：$($definition.Action.Execute)"
@@ -427,11 +442,13 @@ function Invoke-HeiGeNodeControllerProcess {
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][int]$Port,
         [Parameter(Mandatory = $true)][string]$StateDirectory,
+        [Parameter(Mandatory = $true)][string]$AppIdentityToken,
         [scriptblock]$ProcessProvider,
         [scriptblock]$WaitProvider,
         [scriptblock]$StopProvider
     )
     Assert-HeiGeKnownTaskName -TaskName $TaskName
+    Assert-HeiGeAppIdentityToken -AppIdentityToken $AppIdentityToken
     foreach ($leaf in @($NodePath, $CliPath)) {
         if (-not (Test-Path -LiteralPath $leaf -PathType Leaf)) {
             throw "Node controller dependency does not exist: $leaf"
@@ -457,6 +474,7 @@ function Invoke-HeiGeNodeControllerProcess {
     $specification = [pscustomobject][ordered]@{
         FilePath = $NodePath
         Arguments = $arguments
+        AppIdentityToken = $AppIdentityToken
         StandardOutputPath = $stdoutPath
         StandardErrorPath = $stderrPath
     }
@@ -480,7 +498,25 @@ function Invoke-HeiGeNodeControllerProcess {
     }
     $process = $null
     try {
-        $processValues = @(& $ProcessProvider $specification)
+        $environmentName = "HEIGE_WINDOWS_APP_IDENTITY"
+        $previousIdentity = [System.Environment]::GetEnvironmentVariable(
+            $environmentName,
+            [System.EnvironmentVariableTarget]::Process
+        )
+        [System.Environment]::SetEnvironmentVariable(
+            $environmentName,
+            $AppIdentityToken,
+            [System.EnvironmentVariableTarget]::Process
+        )
+        try {
+            $processValues = @(& $ProcessProvider $specification)
+        } finally {
+            [System.Environment]::SetEnvironmentVariable(
+                $environmentName,
+                $previousIdentity,
+                [System.EnvironmentVariableTarget]::Process
+            )
+        }
         if ($processValues.Count -ne 1 -or $null -eq $processValues[0]) {
             throw "Node controller process provider did not return one process"
         }

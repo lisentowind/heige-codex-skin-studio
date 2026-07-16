@@ -6,6 +6,7 @@
     [ValidateRange(1024, 65535)]
     [int]$Port = 9341,
     [string]$StateDirectory,
+    [string]$AppIdentityToken,
     [Nullable[long]]$ExpectedRevision,
     [string]$ExpectedTransitionNonce,
     [switch]$PreserveHandshake
@@ -59,12 +60,30 @@ try {
     }
 
     Protect-HeiGeStateDirectory -Path $StateDirectory | Out-Null
-    $app = Resolve-CodexApp
+    $inheritedIdentityToken = [System.Environment]::GetEnvironmentVariable(
+        "HEIGE_WINDOWS_APP_IDENTITY",
+        [System.EnvironmentVariableTarget]::Process
+    )
+    if ($AppIdentityToken -and $inheritedIdentityToken -and
+        $AppIdentityToken -cne $inheritedIdentityToken) {
+        throw "controller app identity token conflicts with the inherited identity"
+    }
+    $boundIdentityToken = if ($AppIdentityToken) { $AppIdentityToken } else { $inheritedIdentityToken }
+    if (-not $boundIdentityToken) {
+        throw "$Action requires an immutable app identity token"
+    }
+    $app = Resolve-HeiGeBoundCodexApp -IdentityToken $boundIdentityToken
+    [System.Environment]::SetEnvironmentVariable(
+        "HEIGE_WINDOWS_APP_IDENTITY",
+        $boundIdentityToken,
+        [System.EnvironmentVariableTarget]::Process
+    )
     $node = Get-NodeRuntime -App $app
 
     if ($Action -eq "register") {
         Register-HeiGeScheduledTask -TaskName $TaskName -NodePath $node.Path `
             -ControllerPath $PSCommandPath -StateDirectory $StateDirectory -Port $Port `
+            -AppIdentityToken $boundIdentityToken `
             -TestMode:$testMode | ConvertTo-Json -Depth 8
         exit 0
     }
@@ -74,7 +93,8 @@ try {
         throw "Node controller CLI 不存在：$cliPath"
     }
     $result = Invoke-HeiGeNodeControllerProcess -NodePath $node.Path -CliPath $cliPath `
-        -TaskName $TaskName -Port $Port -StateDirectory $StateDirectory
+        -TaskName $TaskName -Port $Port -StateDirectory $StateDirectory `
+        -AppIdentityToken $boundIdentityToken
     if ([string]$result.action -ceq "unregister") {
         & $PSCommandPath -Action "unregister" -TaskName $TaskName -Port $Port `
             -StateDirectory $StateDirectory -PreserveHandshake | Out-Null

@@ -8,9 +8,22 @@ const PROCESS_STARTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,7}Z$/;
 const PROCESS_NAMES = new Set(["chatgpt", "codex"]);
 const APP_KINDS = new Set(["Win32", "StoreAlias", "StoreAumid"]);
 const TEST_FIXTURE_MAX_BYTES = 256 * 1024;
+const APP_IDENTITY_ENV = "HEIGE_WINDOWS_APP_IDENTITY";
+const APP_IDENTITY_PRODUCT = "heige-codex-skin-studio";
+const APP_IDENTITY_MAX_BYTES = 8 * 1024;
+const APP_IDENTITY_KEYS = [
+  "aumid",
+  "executablePath",
+  "installPath",
+  "kind",
+  "packageFullName",
+  "product",
+  "productName",
+  "schemaVersion",
+];
 
 const WINDOWS_RUNTIME_SCRIPT = String.raw`& {
-param([string]$CommonScriptPath, [string]$PortText)
+param([string]$CommonScriptPath, [string]$PortText, [string]$AppIdentityToken)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
@@ -20,7 +33,11 @@ if (-not [int]::TryParse($PortText, [ref]$port) -or $port -lt 1 -or $port -gt 65
   throw 'invalid runtime snapshot port'
 }
 . $CommonScriptPath
-$app = Resolve-CodexApp
+$app = if ($AppIdentityToken) {
+  Resolve-HeiGeBoundCodexApp -IdentityToken $AppIdentityToken
+} else {
+  Resolve-CodexApp
+}
 $runtime = Get-NodeRuntime -App $app
 $rawProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='ChatGPT.exe' OR Name='Codex.exe'" -ErrorAction Stop)
 $processes = @()
@@ -32,7 +49,10 @@ foreach ($record in $rawProcesses) {
     throw 'Windows Codex process record is incomplete'
   }
   $owner = [pscustomobject]@{ Id = $pidValue; Path = $path; ProcessName = [string]$record.Name }
-  if (-not (Test-CdpOwnerMatchesApp -Owner $owner -App $app)) { continue }
+  if (-not (Test-CdpOwnerMatchesApp -Owner $owner -App $app)) {
+    if ($AppIdentityToken) { throw 'foreign Windows Codex process conflicts with the immutable app identity' }
+    continue
+  }
   $live = Get-Process -Id $pidValue -ErrorAction Stop
   if ([int]$live.Id -ne $pidValue -or -not $live.Path) {
     throw 'Windows Codex process changed during runtime snapshot'
@@ -151,6 +171,82 @@ function validateApp(value) {
   return Object.freeze({ ...value });
 }
 
+function appIdentityDocument(app) {
+  return {
+    schemaVersion: 1,
+    product: APP_IDENTITY_PRODUCT,
+    kind: app.kind,
+    executablePath: app.executablePath,
+    installPath: app.installPath,
+    productName: app.productName,
+    packageFullName: app.packageFullName,
+    aumid: app.aumid,
+  };
+}
+
+export function decodeWindowsAppIdentityToken(token) {
+  if (
+    typeof token !== "string" ||
+    token.length === 0 ||
+    token.length > APP_IDENTITY_MAX_BYTES * 2 ||
+    !/^[A-Za-z0-9_-]+$/.test(token)
+  ) {
+    throw new Error("Windows app identity token is not canonical base64url");
+  }
+  let bytes;
+  let document;
+  try {
+    bytes = Buffer.from(token, "base64url");
+    if (bytes.length === 0 || bytes.length > APP_IDENTITY_MAX_BYTES) {
+      throw new Error("identity size is invalid");
+    }
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    document = JSON.parse(decoded);
+  } catch (cause) {
+    throw new Error("Windows app identity token is invalid", { cause });
+  }
+  exactKeys(document, APP_IDENTITY_KEYS, "Windows app identity");
+  if (document.schemaVersion !== 1 || document.product !== APP_IDENTITY_PRODUCT) {
+    throw new Error("Windows app identity schema is unsupported");
+  }
+  const app = validateApp({
+    kind: document.kind,
+    executablePath: document.executablePath,
+    installPath: document.installPath,
+    productName: document.productName,
+    packageFullName: document.packageFullName,
+    aumid: document.aumid,
+    launchTarget: document.kind === "StoreAumid"
+      ? `aumid:${document.aumid}`
+      : document.executablePath,
+  });
+  const canonical = Buffer.from(JSON.stringify(appIdentityDocument(app)), "utf8").toString("base64url");
+  if (canonical !== token) {
+    throw new Error("Windows app identity token is not canonical");
+  }
+  return app;
+}
+
+function sameAppIdentity(left, right) {
+  return left.kind === right.kind &&
+    left.productName === right.productName &&
+    left.packageFullName === right.packageFullName &&
+    left.aumid === right.aumid &&
+    sameWindowsPath(left.installPath, right.installPath) &&
+    (
+      left.executablePath === null
+        ? right.executablePath === null
+        : right.executablePath !== null && sameWindowsPath(left.executablePath, right.executablePath)
+    );
+}
+
+function assertExpectedAppIdentity(snapshot, expectedApp) {
+  if (expectedApp !== null && !sameAppIdentity(snapshot.app, expectedApp)) {
+    throw new Error("Windows runtime app attribution does not match the immutable identity");
+  }
+  return snapshot;
+}
+
 function processIdentity(value, { parent = true, listener = false } = {}) {
   exactKeys(value, parent
     ? ["executablePath", "parentProcessId", "pid", "startedAt"]
@@ -234,6 +330,10 @@ export async function queryWindowsRuntimeSnapshot({
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("Windows runtime snapshot port is invalid");
   }
+  const identityToken = env[APP_IDENTITY_ENV];
+  const expectedApp = identityToken === undefined
+    ? null
+    : decodeWindowsAppIdentityToken(identityToken);
   const fixturePath = env.HEIGE_TEST_WINDOWS_RUNTIME_FIXTURE;
   if (fixturePath !== undefined) {
     if (nodeEnv !== "test") {
@@ -272,7 +372,7 @@ export async function queryWindowsRuntimeSnapshot({
     } catch (cause) {
       throw new Error("Windows runtime fixture is not one JSON document", { cause });
     }
-    return validateWindowsRuntimeSnapshot(value);
+    return assertExpectedAppIdentity(validateWindowsRuntimeSnapshot(value), expectedApp);
   }
   absoluteWindowsPath(powershellPath, "trusted Windows PowerShell path");
   absoluteWindowsPath(commonScriptPath, "trusted Windows resolver path");
@@ -284,6 +384,7 @@ export async function queryWindowsRuntimeSnapshot({
     WINDOWS_RUNTIME_SCRIPT,
     commonScriptPath,
     String(port),
+    identityToken ?? "",
   ], {
     timeout: 15_000,
     maxBuffer: 256 * 1024,
@@ -298,7 +399,7 @@ export async function queryWindowsRuntimeSnapshot({
   } catch (cause) {
     throw new Error("Windows runtime snapshot stdout is not one JSON document", { cause });
   }
-  return validateWindowsRuntimeSnapshot(value);
+  return assertExpectedAppIdentity(validateWindowsRuntimeSnapshot(value), expectedApp);
 }
 
 function uniqueProcesses(processes) {

@@ -385,6 +385,218 @@ function Resolve-CodexApp {
     return New-CodexStoreApp -Package $package -ProcessPath $null
 }
 
+function ConvertTo-HeiGeCodexAppIdentityDocument {
+    param([Parameter(Mandatory = $true)]$App)
+    $expectedProperties = @("Aumid", "ExecutablePath", "InstallPath", "Kind", "PackageFullName", "ProductName")
+    $actualProperties = @($App.PSObject.Properties.Name | Sort-Object)
+    if (($actualProperties -join "`0") -cne (($expectedProperties | Sort-Object) -join "`0")) {
+        throw "Codex app identity must contain the exact resolver tuple."
+    }
+    $kind = [string]$App.Kind
+    if (@("Win32", "StoreAlias", "StoreAumid") -cnotcontains $kind) {
+        throw "Codex app identity kind is invalid."
+    }
+    $productName = [string]$App.ProductName
+    if (@("Codex", "ChatGPT") -cnotcontains $productName) {
+        throw "Codex app identity product is invalid."
+    }
+    if (-not $App.InstallPath -or -not [System.IO.Path]::IsPathRooted([string]$App.InstallPath)) {
+        throw "Codex app identity install path is invalid."
+    }
+    $installPath = Get-HeiGeFullPath -Path ([string]$App.InstallPath)
+    $executablePath = if ($null -eq $App.ExecutablePath) {
+        $null
+    } else {
+        if (-not [System.IO.Path]::IsPathRooted([string]$App.ExecutablePath)) {
+            throw "Codex app identity executable path is invalid."
+        }
+        Get-HeiGeFullPath -Path ([string]$App.ExecutablePath)
+    }
+    $packageFullName = if ($null -eq $App.PackageFullName) { $null } else { [string]$App.PackageFullName }
+    $aumid = if ($null -eq $App.Aumid) { $null } else { [string]$App.Aumid }
+    foreach ($value in @($kind, $productName, $installPath, $executablePath, $packageFullName, $aumid)) {
+        if ($null -ne $value -and ([string]$value).IndexOfAny([char[]]@([char]0, "`r", "`n")) -ge 0) {
+            throw "Codex app identity contains an invalid control character."
+        }
+    }
+    if ($kind -ceq "Win32" -and
+        ($null -eq $executablePath -or $null -ne $packageFullName -or $null -ne $aumid)) {
+        throw "Win32 app identity is incomplete."
+    }
+    if ($kind -ceq "StoreAlias" -and
+        ($null -eq $executablePath -or -not $packageFullName -or -not $aumid)) {
+        throw "StoreAlias app identity is incomplete."
+    }
+    if ($kind -ceq "StoreAumid" -and
+        ($null -ne $executablePath -or -not $packageFullName -or -not $aumid)) {
+        throw "StoreAumid app identity is incomplete."
+    }
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        product = "heige-codex-skin-studio"
+        kind = $kind
+        executablePath = $executablePath
+        installPath = $installPath
+        productName = $productName
+        packageFullName = $packageFullName
+        aumid = $aumid
+    }
+}
+
+function ConvertTo-HeiGeCodexAppIdentityToken {
+    param([Parameter(Mandatory = $true)]$App)
+    $document = ConvertTo-HeiGeCodexAppIdentityDocument -App $App
+    $json = $document | ConvertTo-Json -Depth 4 -Compress
+    $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false, $true
+    $base64 = [System.Convert]::ToBase64String($utf8.GetBytes($json))
+    return $base64.TrimEnd([char[]]@('=')).Replace("+", "-").Replace("/", "_")
+}
+
+function ConvertFrom-HeiGeCodexAppIdentityToken {
+    param([Parameter(Mandatory = $true)][string]$IdentityToken)
+    if ($IdentityToken.Length -le 0 -or $IdentityToken.Length -gt 16384 -or
+        $IdentityToken -cnotmatch '^[A-Za-z0-9_-]+$') {
+        throw "Codex app 身份 token 不是规范 base64url。"
+    }
+    $base64 = $IdentityToken.Replace("-", "+").Replace("_", "/")
+    switch ($base64.Length % 4) {
+        0 { }
+        2 { $base64 += "==" }
+        3 { $base64 += "=" }
+        default { throw "Codex app 身份 token 长度无效。" }
+    }
+    try {
+        $bytes = [System.Convert]::FromBase64String($base64)
+        if ($bytes.Length -le 0 -or $bytes.Length -gt 8192) {
+            throw "Codex app 身份 token 大小无效。"
+        }
+        $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false, $true
+        $document = $utf8.GetString($bytes) | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Codex app 身份 token 无效：$($_.Exception.Message)"
+    }
+    $expectedProperties = @(
+        "aumid", "executablePath", "installPath", "kind", "packageFullName", "product",
+        "productName", "schemaVersion"
+    )
+    $actualProperties = @($document.PSObject.Properties.Name | Sort-Object)
+    if (($actualProperties -join "`0") -cne (($expectedProperties | Sort-Object) -join "`0") -or
+        [int]$document.schemaVersion -ne 1 -or
+        [string]$document.product -cne "heige-codex-skin-studio") {
+        throw "Codex app 身份 token schema 无效。"
+    }
+    $app = New-CodexAppResult -Kind ([string]$document.kind) `
+        -ExecutablePath $(if ($null -eq $document.executablePath) { $null } else { [string]$document.executablePath }) `
+        -InstallPath ([string]$document.installPath) -ProductName ([string]$document.productName) `
+        -PackageFullName $(if ($null -eq $document.packageFullName) { $null } else { [string]$document.packageFullName }) `
+        -Aumid $(if ($null -eq $document.aumid) { $null } else { [string]$document.aumid })
+    $canonical = ConvertTo-HeiGeCodexAppIdentityToken -App $app
+    if ($canonical -cne $IdentityToken) {
+        throw "Codex app 身份 token 不是规范编码。"
+    }
+    return $app
+}
+
+function Test-HeiGeCodexAppIdentityEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+    $leftDocument = ConvertTo-HeiGeCodexAppIdentityDocument -App $Left
+    $rightDocument = ConvertTo-HeiGeCodexAppIdentityDocument -App $Right
+    foreach ($name in @("kind", "productName", "packageFullName", "aumid")) {
+        if ($leftDocument.$name -cne $rightDocument.$name) { return $false }
+    }
+    if (-not ([string]$leftDocument.installPath).Equals(
+        [string]$rightDocument.installPath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) { return $false }
+    if (($null -eq $leftDocument.executablePath) -ne
+        ($null -eq $rightDocument.executablePath)) { return $false }
+    if ($null -ne $leftDocument.executablePath -and
+        -not ([string]$leftDocument.executablePath).Equals(
+            [string]$rightDocument.executablePath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) { return $false }
+    return $true
+}
+
+function Resolve-HeiGeExactStoreCodexApp {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Packages
+    )
+    $packageMatches = @($Packages | Where-Object {
+        (Test-CodexPackageName -Package $_ -ProductName ([string]$Expected.ProductName)) -and
+        ([string]$_.PackageFullName -ceq [string]$Expected.PackageFullName)
+    })
+    if ($packageMatches.Count -ne 1) {
+        throw "已绑定 Store 包的不可变身份已消失或不唯一。"
+    }
+    $package = $packageMatches[0]
+    if (-not $package.InstallLocation) {
+        throw "已绑定 Store 包缺少不可变安装根。"
+    }
+    $observedInstallPath = Get-HeiGeFullPath -Path ([string]$package.InstallLocation)
+    if (-not $observedInstallPath.Equals(
+        [string]$Expected.InstallPath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "已绑定 Store 包的不可变安装根已变化。"
+    }
+    $packageFamilyName = [string]$package.PackageFamilyName
+    if (-not $packageFamilyName) {
+        throw "已绑定 Store 包缺少不可变包家族。"
+    }
+    $expectedAumid = [string]$Expected.Aumid
+    $applications = @(Get-CodexPackageApplications -Package $package | Where-Object {
+        $eligible = $_.Id -eq "App" -or $_.Executable -match '(^|[\\/])(ChatGPT|Codex)\.exe$'
+        $eligible -and ("$packageFamilyName!$([string]$_.Id)" -ceq $expectedAumid)
+    })
+    if ($applications.Count -ne 1) {
+        throw "已绑定 Store AUMID 的不可变应用入口已消失或不唯一。"
+    }
+    $application = $applications[0]
+    $alias = Get-CodexAliasPath -Package $package -Application $application
+    $kind = if ($alias) { "StoreAlias" } else { "StoreAumid" }
+    $observed = New-CodexAppResult -Kind $kind -ExecutablePath $alias `
+        -InstallPath $observedInstallPath `
+        -ProductName (Get-CodexProductName -Path $null -Package $package) `
+        -PackageFullName ([string]$package.PackageFullName) -Aumid $expectedAumid
+    if (-not (Test-HeiGeCodexAppIdentityEqual -Left $Expected -Right $observed)) {
+        throw "当前 Store Codex 与已绑定的不可变身份不一致。"
+    }
+    return $observed
+}
+
+function Resolve-HeiGeBoundCodexApp {
+    param(
+        [Parameter(Mandatory = $true)][string]$IdentityToken,
+        [object[]]$Packages
+    )
+    $expected = ConvertFrom-HeiGeCodexAppIdentityToken -IdentityToken $IdentityToken
+    if ([string]$expected.Kind -ceq "Win32") {
+        $observed = if ($PSBoundParameters.ContainsKey("Packages")) {
+            Resolve-CodexApp -OverridePath ([string]$expected.ExecutablePath) `
+                -Packages @($Packages) -ProductName ([string]$expected.ProductName)
+        } else {
+            Resolve-CodexApp -OverridePath ([string]$expected.ExecutablePath) `
+                -ProductName ([string]$expected.ProductName)
+        }
+    } else {
+        $currentPackages = if ($PSBoundParameters.ContainsKey("Packages")) {
+            @($Packages)
+        } else {
+            @(Get-CodexStorePackages)
+        }
+        $observed = Resolve-HeiGeExactStoreCodexApp -Expected $expected -Packages $currentPackages
+    }
+    if (-not (Test-HeiGeCodexAppIdentityEqual -Left $expected -Right $observed)) {
+        throw "当前 Codex 归属与已绑定的不可变身份不一致。"
+    }
+    return $observed
+}
+
 function Resolve-CodexLaunchTarget {
     param([Parameter(Mandatory = $true)][string]$AppPath)
     $app = Resolve-CodexApp -OverridePath $AppPath

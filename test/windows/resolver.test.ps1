@@ -107,6 +107,79 @@ try {
         Assert-Equal @("Kind", "ExecutablePath", "InstallPath", "ProductName", "PackageFullName", "Aumid") @($app.PSObject.Properties.Name)
     }
 
+    Test-Case "Immutable app identity round-trips and rebinds the same closed Win32 install" {
+        $app = Resolve-CodexApp -OverridePath $script:Win32Exe -Packages @() -ProcessProvider { @() }
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $app
+        $decoded = ConvertFrom-HeiGeCodexAppIdentityToken -IdentityToken $token
+        Assert-Equal ($app | ConvertTo-Json -Depth 8 -Compress) `
+            ($decoded | ConvertTo-Json -Depth 8 -Compress)
+        $bound = Resolve-HeiGeBoundCodexApp -IdentityToken $token -Packages @()
+        Assert-Equal $app.ExecutablePath $bound.ExecutablePath
+    }
+
+    Test-Case "Immutable app identity rebinds an exact custom closed Win32 install" {
+        $customExe = Join-Path $script:Root "Portable Custom Codex\Codex.exe"
+        New-Item -ItemType Directory -Path (Split-Path $customExe -Parent) -Force | Out-Null
+        New-Item -ItemType File -Path $customExe -Force | Out-Null
+        $custom = Resolve-CodexApp -OverridePath $customExe -Packages $script:Packages `
+            -ProcessProvider { @() }
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $custom
+        $bound = Resolve-HeiGeBoundCodexApp -IdentityToken $token `
+            -Packages $script:Packages
+        Assert-Equal "Win32" $bound.Kind
+        Assert-Equal $customExe $bound.ExecutablePath
+    }
+
+    Test-Case "Immutable Store identity selects its exact closed package despite Win32 and another Store install" {
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $script:StoreApp
+        $bound = Resolve-HeiGeBoundCodexApp -IdentityToken $token `
+            -Packages $script:Packages
+        Assert-Equal "StoreAumid" $bound.Kind
+        Assert-Equal $script:Packages[1].PackageFullName $bound.PackageFullName
+        Assert-Equal $script:Package2Root $bound.InstallPath
+        Assert-Equal "$($script:Packages[1].PackageFamilyName)!App" $bound.Aumid
+    }
+
+    Test-Case "Immutable Store identity fails closed after its exact package disappears or updates" {
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $script:StoreApp
+        Assert-Throws {
+            Resolve-HeiGeBoundCodexApp -IdentityToken $token `
+                -Packages @($script:Packages[0])
+        } "不可变身份"
+
+        $updatedRoot = Join-Path $script:Root "WindowsApps\OpenAI.Codex_2.1.0.0_x64__8wekyb3d8bbwe"
+        $updatedPackage = [pscustomobject]@{
+            Name = "OpenAI.Codex"
+            Publisher = "CN=OpenAI"
+            IsFramework = $false
+            SignatureKind = "Store"
+            Version = [version]"2.1.0.0"
+            PackageFullName = "OpenAI.Codex_2.1.0.0_x64__8wekyb3d8bbwe"
+            PackageFamilyName = $script:Packages[1].PackageFamilyName
+            InstallLocation = $updatedRoot
+            Applications = $script:Packages[1].Applications
+        }
+        Assert-Throws {
+            Resolve-HeiGeBoundCodexApp -IdentityToken $token `
+                -Packages @($updatedPackage)
+        } "不可变身份"
+    }
+
+    Test-Case "Immutable Win32 selector does not drift to another installed Store package" {
+        $win32 = Resolve-CodexApp -OverridePath $script:Win32Exe -Packages @() -ProcessProvider { @() }
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $win32
+        $bound = Resolve-HeiGeBoundCodexApp -IdentityToken $token `
+            -Packages @($script:Packages[1])
+        Assert-Equal "Win32" $bound.Kind
+        Assert-Equal $script:Win32Exe $bound.ExecutablePath
+    }
+
+    Test-Case "Immutable app identity rejects malformed and noncanonical tokens" {
+        Assert-Throws {
+            ConvertFrom-HeiGeCodexAppIdentityToken -IdentityToken "not-canonical+base64"
+        } "身份 token"
+    }
+
     Test-Case "Invalid explicit override fails without fallback" {
         $script:ProcessProviderCalled = $false
         Assert-Throws {

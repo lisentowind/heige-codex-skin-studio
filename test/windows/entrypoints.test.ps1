@@ -88,6 +88,28 @@ function New-TestShortcutObservation {
 }
 
 try {
+    Test-Case "Context CLI carries the exact app identity only for the child invocation" {
+        $originalIdentity = $env:HEIGE_WINDOWS_APP_IDENTITY
+        $env:HEIGE_WINDOWS_APP_IDENTITY = "previous-test-value"
+        try {
+            $script:CapturedIdentity = $null
+            $result = Invoke-HeiGeContextCli -Context (New-TestEntrypointContext) `
+                -Arguments @("status") -CliProvider {
+                    param($Context, $Arguments)
+                    $script:CapturedIdentity = $env:HEIGE_WINDOWS_APP_IDENTITY
+                    [pscustomobject]@{ mode = "active" }
+                }
+            $decoded = ConvertFrom-HeiGeCodexAppIdentityToken `
+                -IdentityToken $script:CapturedIdentity
+            Assert-Equal "Win32" $decoded.Kind
+            Assert-Equal "C:\Program Files\Codex\Codex.exe" $decoded.ExecutablePath
+            Assert-Equal "previous-test-value" $env:HEIGE_WINDOWS_APP_IDENTITY
+            Assert-Equal "active" $result.mode
+        } finally {
+            $env:HEIGE_WINDOWS_APP_IDENTITY = $originalIdentity
+        }
+    }
+
     Test-Case "Apply validates first and never enables persistence" {
         $script:Events = @()
         $script:CliCalls = @()
@@ -427,6 +449,50 @@ try {
                 -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
         } "主进程归属不唯一"
         Assert-Equal @("no-cdp", "ambiguous-processes") $script:Events
+    }
+
+    Test-Case "Restore rejects a unique root plus a detached ownership cycle" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "root-plus-cycle"
+                    @(
+                        (New-TestCodexProcess -Id 41),
+                        (New-TestCodexProcess -Id 51 -ParentProcessId 61),
+                        (New-TestCodexProcess -Id 61 -ParentProcessId 51)
+                    )
+                } `
+                -CliProvider { param($Context, $Arguments) $script:Events += "cli" } `
+                -UnregisterProvider { param($Context) $script:Events += "unregister" } `
+                -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
+        } "进程图包含归属环"
+        Assert-Equal @("no-cdp", "root-plus-cycle") $script:Events
+    }
+
+    Test-Case "Restore rejects a foreign Codex candidate before mutating state" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "foreign-process"
+                    @(
+                        (New-TestCodexProcess -Id 41),
+                        (New-TestCodexProcess -Id 51 `
+                            -Path "C:\Program Files\ChatGPT\ChatGPT.exe")
+                    )
+                } `
+                -CliProvider { param($Context, $Arguments) $script:Events += "cli" } `
+                -UnregisterProvider { param($Context) $script:Events += "unregister" } `
+                -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
+        } "不属于已绑定"
+        Assert-Equal @("no-cdp", "foreign-process") $script:Events
     }
 
     Test-Case "Restore rejects an unreadable candidate process before mutating state" {

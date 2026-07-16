@@ -66,16 +66,35 @@ function Invoke-HeiGeContextCli {
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [scriptblock]$CliProvider
     )
-    $values = if ($CliProvider) {
-        @(& $CliProvider $Context $Arguments)
-    } else {
-        $cliArguments = @([string]$Context.CliPath) + @($Arguments)
-        $json = Invoke-SkinCli -Node ([string]$Context.NodePath) -CliArgs $cliArguments
-        try {
-            @($json | ConvertFrom-Json)
-        } catch {
-            throw "皮肤命令返回了无效 JSON：$($_.Exception.Message)"
+    $identityToken = ConvertTo-HeiGeCodexAppIdentityToken -App $Context.App
+    $environmentName = "HEIGE_WINDOWS_APP_IDENTITY"
+    $previousIdentity = [System.Environment]::GetEnvironmentVariable(
+        $environmentName,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    [System.Environment]::SetEnvironmentVariable(
+        $environmentName,
+        $identityToken,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    try {
+        $values = if ($CliProvider) {
+            @(& $CliProvider $Context $Arguments)
+        } else {
+            $cliArguments = @([string]$Context.CliPath) + @($Arguments)
+            $json = Invoke-SkinCli -Node ([string]$Context.NodePath) -CliArgs $cliArguments
+            try {
+                @($json | ConvertFrom-Json)
+            } catch {
+                throw "皮肤命令返回了无效 JSON：$($_.Exception.Message)"
+            }
         }
+    } finally {
+        [System.Environment]::SetEnvironmentVariable(
+            $environmentName,
+            $previousIdentity,
+            [System.EnvironmentVariableTarget]::Process
+        )
     }
     if ($values.Count -ne 1 -or $null -eq $values[0]) {
         throw "皮肤命令返回结果不唯一。"
@@ -219,6 +238,8 @@ function Get-HeiGeEntrypointProcessMode {
                 ParentProcessId = $parentProcessId
                 Path = Get-HeiGeFullPath -Path $path
             }
+        } else {
+            throw "Codex 候选进程不属于已绑定的不可变应用身份。"
         }
     }
     if ($owned.Count -eq 0) { return "closed" }
@@ -237,12 +258,27 @@ function Get-HeiGeEntrypointProcessMode {
         }
     }
     $ownedIds = @{}
-    foreach ($process in $normalized) { $ownedIds[[int]$process.Id] = $true }
+    foreach ($process in $normalized) { $ownedIds[[int]$process.Id] = $process }
     $mainProcesses = @($normalized | Where-Object {
         -not $ownedIds.ContainsKey([int]$_.ParentProcessId)
     })
     if ($mainProcesses.Count -ne 1) {
         throw "Codex 主进程归属不唯一，拒绝判断 closed/native。"
+    }
+    $rootProcess = $mainProcesses[0]
+    foreach ($process in $normalized) {
+        $visited = @{}
+        $current = $process
+        while ($ownedIds.ContainsKey([int]$current.ParentProcessId)) {
+            if ($visited.ContainsKey([int]$current.Id)) {
+                throw "Codex 进程图包含归属环，拒绝判断 closed/native。"
+            }
+            $visited[[int]$current.Id] = $true
+            $current = $ownedIds[[int]$current.ParentProcessId]
+        }
+        if ([int]$current.Id -ne [int]$rootProcess.Id) {
+            throw "Codex 进程图包含孤立归属组件，拒绝判断 closed/native。"
+        }
     }
     return "native"
 }

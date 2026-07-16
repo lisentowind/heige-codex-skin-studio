@@ -43,6 +43,20 @@ function runtimeSnapshot(processes = []) {
   };
 }
 
+function runtimeAppIdentityToken() {
+  const app = runtimeSnapshot().app;
+  return Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    product: "heige-codex-skin-studio",
+    kind: app.kind,
+    executablePath: app.executablePath,
+    installPath: app.installPath,
+    productName: app.productName,
+    packageFullName: app.packageFullName,
+    aumid: app.aumid,
+  }), "utf8").toString("base64url");
+}
+
 function studioState(overrides = {}) {
   return {
     schemaVersion: 2,
@@ -219,6 +233,7 @@ test("real Windows Node CLI stays isolated, portable, and crash-safe", {
     HEIGE_TEST_WINDOWS_RUNTIME_FIXTURE: fixturePath,
     HEIGE_TEST_WINDOWS_STATE_ROOT: stateRoot,
     HEIGE_TEST_WINDOWS_TASK_NAME: taskName,
+    HEIGE_WINDOWS_APP_IDENTITY: runtimeAppIdentityToken(),
   };
 
   const doctor = parseSuccessfulCli(await runCli(["doctor", "--port", String(PORT)], env));

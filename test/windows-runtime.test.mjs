@@ -51,6 +51,20 @@ function snapshot(overrides = {}) {
   };
 }
 
+function appIdentityToken(app = APP) {
+  const document = {
+    schemaVersion: 1,
+    product: "heige-codex-skin-studio",
+    kind: app.kind,
+    executablePath: app.executablePath,
+    installPath: app.installPath,
+    productName: app.productName,
+    packageFullName: app.packageFullName,
+    aumid: app.aumid,
+  };
+  return Buffer.from(JSON.stringify(document), "utf8").toString("base64url");
+}
+
 test("Windows runtime query uses one trusted PowerShell command and accepts only strict JSON", async () => {
   const calls = [];
   const expected = snapshot();
@@ -89,6 +103,69 @@ test("Windows runtime query uses one trusted PowerShell command and accepts only
       stderr: "",
     }),
   }), /schema|field|snapshot/i);
+});
+
+test("Windows runtime binds every query to the immutable PowerShell app identity", async () => {
+  const expected = snapshot();
+  const token = appIdentityToken();
+  const calls = [];
+  const result = await queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    env: { HEIGE_WINDOWS_APP_IDENTITY: token },
+    execFileImpl: async (file, args) => {
+      calls.push({ file, args });
+      return { stdout: JSON.stringify(expected), stderr: "" };
+    },
+  });
+  assert.deepEqual(result.app, APP);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.at(-1), token);
+
+  await assert.rejects(queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: calls[0].file,
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    env: { HEIGE_WINDOWS_APP_IDENTITY: token },
+    execFileImpl: async () => ({
+      stdout: JSON.stringify(snapshot({
+        app: {
+          ...APP,
+          executablePath: "C:\\Program Files\\ChatGPT\\ChatGPT.exe",
+          installPath: "C:\\Program Files\\ChatGPT",
+          productName: "ChatGPT",
+          launchTarget: "C:\\Program Files\\ChatGPT\\ChatGPT.exe",
+        },
+      })),
+      stderr: "",
+    }),
+  }), /identity|attribution|app/i);
+
+  await assert.rejects(queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: calls[0].file,
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    env: { HEIGE_WINDOWS_APP_IDENTITY: "not-canonical+base64" },
+    execFileImpl: async () => {
+      throw new Error("malformed identity must fail before PowerShell");
+    },
+  }), /identity|token|base64/i);
+
+  await assert.rejects(queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: calls[0].file,
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    env: { HEIGE_WINDOWS_APP_IDENTITY: token },
+    execFileImpl: async () => ({
+      stdout: JSON.stringify(snapshot({
+        processes: [processRecord({
+          executablePath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_2.0.0.0_x64__abc\\Codex.exe",
+        })],
+      })),
+      stderr: "",
+    }),
+  }), /process path|belong|identity|app/i);
 });
 
 test("Windows ACL adapter protects files explicitly and bounds trusted PowerShell", async () => {

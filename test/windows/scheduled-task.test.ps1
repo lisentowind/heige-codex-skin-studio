@@ -5,7 +5,9 @@
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "TestHelpers.ps1")
-. (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "scripts\windows\lib\scheduled-task.ps1")
+$script:RepositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $script:RepositoryRoot "scripts\windows\lib\common.ps1")
+. (Join-Path $script:RepositoryRoot "scripts\windows\lib\scheduled-task.ps1")
 
 $script:ProductionTask = "HeiGe Codex Skin Studio Controller"
 $script:TestTask = "HeiGe Codex Skin Studio Test 5f8a771e-4997-4c34-89d8-9e37c9f80211"
@@ -14,17 +16,27 @@ $script:Node = Join-Path $script:Root "Node Runtime\node.exe"
 $script:Controller = Join-Path $script:Root "Stable Install\scripts\windows\controller.ps1"
 $script:State = Join-Path $script:Root "State Directory 中文"
 $script:PowerShell = Join-Path $script:Root "Windows PowerShell\powershell.exe"
+$script:CodexExe = Join-Path $script:Root "Codex App\Codex.exe"
 $script:RequestNonce = "controller-transition-7"
-foreach ($path in @($script:Node, $script:Controller, $script:PowerShell)) {
+foreach ($path in @($script:Node, $script:Controller, $script:PowerShell, $script:CodexExe)) {
     New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
     New-Item -ItemType File -Path $path -Force | Out-Null
 }
 New-Item -ItemType Directory -Path $script:State -Force | Out-Null
+$script:AppIdentityToken = ConvertTo-HeiGeCodexAppIdentityToken -App ([pscustomobject]@{
+    Kind = "Win32"
+    ExecutablePath = $script:CodexExe
+    InstallPath = (Split-Path $script:CodexExe -Parent)
+    ProductName = "Codex"
+    PackageFullName = $null
+    Aumid = $null
+})
 
 function New-TestDefinition {
     param([string]$Name = $script:ProductionTask)
     return New-HeiGeTaskDefinition -TaskName $Name -NodePath $script:Node `
         -ControllerPath $script:Controller -StateDirectory $script:State `
+        -AppIdentityToken $script:AppIdentityToken `
         -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell -Port 9341
 }
 
@@ -52,6 +64,8 @@ try {
         Assert-Match ([regex]::Escape($script:Controller)) $definition.Action.Arguments
         Assert-Match ([regex]::Escape($script:ProductionTask)) $definition.Action.Arguments
         Assert-Match '\-Action run' $definition.Action.Arguments
+        Assert-Match '\-AppIdentityToken' $definition.Action.Arguments
+        Assert-Match ([regex]::Escape($script:AppIdentityToken)) $definition.Action.Arguments
         Assert-Match '\-WindowStyle Hidden' $definition.Action.Arguments
         Assert-False $definition.RequiresElevation
     }
@@ -123,6 +137,7 @@ try {
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName $script:ProductionTask -NodePath $script:Node `
                 -ControllerPath $script:Controller -StateDirectory $script:State -TestMode `
+                -AppIdentityToken $script:AppIdentityToken `
                 -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell `
                 -RegisterProvider { param($Definition) $script:RegisterInvoked = $true }
         } "production task"
@@ -138,6 +153,7 @@ try {
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName "HeiGe Codex Skin Studio Test not-a-guid" `
                 -NodePath $script:Node -ControllerPath $script:Controller -StateDirectory $script:State `
+                -AppIdentityToken $script:AppIdentityToken `
                 -TestMode -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell
         } "GUID"
     }
@@ -146,12 +162,14 @@ try {
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName $script:ProductionTask -NodePath $script:Node `
                 -ControllerPath $script:Controller -StateDirectory $script:State `
+                -AppIdentityToken $script:AppIdentityToken `
                 -CurrentUserId "FOREIGN\User" -PowerShellPath $script:PowerShell `
                 -RegisterProvider { param($Definition) throw "must not register" }
         } "current user identity cannot be injected"
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName $script:ProductionTask -NodePath $script:Node `
                 -ControllerPath $script:Controller -StateDirectory $script:State `
+                -AppIdentityToken $script:AppIdentityToken `
                 -PowerShellPath $script:PowerShell `
                 -RegisterProvider { param($Definition) throw "must not register" }
         } "default state directory"
@@ -177,6 +195,7 @@ try {
         $script:StoredDefinition = $null
         $result = Register-HeiGeScheduledTask -TaskName $script:TestTask -NodePath $script:Node `
             -ControllerPath $script:Controller -StateDirectory $script:State -TestMode `
+            -AppIdentityToken $script:AppIdentityToken `
             -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell `
             -RegisterProvider { param($Definition) $script:StoredDefinition = $Definition } `
             -InspectProvider { param($Name) $script:StoredDefinition } `
@@ -195,6 +214,7 @@ try {
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName $script:TestTask -NodePath $script:Node `
                 -ControllerPath $script:Controller -StateDirectory $script:State -TestMode `
+                -AppIdentityToken $script:AppIdentityToken `
                 -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell `
                 -RegisterProvider { param($Definition) } `
                 -InspectProvider { param($Name) $script:BadStoredDefinition } `
@@ -214,6 +234,7 @@ try {
         Assert-Throws {
             Register-HeiGeScheduledTask -TaskName $script:TestTask -NodePath $script:Node `
                 -ControllerPath $script:Controller -StateDirectory $script:State -TestMode `
+                -AppIdentityToken $script:AppIdentityToken `
                 -CurrentUserId "TESTDOMAIN\HeiGe User" -PowerShellPath $script:PowerShell `
                 -RegisterProvider { param($Definition) } `
                 -InspectProvider { param($Name) $script:BadStoredDefinition } `
@@ -404,6 +425,7 @@ try {
         Assert-Throws {
             Invoke-HeiGeNodeControllerProcess -NodePath $script:Node -CliPath $script:Controller `
                 -TaskName $script:TestTask -Port 9341 -StateDirectory $script:State `
+                -AppIdentityToken $script:AppIdentityToken `
                 -ProcessProvider { param($Spec) $script:FakeProcess } `
                 -WaitProvider { param($Process) throw "wait failed after launch" } `
                 -StopProvider {
@@ -422,6 +444,7 @@ try {
         Assert-Throws {
             Invoke-HeiGeNodeControllerProcess -NodePath $script:Node -CliPath $script:Controller `
                 -TaskName $script:TestTask -Port 9341 -StateDirectory $script:State `
+                -AppIdentityToken $script:AppIdentityToken `
                 -ProcessProvider { param($Spec) throw "node launch failed" }
         } "node launch failed"
     }
@@ -429,15 +452,20 @@ try {
     Test-Case "Node terminal result uses the stable Windows CLI invocation" {
         $script:FakeProcess = [pscustomobject]@{ HasExited = $true; ExitCode = 0 }
         $script:CapturedProcessSpec = $null
+        $script:CapturedProcessIdentity = $null
         $result = Invoke-HeiGeNodeControllerProcess -NodePath $script:Node -CliPath $script:Controller `
             -TaskName $script:TestTask -Port 9341 -StateDirectory $script:State `
+            -AppIdentityToken $script:AppIdentityToken `
             -ProcessProvider {
                 param($Spec)
                 $script:CapturedProcessSpec = $Spec
+                $script:CapturedProcessIdentity = $env:HEIGE_WINDOWS_APP_IDENTITY
                 [System.IO.File]::WriteAllText($Spec.StandardOutputPath, '{"action":"unregister"}')
                 $script:FakeProcess
             } -WaitProvider { param($Process) }
         Assert-Equal "unregister" $result.action
+        Assert-Equal $script:AppIdentityToken $script:CapturedProcessSpec.AppIdentityToken
+        Assert-Equal $script:AppIdentityToken $script:CapturedProcessIdentity
         foreach ($fragment in @(
             'controller', '--background', '--platform', 'windows', '--task-name',
             '--state-directory', '--port'
@@ -516,11 +544,12 @@ try {
                 New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
                 [System.IO.File]::WriteAllText(
                     $inertController,
-                    'param([string]$Action, [string]$TaskName, [int]$Port, [string]$StateDirectory); exit 0',
+                    'param([string]$Action, [string]$TaskName, [int]$Port, [string]$StateDirectory, [string]$AppIdentityToken); exit 0',
                     (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $true)
                 )
                 $registered = Register-HeiGeScheduledTask -TaskName $TaskName -NodePath $nativePowerShell `
                     -ControllerPath $inertController -StateDirectory $stateDirectory -TestMode `
+                    -AppIdentityToken $script:AppIdentityToken `
                     -PowerShellPath $nativePowerShell
                 Assert-True $registered.Verified
                 Start-ScheduledTask -TaskPath "\" -TaskName $TaskName
