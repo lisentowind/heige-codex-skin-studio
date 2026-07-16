@@ -234,6 +234,24 @@ test("the protected action never runs when lock acquisition fails", async (t) =>
   assert.equal(protectedActionRan, false);
 });
 
+test("filesystem claims retain exact 64-bit identities as bigint", async (t) => {
+  const { lockPath } = await fixture(t);
+  let publishedMetadata;
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath, {
+    testHooks: {
+      "after-publish": async ({ claim }) => {
+        publishedMetadata = claim.metadata;
+      },
+    },
+  }));
+  t.after(() => lease.release());
+
+  const exact = await stat(lockPath, { bigint: true });
+  assert.equal(typeof publishedMetadata.dev, "bigint");
+  assert.equal(typeof publishedMetadata.ino, "bigint");
+  assert.deepEqual(publishedMetadata, { dev: exact.dev, ino: exact.ino });
+});
+
 test("withOperationLock releases the lease when the protected action throws", async (t) => {
   const { lockPath } = await fixture(t);
   const failure = new Error("protected action failed");
@@ -932,7 +950,7 @@ test("foreign heartbeat temporary files are preserved conservatively", async (t)
 test("heartbeat temporary cleanup requires a strict released claim binding", async (t) => {
   const { lockPath } = await fixture(t);
   const releasedLease = await acquireOperationLock(acquisitionOptions(lockPath));
-  const claimMetadata = await stat(lockPath);
+  const claimMetadata = await stat(lockPath, { bigint: true });
   await releasedLease.release();
   const releasedTemp = heartbeatTempPath(lockPath, releasedLease.nonce);
   await writePrivateJson(releasedTemp, {
@@ -956,7 +974,7 @@ test("heartbeat temporary cleanup preserves a strict live claim", async (t) => {
   const { lockPath } = await fixture(t);
   const liveLease = await acquireOperationLock(acquisitionOptions(lockPath));
   t.after(() => liveLease.release());
-  const claimMetadata = await stat(lockPath);
+  const claimMetadata = await stat(lockPath, { bigint: true });
   const liveTemp = heartbeatTempPath(lockPath, liveLease.nonce);
   await writePrivateJson(liveTemp, {
     schemaVersion: 2,
@@ -1669,7 +1687,7 @@ test("handled checkpoint publication faults keep complete artifacts bounded", as
 });
 
 test("final artifact collection preserves a racing inode replacement", async (t) => {
-  const { lockPath } = await fixture(t);
+  const { root, lockPath } = await fixture(t);
   const initial = await acquireOperationLock(acquisitionOptions(lockPath));
   await initial.release();
   await assert.rejects(
@@ -1690,6 +1708,17 @@ test("final artifact collection preserves a racing inode replacement", async (t)
       nonce: initial.nonce,
     },
   });
+  const replacementPath = join(root, "final-racing-replacement.json");
+  await writePrivateJson(replacementPath, replacement);
+  const [candidateInfo, replacementInfo] = await Promise.all([
+    lstat(candidatePath, { bigint: true }),
+    lstat(replacementPath, { bigint: true }),
+  ]);
+  assert.notDeepEqual(
+    [candidateInfo.dev, candidateInfo.ino],
+    [replacementInfo.dev, replacementInfo.ino],
+    "fixture must provide a distinct replacement inode",
+  );
 
   await assert.rejects(
     acquireOperationLock(acquisitionOptions(lockPath, {
@@ -1697,7 +1726,7 @@ test("final artifact collection preserves a racing inode replacement", async (t)
         "before-artifact-tombstone": async ({ path }) => {
           if (path !== candidatePath) return;
           await unlink(path);
-          await writePrivateJson(path, replacement);
+          await rename(replacementPath, path);
         },
       },
     })),
@@ -1747,7 +1776,7 @@ test("orphan quarantine recovery restores an artifact that became reachable befo
     nonce: "saved-root",
   });
   await writePrivateJson(savedRootPath, savedRoot);
-  const savedMetadata = await stat(savedRootPath);
+  const savedMetadata = await stat(savedRootPath, { bigint: true });
   const candidatePath = successorPath(lockPath, savedRoot.nonce);
   const candidate = ownerRecord({
     identity: { pid: 98_002, startedAt: "saved-successor" },
@@ -1820,7 +1849,7 @@ test("orphan quarantine recovery restores an artifact that became reachable befo
 test("orphan quarantine recovery restores a racing replacement after the collector crashes", {
   skip: process.platform === "win32",
 }, async (t) => {
-  const { lockPath } = await fixture(t);
+  const { root, lockPath } = await fixture(t);
   const current = await acquireOperationLock(acquisitionOptions(lockPath));
   await current.release();
   const savedRootPath = join(dirname(lockPath), "replacement-root");
@@ -1829,7 +1858,7 @@ test("orphan quarantine recovery restores a racing replacement after the collect
     nonce: "replacement-root",
   });
   await writePrivateJson(savedRootPath, savedRoot);
-  const savedMetadata = await stat(savedRootPath);
+  const savedMetadata = await stat(savedRootPath, { bigint: true });
   const candidatePath = successorPath(lockPath, savedRoot.nonce);
   const predecessor = {
     dev: String(savedMetadata.dev),
@@ -1846,9 +1875,20 @@ test("orphan quarantine recovery restores a racing replacement after the collect
     nonce: "racing-replacement",
     predecessor,
   });
+  const replacementPath = join(root, "orphan-racing-replacement.json");
+  await writePrivateJson(replacementPath, replacement);
+  const [candidateInfo, replacementInfo] = await Promise.all([
+    lstat(candidatePath, { bigint: true }),
+    lstat(replacementPath, { bigint: true }),
+  ]);
+  assert.notDeepEqual(
+    [candidateInfo.dev, candidateInfo.ino],
+    [replacementInfo.dev, replacementInfo.ino],
+    "fixture must provide a distinct replacement inode",
+  );
   const moduleUrl = new URL("../src/operation-lock.mjs", import.meta.url).href;
   const childSource = `
-    const { chmod, rename, unlink, writeFile } = await import("node:fs/promises");
+    const { rename, unlink } = await import("node:fs/promises");
     const { acquireOperationLock } = await import(${JSON.stringify(moduleUrl)});
     await acquireOperationLock({
       lockPath: ${JSON.stringify(lockPath)},
@@ -1860,8 +1900,7 @@ test("orphan quarantine recovery restores a racing replacement after the collect
         "before-artifact-tombstone": async ({ path }) => {
           if (path !== ${JSON.stringify(candidatePath)}) return;
           await unlink(path);
-          await writeFile(path, ${JSON.stringify(`${JSON.stringify(replacement)}\n`)}, { mode: 0o600 });
-          await chmod(path, 0o600);
+          await rename(${JSON.stringify(replacementPath)}, path);
           await rename(${JSON.stringify(savedRootPath)}, ${JSON.stringify(lockPath)});
         },
         "after-artifact-tombstone": async ({ path }) => {

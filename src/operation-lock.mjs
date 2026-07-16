@@ -227,13 +227,16 @@ function validateOwnerRecord(value, code = "LOCK_MALFORMED") {
 }
 
 function fileMode(metadata) {
-  return metadata.mode & 0o777;
+  return typeof metadata.mode === "bigint"
+    ? Number(metadata.mode & 0o777n)
+    : metadata.mode & 0o777;
 }
 
 function requireCurrentUser(metadata, code, description) {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
   if (
-    typeof process.getuid === "function" &&
-    metadata.uid !== process.getuid()
+    currentUid !== null &&
+    metadata.uid !== (typeof metadata.uid === "bigint" ? BigInt(currentUid) : currentUid)
   ) {
     throw lockError(
       code,
@@ -344,7 +347,7 @@ function createDurabilityAdapter(platform) {
 
 async function lstatIfPresent(path) {
   try {
-    return await lstat(path);
+    return await lstat(path, { bigint: true });
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
@@ -367,7 +370,7 @@ async function verifyRealDirectoryAncestors(path) {
   for (const current of pathParts(path)) {
     let metadata;
     try {
-      metadata = await lstat(current);
+      metadata = await lstat(current, { bigint: true });
     } catch (error) {
       if (error.code === "ENOENT") {
         throw lockError(
@@ -451,7 +454,7 @@ async function writeSyncedExclusiveFile(path, contents) {
     await handle.chmod(PRIVATE_FILE_MODE);
     await handle.writeFile(contents, "utf8");
     await handle.sync();
-    const metadata = await handle.stat();
+    const metadata = await handle.stat({ bigint: true });
     requirePrivateFile(metadata, "LOCK_PERMISSIONS", `staging file ${path}`);
     await handle.close();
     handle = undefined;
@@ -479,7 +482,7 @@ async function readJsonFile(
 ) {
   let metadata;
   try {
-    metadata = await lstat(path);
+    metadata = await lstat(path, { bigint: true });
   } catch (error) {
     if (allowMissing && error.code === "ENOENT") return null;
     if (error.code === "ENOENT") {
@@ -543,7 +546,7 @@ async function createPrivateQuarantine(parentPath) {
     );
     try {
       await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
-      const metadata = await lstat(path);
+      const metadata = await lstat(path, { bigint: true });
       requirePrivateDirectory(metadata, `artifact quarantine ${path}`);
       activeQuarantineDirectories.add(path);
       return path;
@@ -586,7 +589,7 @@ async function restoreQuarantinedArtifact({
     await link(quarantinePath, path);
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
-    const existing = await lstat(path);
+    const existing = await lstat(path, { bigint: true });
     if (existing.dev !== moved.dev || existing.ino !== moved.ino) throw error;
   }
   await durability.syncDirectory(dirname(path));
@@ -647,7 +650,7 @@ async function removeExactArtifact({
       snapshot,
     });
 
-    const moved = await lstat(quarantinePath);
+    const moved = await lstat(quarantinePath, { bigint: true });
     if (
       moved.dev !== snapshot.metadata.dev ||
       moved.ino !== snapshot.metadata.ino
@@ -1258,7 +1261,7 @@ function parseQuarantineDirectoryName(name) {
 async function readPrivateArtifactSnapshot(path, { allowMissing = false } = {}) {
   let metadata;
   try {
-    metadata = await lstat(path);
+    metadata = await lstat(path, { bigint: true });
   } catch (error) {
     if (allowMissing && error.code === "ENOENT") return null;
     throw error;
@@ -1386,7 +1389,7 @@ async function cleanupOrphanQuarantines({
     let initialDirectory;
     let initialContents;
     try {
-      initialDirectory = await lstat(originalDirectory);
+      initialDirectory = await lstat(originalDirectory, { bigint: true });
       requirePrivateDirectory(
         initialDirectory,
         `artifact quarantine ${originalDirectory}`,
@@ -1422,7 +1425,7 @@ async function cleanupOrphanQuarantines({
     await durability.syncDirectory(parentPath);
 
     try {
-      const movedDirectory = await lstat(tombstoneDirectory);
+      const movedDirectory = await lstat(tombstoneDirectory, { bigint: true });
       if (
         movedDirectory.dev !== initialDirectory.dev ||
         movedDirectory.ino !== initialDirectory.ino
@@ -1994,7 +1997,7 @@ async function assertCapabilityOwned(capability) {
     return assertWindowsClaimOwned(capability);
   }
   await verifyRealDirectoryAncestors(capability.stateRoot);
-  const rootMetadata = await lstat(capability.stateRoot);
+  const rootMetadata = await lstat(capability.stateRoot, { bigint: true });
   requirePrivateDirectory(rootMetadata, `trusted stateRoot ${capability.stateRoot}`);
   return assertClaimOwned(capability.lockPath, capability.claim);
 }
@@ -2346,7 +2349,7 @@ function validateWindowsSecurity(value) {
 async function readWindowsOwnerDirectory(path, security, { allowMissing = false } = {}) {
   let directory;
   try {
-    directory = await lstat(path);
+    directory = await lstat(path, { bigint: true });
   } catch (error) {
     if (allowMissing && error.code === "ENOENT") return null;
     if (error.code === "ENOENT") {
@@ -2365,11 +2368,11 @@ async function readWindowsOwnerDirectory(path, security, { allowMissing = false 
   const ownerPath = join(path, WINDOWS_OWNER_FILE);
   let file;
   try {
-    file = await lstat(ownerPath);
+    file = await lstat(ownerPath, { bigint: true });
   } catch (cause) {
     throw lockError("LOCK_MALFORMED", `Windows owner directory lacks owner.json: ${path}`, cause);
   }
-  if (!file.isFile() || file.isSymbolicLink() || file.size <= 0 || file.size > 64 * 1024) {
+  if (!file.isFile() || file.isSymbolicLink() || file.size <= 0n || file.size > 64n * 1024n) {
     throw lockError("LOCK_MALFORMED", `Windows owner.json is not one bounded regular file: ${ownerPath}`);
   }
   try {
@@ -2382,12 +2385,12 @@ async function readWindowsOwnerDirectory(path, security, { allowMissing = false 
   let opened;
   try {
     handle = await open(ownerPath, "r");
-    opened = await handle.stat();
+    opened = await handle.stat({ bigint: true });
     if (opened.dev !== file.dev || opened.ino !== file.ino || opened.size !== file.size) {
       throw lockError("LOCK_READ_FAILED", `Windows owner file changed while opening: ${ownerPath}`);
     }
     raw = await handle.readFile("utf8");
-    const after = await handle.stat();
+    const after = await handle.stat({ bigint: true });
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) {
       throw lockError("LOCK_READ_FAILED", `Windows owner file changed while reading: ${ownerPath}`);
     }
@@ -2437,7 +2440,7 @@ async function prepareWindowsStateRoot(stateRoot, security) {
       throw lockError("LOCK_PARENT_FAILED", `could not create Windows state root ${stateRoot}`, error);
     }
   }
-  const metadata = await lstat(stateRoot);
+  const metadata = await lstat(stateRoot, { bigint: true });
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw lockError("LOCK_PATH_INVALID", `Windows state root must be a real directory: ${stateRoot}`);
   }

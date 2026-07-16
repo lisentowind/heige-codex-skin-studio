@@ -141,13 +141,15 @@ try {
         $nodeCommand = Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1
         $nodePath = [string]$nodeCommand.Path
         $runtimeModule = Join-Path $script:RepositoryRoot "src\windows-runtime.mjs"
+        $nodeHelper = Join-Path $script:Root "identity-token-helper.mjs"
         $nodeScript = @'
 import { pathToFileURL } from "node:url";
-const { decodeWindowsAppIdentityToken } = await import(pathToFileURL(process.argv[1]).href);
-const app = decodeWindowsAppIdentityToken(process.argv[2]);
+const { decodeWindowsAppIdentityToken } = await import(pathToFileURL(process.argv[2]).href);
+const app = decodeWindowsAppIdentityToken(process.argv[3]);
 process.stdout.write(JSON.stringify(app));
 '@
-        $json = & $nodePath --input-type=module -e $nodeScript $runtimeModule $token 2>&1
+        [System.IO.File]::WriteAllText($nodeHelper, $nodeScript, [System.Text.UTF8Encoding]::new($false))
+        $json = & $nodePath $nodeHelper $runtimeModule $token 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "Node rejected the canonical PowerShell identity token: $($json -join "`n")"
         }
