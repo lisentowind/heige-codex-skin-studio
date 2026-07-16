@@ -4,16 +4,20 @@ import test from "node:test";
 import {
   controllerInjectionPreference,
   createBackgroundReadinessVerifier,
+  createWindowsRuntimeProbe,
   enforceLegacyMigrationFence,
   migrateLegacyLifecycle,
   normalizeWindowsBackgroundStatus,
   offlineDisablePersistence,
   probeWindowsCdpProcess,
+  productionPreflight,
   runCli,
   runControllerProcess,
   validatePortOwner,
   waitForAppliedSkin,
 } from "../src/cli.mjs";
+
+import { validateWindowsRuntimeSnapshot } from "../src/windows-runtime.mjs";
 
 function deps(overrides = {}) {
   return {
@@ -1136,6 +1140,162 @@ test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner,
   }), true);
   assert.equal(calls.every((entry) => !entry.includes("/usr/sbin/lsof")), true);
   assert.equal(calls.every((entry) => entry.join(" ").includes("Get-NetTCPConnection")), true);
+});
+
+test("production preflight binds the Windows platform to the trusted runtime snapshot route", async () => {
+  const calls = [];
+  const snapshot = validateWindowsRuntimeSnapshot({
+    schemaVersion: 1,
+    app: {
+      kind: "Win32",
+      executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+      installPath: "C:\\Program Files\\Codex",
+      productName: "Codex",
+      packageFullName: null,
+      aumid: null,
+      launchTarget: "C:\\Program Files\\Codex\\Codex.exe",
+    },
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    processes: [],
+    listeners: [],
+  });
+  const result = await productionPreflight({
+    port: 9341,
+    requirePort: false,
+    platform: "win32",
+    dependencies: {
+      queryWindowsRuntime: async (input) => {
+        calls.push(input);
+        return snapshot;
+      },
+      resolveMacApp: async () => {
+        throw new Error("must not resolve a macOS app on Windows");
+      },
+      listMacProcesses: async () => {
+        throw new Error("must not execute /bin/ps on Windows");
+      },
+      validateMacPortOwner: async () => {
+        throw new Error("must not execute lsof on Windows");
+      },
+      assertMacPortFree: async () => {
+        throw new Error("must not execute lsof on Windows");
+      },
+    },
+  });
+  assert.deepEqual(result, {
+    appPath: "C:\\Program Files\\Codex\\Codex.exe",
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    process: null,
+  });
+  assert.deepEqual(calls, [{ port: 9341 }]);
+});
+
+test("Windows production controller probe keeps Store attribution and rejects a same-name foreign listener", async () => {
+  const storeRoot = "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0.0.0_x64__abc";
+  const base = {
+    schemaVersion: 1,
+    app: {
+      kind: "StoreAumid",
+      executablePath: null,
+      installPath: storeRoot,
+      productName: "Codex",
+      packageFullName: "OpenAI.Codex_1.0.0.0_x64__abc",
+      aumid: "OpenAI.Codex_abc!App",
+      launchTarget: "aumid:OpenAI.Codex_abc!App",
+    },
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+  };
+  const exactProcess = {
+    pid: 4242,
+    parentProcessId: 100,
+    executablePath: `${storeRoot}\\Codex.exe`,
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  };
+  let snapshot = {
+    ...base,
+    processes: [exactProcess],
+    listeners: [{
+      pid: exactProcess.pid,
+      executablePath: exactProcess.executablePath,
+      startedAt: exactProcess.startedAt,
+      processName: "Codex",
+      localAddress: "127.0.0.1",
+      localPort: 9341,
+    }],
+  };
+  const probe = createWindowsRuntimeProbe({
+    port: 9341,
+    queryWindowsRuntime: async () => snapshot,
+  });
+  assert.deepEqual(await probe(), {
+    pid: exactProcess.pid,
+    executablePath: exactProcess.executablePath,
+    startedAt: exactProcess.startedAt,
+  });
+
+  snapshot = {
+    ...base,
+    processes: [exactProcess],
+    listeners: [{
+      pid: exactProcess.pid,
+      executablePath: "C:\\Temp\\ChatGPT.exe",
+      startedAt: exactProcess.startedAt,
+      processName: "ChatGPT",
+      localAddress: "127.0.0.1",
+      localPort: 9341,
+    }],
+  };
+  await assert.rejects(probe(), /resolved app|owner|identity|belong/i);
+});
+
+test("Windows production controller probe never hides an invalid process graph when no listener exists", async (t) => {
+  const executablePath = "C:\\Program Files\\Codex\\Codex.exe";
+  const base = {
+    schemaVersion: 1,
+    app: {
+      kind: "Win32",
+      executablePath,
+      installPath: "C:\\Program Files\\Codex",
+      productName: "Codex",
+      packageFullName: null,
+      aumid: null,
+      launchTarget: executablePath,
+    },
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    listeners: [],
+  };
+  const identity = {
+    executablePath,
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  };
+  let snapshot;
+  const probe = createWindowsRuntimeProbe({
+    port: 9341,
+    queryWindowsRuntime: async () => snapshot,
+  });
+
+  await t.test("root plus orphan cycle", async () => {
+    snapshot = {
+      ...base,
+      processes: [
+        { ...identity, pid: 10, parentProcessId: 0 },
+        { ...identity, pid: 20, parentProcessId: 30 },
+        { ...identity, pid: 30, parentProcessId: 20 },
+      ],
+    };
+    await assert.rejects(probe(), /cycle|orphan|unique root/i);
+  });
+
+  await t.test("conflicting PID identity", async () => {
+    snapshot = {
+      ...base,
+      processes: [
+        { ...identity, pid: 10, parentProcessId: 0 },
+        { ...identity, pid: 10, parentProcessId: 99 },
+      ],
+    };
+    await assert.rejects(probe(), /conflicting identity/i);
+  });
 });
 
 test("Windows CDP validation rejects non-loopback, multiple, and exact identity mismatches", async (t) => {

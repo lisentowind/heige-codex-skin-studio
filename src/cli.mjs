@@ -69,6 +69,12 @@ import {
 import { createStudioLogger } from "./studio-logger.mjs";
 import { loadTheme } from "./theme-schema.mjs";
 import { createSingleImageTheme, listThemes } from "./theme-store.mjs";
+import {
+  classifyWindowsPreflightSnapshot,
+  queryWindowsRuntimeSnapshot,
+  validateWindowsRuntimeSnapshot,
+} from "./windows-runtime.mjs";
+import { trustedWindowsPowerShellPath } from "./windows-secure-fs.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -210,6 +216,29 @@ function controllerPaths({ platform, stateDirectory, taskName }) {
   return pathsAtStateRoot(base, selected);
 }
 
+function windowsCliTestContext(platform, env = process.env) {
+  const keys = [
+    "HEIGE_TEST_WINDOWS_RUNTIME_FIXTURE",
+    "HEIGE_TEST_WINDOWS_STATE_ROOT",
+    "HEIGE_TEST_WINDOWS_TASK_NAME",
+  ];
+  const present = keys.filter((key) => env[key] !== undefined);
+  if (present.length === 0) return null;
+  if (platform !== "win32" || env.NODE_ENV !== "test" || present.length !== keys.length) {
+    throw new Error("Windows CLI test context requires win32, NODE_ENV=test, and all HEIGE_TEST fields");
+  }
+  const taskName = env.HEIGE_TEST_WINDOWS_TASK_NAME;
+  if (!WINDOWS_TEST_TASK.test(taskName)) {
+    throw new Error("Windows CLI test task name must contain an exact isolated GUID");
+  }
+  const paths = controllerPaths({
+    platform,
+    stateDirectory: env.HEIGE_TEST_WINDOWS_STATE_ROOT,
+    taskName,
+  });
+  return Object.freeze({ paths, taskName });
+}
+
 function portFrom(value) {
   const port = value === undefined ? DEFAULT_CDP_PORT : Number(value);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
@@ -253,36 +282,48 @@ function publicProcess(value) {
   };
 }
 
-async function readProcessIdentity(pid, platform = process.platform) {
+export async function readProcessIdentity(pid, platform = process.platform) {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("进程 PID 无效");
   if (platform === "win32") {
-    const systemRoot = process.env.SystemRoot;
-    if (typeof systemRoot !== "string" || systemRoot.length === 0) {
-      throw new Error("Windows SystemRoot 不可用");
-    }
-    const powershell = join(
-      systemRoot,
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    );
+    const powershell = trustedWindowsPowerShellPath();
     try {
-      const { stdout } = await execFile(powershell, [
+      const { stdout, stderr = "" } = await execFile(powershell, [
+        "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
-          `[Console]::Out.Write(($p.Id.ToString() + '|' + ` +
-          `$p.StartTime.ToUniversalTime().ToString('o')))`,
-      ]);
-      const [observedPid, startedAt, ...extra] = stdout.trim().split("|");
-      if (extra.length > 0 || Number(observedPid) !== pid || !startedAt) return null;
-      return { pid, startedAt };
-    } catch (error) {
-      if (/Cannot find a process|No process was found/i.test(String(error?.stderr ?? error?.message))) {
-        return null;
+        `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; ` +
+          `if ($null -eq $p) { [Console]::Out.Write('null') } else { ` +
+          `$result = [pscustomobject][ordered]@{ ` +
+          `pid = [int]$p.Id; startedAt = $p.StartTime.ToUniversalTime().ToString('o') }; ` +
+          `[Console]::Out.Write((ConvertTo-Json -InputObject $result -Compress)) }`,
+      ], {
+        timeout: 15_000,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+      });
+      if (String(stderr).trim().length !== 0) {
+        throw new Error("Windows process identity query wrote unexpected stderr");
       }
+      let value;
+      try {
+        value = JSON.parse(String(stdout));
+      } catch (cause) {
+        throw new Error("Windows process identity query stdout is not one JSON document", { cause });
+      }
+      if (value === null) return null;
+      if (
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).sort().join("\0") !== ["pid", "startedAt"].sort().join("\0") ||
+        value.pid !== pid ||
+        typeof value.startedAt !== "string" ||
+        !WINDOWS_PROCESS_STARTED_AT.test(value.startedAt)
+      ) {
+        throw new Error("Windows process identity query returned an invalid identity");
+      }
+      return { pid, startedAt: value.startedAt };
+    } catch (error) {
       throw error;
     }
   }
@@ -439,7 +480,7 @@ export async function validatePortOwner(port, processIdentity, {
   return pids.length === 1 && Number(pids[0]) === processIdentity.pid;
 }
 
-async function assertPortIsFree(port) {
+async function assertMacPortIsFree(port) {
   try {
     const { stdout } = await execFile("/usr/sbin/lsof", [
       "-nP",
@@ -459,9 +500,29 @@ async function assertPortIsFree(port) {
   return true;
 }
 
-async function productionPreflight({ port, requirePort = true } = {}) {
-  const app = await resolveCodexApp();
-  const processes = await listCodexProcesses({ app });
+export async function productionPreflight({
+  port,
+  requirePort = true,
+  platform = process.platform,
+  dependencies = {},
+} = {}) {
+  if (platform === "win32") {
+    const queryWindowsRuntime = dependencies.queryWindowsRuntime ?? ((input) =>
+      queryWindowsRuntimeSnapshot({
+        ...input,
+        powershellPath: windowsPowerShellPath(),
+        commonScriptPath: join(repositoryRoot, "scripts", "windows", "lib", "common.ps1"),
+      }));
+    const snapshot = await queryWindowsRuntime({ port });
+    return classifyWindowsPreflightSnapshot(snapshot, { port, requirePort });
+  }
+  if (platform !== "darwin") throw new Error(`不支持的平台：${platform}`);
+  const resolveMacApp = dependencies.resolveMacApp ?? resolveCodexApp;
+  const listMacProcesses = dependencies.listMacProcesses ?? listCodexProcesses;
+  const validateMacPortOwner = dependencies.validateMacPortOwner ?? validatePortOwner;
+  const assertMacPortFree = dependencies.assertMacPortFree ?? assertMacPortIsFree;
+  const app = await resolveMacApp({ platform });
+  const processes = await listMacProcesses({ app });
   const candidates = requirePort
     ? processes.filter((entry) => entry.cdpPort === port)
     : processes;
@@ -473,16 +534,39 @@ async function productionPreflight({ port, requirePort = true } = {}) {
     throw error;
   }
   const processIdentity = candidates.length === 0 ? null : publicProcess(candidates[0]);
-  if (requirePort && !(await validatePortOwner(port, processIdentity))) {
+  if (requirePort && !(await validateMacPortOwner(port, processIdentity, { platform }))) {
     const error = new Error(`端口不属于目标 Codex：${port}`);
     error.code = "CDP_NOT_OWNED";
     throw error;
   }
-  if (!requirePort) await assertPortIsFree(port);
+  if (!requirePort) await assertMacPortFree(port);
   return {
     appPath: app.appPath,
     nodePath: process.execPath,
     process: processIdentity,
+  };
+}
+
+export function createWindowsRuntimeProbe({ port, queryWindowsRuntime }) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Windows controller port is invalid");
+  }
+  if (typeof queryWindowsRuntime !== "function") {
+    throw new Error("Windows controller runtime query is required");
+  }
+  return async () => {
+    const snapshot = await queryWindowsRuntime({ port });
+    if (Array.isArray(snapshot?.listeners) && snapshot.listeners.length === 0) {
+      classifyWindowsPreflightSnapshot(snapshot, {
+        port,
+        requirePort: false,
+      });
+      return null;
+    }
+    return classifyWindowsPreflightSnapshot(snapshot, {
+      port,
+      requirePort: true,
+    }).process;
   };
 }
 
@@ -645,17 +729,7 @@ export function controllerInjectionPreference({ ephemeral = false, preferStored 
 }
 
 function windowsPowerShellPath() {
-  const systemRoot = process.env.SystemRoot;
-  if (typeof systemRoot !== "string" || systemRoot.length === 0) {
-    throw new Error("Windows SystemRoot 不可用");
-  }
-  return join(
-    systemRoot,
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
+  return trustedWindowsPowerShellPath();
 }
 
 async function runWindowsControllerAction({
@@ -771,7 +845,7 @@ export function createBackgroundReadinessVerifier({
   });
 }
 
-async function productionController({
+export async function productionController({
   port,
   paths,
   roots,
@@ -783,6 +857,7 @@ async function productionController({
   startupHandshake = null,
   background = false,
   migrationAuthorization = null,
+  preflight = null,
 }) {
   const injectionPreferStored = controllerInjectionPreference({ ephemeral, preferStored });
   const backgroundIdentity = controllerBackgroundIdentity(
@@ -791,14 +866,29 @@ async function productionController({
   );
   const lock = await lockOptions(paths, platform);
   let deferredWindowsUnregister = false;
+  const queryWindowsRuntime = deps.queryWindowsRuntime ?? ((input) =>
+    queryWindowsRuntimeSnapshot({
+      ...input,
+      powershellPath: windowsPowerShellPath(),
+      commonScriptPath: join(repositoryRoot, "scripts", "windows", "lib", "common.ps1"),
+    }));
+  const probeWindows = platform === "win32"
+    ? createWindowsRuntimeProbe({ port, queryWindowsRuntime })
+    : null;
   const probe = async () => {
-    if (platform === "win32") return probeWindowsCdpProcess(port);
+    if (platform === "win32") return probeWindows();
     const app = await resolveCodexApp({ platform });
     const candidates = (await listCodexProcesses({ app })).filter((entry) => entry.cdpPort === port);
     if (candidates.length === 0) return null;
     if (candidates.length !== 1) throw new Error("Codex 进程身份不唯一");
     return publicProcess(candidates[0]);
   };
+  if (preflight?.process !== undefined && preflight.process !== null) {
+    const current = await probe();
+    if (!sameProcessIdentity(current, preflight.process)) {
+      throw new Error("Codex 进程在 controller 创建前已变化");
+    }
+  }
   const initial = await readStudioState(paths.statePath);
   const logger = createStudioLogger({
     path: paths.logPath,
@@ -824,7 +914,9 @@ async function productionController({
     probeCurrentProcess: probe,
     validatePortOwner: async (candidate) => {
       const current = await probe();
-      return sameProcessIdentity(current, candidate) && validatePortOwner(port, candidate, { platform });
+      if (!sameProcessIdentity(current, candidate)) return false;
+      if (platform === "win32") return true;
+      return validatePortOwner(port, candidate, { platform });
     },
     inspectSkin: () => deps.skinStatus({ port }),
     injectSkin: async ({ themeId, control, targetIds }) => {
@@ -1519,13 +1611,18 @@ export async function offlineDisablePersistence({
   );
 }
 
-async function productionUnregisterBackground({ paths, platform, port }) {
+async function productionUnregisterBackground({
+  paths,
+  platform,
+  port,
+  taskName = WINDOWS_PRODUCTION_TASK,
+}) {
   if (platform === "darwin") {
     await unregisterControllerAgent();
   } else if (platform === "win32") {
     await runWindowsControllerAction({
       action: "unregister",
-      taskName: WINDOWS_PRODUCTION_TASK,
+      taskName,
       port,
       stateRoot: paths.stateRoot,
     });
@@ -1540,7 +1637,12 @@ async function productionUnregisterBackground({ paths, platform, port }) {
   });
 }
 
-async function productionInspectBackground({ platform, paths, port }) {
+async function productionInspectBackground({
+  platform,
+  paths,
+  port,
+  taskName = WINDOWS_PRODUCTION_TASK,
+}) {
   if (platform === "darwin") {
     const value = await inspectLaunchAgent();
     return {
@@ -1551,7 +1653,7 @@ async function productionInspectBackground({ platform, paths, port }) {
   if (platform === "win32") {
     const value = await runWindowsControllerAction({
       action: "status",
-      taskName: WINDOWS_PRODUCTION_TASK,
+      taskName,
       port,
       stateRoot: paths.stateRoot,
     });
@@ -1560,7 +1662,7 @@ async function productionInspectBackground({ platform, paths, port }) {
   throw new Error(`不支持的平台：${platform}`);
 }
 
-async function productionOfflineDisable({ paths, platform, port, expectedRevision }) {
+async function productionOfflineDisable({ paths, platform, port, expectedRevision, taskName }) {
   const stateLock = await lockOptions(paths, platform);
   return offlineDisablePersistence({
     statePath: paths.statePath,
@@ -1578,8 +1680,8 @@ async function productionOfflineDisable({ paths, platform, port, expectedRevisio
       writeSession: writeSessionState,
       recoverTransition: recoverStateTransition,
       newTransitionNonce: randomUUID,
-      unregisterBackground: () => productionUnregisterBackground({ paths, platform, port }),
-      inspectBackground: () => productionInspectBackground({ paths, platform, port }),
+      unregisterBackground: () => productionUnregisterBackground({ paths, platform, port, taskName }),
+      inspectBackground: () => productionInspectBackground({ paths, platform, port, taskName }),
     },
   });
 }
@@ -1604,10 +1706,20 @@ async function productionChooseThemeInputs() {
   }
 }
 
-function defaults(overrides, { paths: selectedPaths, platform = process.platform } = {}) {
+function defaults(overrides, {
+  paths: selectedPaths,
+  platform = process.platform,
+  taskName,
+} = {}) {
   const paths = overrides.paths ?? selectedPaths ?? resolveStudioPaths({ platform });
   const bundledThemesRoot = join(repositoryRoot, "themes");
   const roots = [bundledThemesRoot, paths.userThemesRoot];
+  const queryWindowsRuntime = overrides.queryWindowsRuntime ?? ((input) =>
+    queryWindowsRuntimeSnapshot({
+      ...input,
+      powershellPath: windowsPowerShellPath(),
+      commonScriptPath: join(repositoryRoot, "scripts", "windows", "lib", "common.ps1"),
+    }));
   const base = {
     bundledThemesRoot,
     userThemesRoot: paths.userThemesRoot,
@@ -1623,7 +1735,12 @@ function defaults(overrides, { paths: selectedPaths, platform = process.platform
     removeSkin,
     skinStatus,
     readState: () => readStudioState(paths.statePath),
-    preflightLifecycle: productionPreflight,
+    preflightLifecycle: (input) => productionPreflight({
+      ...input,
+      platform,
+      dependencies: { queryWindowsRuntime },
+    }),
+    queryWindowsRuntime,
     chooseThemeInputs: productionChooseThemeInputs,
   };
   const merged = { ...base, ...overrides };
@@ -1639,7 +1756,13 @@ function defaults(overrides, { paths: selectedPaths, platform = process.platform
   merged.registerEphemeralController = overrides.registerEphemeralController ?? ((input) =>
     productionRegisterEphemeral({ ...input, deps: merged, paths: merged.paths }));
   merged.createController = overrides.createController ?? ((input) =>
-    productionController({ ...input, deps: merged, paths: merged.paths, roots: merged.roots }));
+    productionController({
+      ...input,
+      deps: merged,
+      paths: merged.paths,
+      roots: merged.roots,
+      taskName: input.taskName ?? taskName,
+    }));
   merged.runController = overrides.runController ?? (overrides.createController
     ? (controller) => controller.start()
     : ((controller, options) => runControllerProcess(controller, {
@@ -1653,6 +1776,7 @@ function defaults(overrides, { paths: selectedPaths, platform = process.platform
       ...input,
       paths: merged.paths,
       platform,
+      taskName,
     }));
   merged.migrateLegacy = overrides.migrateLegacy ?? ((input) =>
     productionMigrateLegacy({ ...input, deps: merged, paths: merged.paths, roots: merged.roots }));
@@ -1729,7 +1853,12 @@ export async function runCli(argv, overrides = {}) {
   const selectedControllerPlatform = command === "controller"
     ? controllerPlatform(args.platform)
     : process.platform;
-  const selectedTaskName = command === "controller" ? args["task-name"] : undefined;
+  const testContext = command === "controller"
+    ? null
+    : windowsCliTestContext(selectedControllerPlatform);
+  const selectedTaskName = command === "controller"
+    ? args["task-name"]
+    : testContext?.taskName;
   const selectedBackgroundIdentity = command === "controller"
     ? controllerBackgroundIdentity(selectedControllerPlatform, selectedTaskName)
     : undefined;
@@ -1739,10 +1868,11 @@ export async function runCli(argv, overrides = {}) {
       stateDirectory: args["state-directory"],
       taskName: selectedTaskName,
     })
-    : undefined;
+    : testContext?.paths;
   const deps = defaults(overrides, {
     paths: selectedPaths,
     platform: selectedControllerPlatform,
+    taskName: selectedTaskName,
   });
   if (command === "help") {
     return {
@@ -1935,14 +2065,50 @@ export async function runCli(argv, overrides = {}) {
     });
   }
   if (command === "doctor") {
+    const selectedPort = portFrom(args.port);
+    if (selectedControllerPlatform === "win32") {
+      const snapshot = validateWindowsRuntimeSnapshot(
+        await deps.queryWindowsRuntime({ port: selectedPort }),
+      );
+      const offline = snapshot.listeners.length === 0
+        ? classifyWindowsPreflightSnapshot(snapshot, {
+          port: selectedPort,
+          requirePort: false,
+        })
+        : null;
+      const exact = snapshot.listeners.length === 0
+        ? null
+        : classifyWindowsPreflightSnapshot(snapshot, {
+          port: selectedPort,
+          requirePort: true,
+        });
+      const runtime = {
+        appVersion: null,
+        processRunning: (offline?.process ?? exact?.process ?? null) !== null,
+        processHasDebugFlag: exact !== null,
+        portOpen: exact !== null,
+        portBrowser: null,
+      };
+      return {
+        platform: "win32",
+        app: snapshot.app.launchTarget,
+        appFound: true,
+        candidates: [snapshot.app.launchTarget],
+        bundledNode: snapshot.nodePath,
+        bundledNodeFound: true,
+        cdpPort: selectedPort,
+        ...runtime,
+        diagnosis: classifyInjection(runtime),
+      };
+    }
     const discovery = await (deps.discoverCodex ?? discoverCodex)();
     const runtime = await (deps.runtimeDiagnostics ?? runtimeDiagnostics)({
       appPath: discovery.app,
-      port: portFrom(args.port),
+      port: selectedPort,
     });
     return {
       ...discovery,
-      cdpPort: portFrom(args.port),
+      cdpPort: selectedPort,
       ...runtime,
       diagnosis: classifyInjection(runtime),
     };

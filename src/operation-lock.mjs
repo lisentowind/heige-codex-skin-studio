@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   rmdir,
   unlink,
 } from "node:fs/promises";
@@ -20,6 +21,8 @@ import {
   relative,
   sep,
 } from "node:path";
+
+import { createWindowsSecurityAdapter } from "./windows-secure-fs.mjs";
 
 const LOCK_SCHEMA_VERSION = 2;
 const QUARANTINE_SCHEMA_VERSION = 1;
@@ -1987,6 +1990,9 @@ export function assertOperationLeaseCapability(lease) {
 }
 
 async function assertCapabilityOwned(capability) {
+  if (capability.provider === "windows") {
+    return assertWindowsClaimOwned(capability);
+  }
   await verifyRealDirectoryAncestors(capability.stateRoot);
   const rootMetadata = await lstat(capability.stateRoot);
   requirePrivateDirectory(rootMetadata, `trusted stateRoot ${capability.stateRoot}`);
@@ -2061,6 +2067,34 @@ function releaseOperationLease(lease) {
       await runStage(capability.options, "before-release", {
         claim: capability.claim,
       });
+      if (capability.provider === "windows") {
+        await assertWindowsClaimOwned(capability);
+        const releasePath = join(
+          capability.stateRoot,
+          `${WINDOWS_ARTIFACT_PREFIX}${basename(capability.lockPath)}.released.${capability.claim.owner.nonce}.${createNonce()}`,
+        );
+        try {
+          await rename(capability.lockPath, releasePath);
+        } catch (cause) {
+          throw notOwnedError("Windows owner directory changed before release", {
+            cause,
+            definitive: cause?.code === "ENOENT",
+          });
+        }
+        await runStage(capability.options, "after-windows-release-rename", {
+          claim: capability.claim,
+          releasePath,
+        });
+        const moved = await readWindowsOwnerDirectory(releasePath, capability.security);
+        if (!sameWindowsClaim(capability.claim, moved)) {
+          throw notOwnedError("Windows owner directory changed during release", {
+            definitive: true,
+          });
+        }
+        await removeWindowsClaimDirectory(releasePath, moved, capability.security);
+        capability.lifecycle = "released";
+        return true;
+      }
       await assertClaimOwned(capability.lockPath, capability.claim);
       const released = await publishReleaseMarker({
         lockPath: capability.lockPath,
@@ -2275,11 +2309,401 @@ async function compactOwnershipChain({
   }
 }
 
+const WINDOWS_OWNER_FILE = "owner.json";
+const WINDOWS_HEARTBEAT_FILE = "heartbeat.json";
+const WINDOWS_ARTIFACT_PREFIX = ".operation-lock.windows-";
+
+function validateWindowsSecurity(value) {
+  const security = value ?? createWindowsSecurityAdapter();
+  if (
+    security === null ||
+    typeof security !== "object" ||
+    ![
+      security.protectDirectory,
+      security.protectFile,
+      security.migrateDirectory,
+      security.migrateFile,
+      security.verifyDirectory,
+      security.verifyFile,
+    ]
+      .every((entry) => typeof entry === "function")
+  ) {
+    throw lockError("LOCK_OPTIONS_INVALID", "Windows security adapter is invalid");
+  }
+  if (
+    value !== undefined &&
+    process.platform === "win32" &&
+    process.env.NODE_ENV !== "test"
+  ) {
+    throw lockError(
+      "LOCK_OPTIONS_INVALID",
+      "Windows production security adapter cannot be overridden",
+    );
+  }
+  return security;
+}
+
+async function readWindowsOwnerDirectory(path, security, { allowMissing = false } = {}) {
+  let directory;
+  try {
+    directory = await lstat(path);
+  } catch (error) {
+    if (allowMissing && error.code === "ENOENT") return null;
+    if (error.code === "ENOENT") {
+      throw lockError("LOCK_DISAPPEARED", `Windows owner directory disappeared: ${path}`, error);
+    }
+    throw lockError("LOCK_READ_FAILED", `could not inspect Windows owner directory ${path}`, error);
+  }
+  if (!directory.isDirectory() || directory.isSymbolicLink()) {
+    throw lockError("LOCK_PATH_INVALID", `Windows owner path must be a real directory: ${path}`);
+  }
+  try {
+    await security.verifyDirectory(path);
+  } catch (cause) {
+    throw lockError("LOCK_PERMISSIONS", `Windows owner directory ACL is not private: ${path}`, cause);
+  }
+  const ownerPath = join(path, WINDOWS_OWNER_FILE);
+  let file;
+  try {
+    file = await lstat(ownerPath);
+  } catch (cause) {
+    throw lockError("LOCK_MALFORMED", `Windows owner directory lacks owner.json: ${path}`, cause);
+  }
+  if (!file.isFile() || file.isSymbolicLink() || file.size <= 0 || file.size > 64 * 1024) {
+    throw lockError("LOCK_MALFORMED", `Windows owner.json is not one bounded regular file: ${ownerPath}`);
+  }
+  try {
+    await security.verifyFile(ownerPath);
+  } catch (cause) {
+    throw lockError("LOCK_PERMISSIONS", `Windows owner file ACL is not private: ${ownerPath}`, cause);
+  }
+  let handle;
+  let raw;
+  let opened;
+  try {
+    handle = await open(ownerPath, "r");
+    opened = await handle.stat();
+    if (opened.dev !== file.dev || opened.ino !== file.ino || opened.size !== file.size) {
+      throw lockError("LOCK_READ_FAILED", `Windows owner file changed while opening: ${ownerPath}`);
+    }
+    raw = await handle.readFile("utf8");
+    const after = await handle.stat();
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) {
+      throw lockError("LOCK_READ_FAILED", `Windows owner file changed while reading: ${ownerPath}`);
+    }
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch (cause) {
+    throw lockError("LOCK_MALFORMED", `Windows owner file is not valid JSON: ${ownerPath}`, cause);
+  }
+  const owner = validateOwnerRecord(value);
+  if (owner.predecessor !== null || raw !== serializeJson(owner)) {
+    throw lockError("LOCK_MALFORMED", "Windows owner must be one canonical predecessor-free record");
+  }
+  return {
+    metadata: { dev: directory.dev, ino: directory.ino },
+    ownerMetadata: { dev: opened.dev, ino: opened.ino },
+    owner,
+    ownerPath,
+    path,
+    raw,
+  };
+}
+
+function sameWindowsClaim(left, right) {
+  return (
+    left !== null &&
+    right !== null &&
+    left.raw === right.raw &&
+    left.metadata.dev === right.metadata.dev &&
+    left.metadata.ino === right.metadata.ino &&
+    left.ownerMetadata.dev === right.ownerMetadata.dev &&
+    left.ownerMetadata.ino === right.ownerMetadata.ino
+  );
+}
+
+async function prepareWindowsStateRoot(stateRoot, security) {
+  await verifyRealDirectoryAncestors(dirname(stateRoot));
+  let created = false;
+  try {
+    await mkdir(stateRoot);
+    created = true;
+  } catch (error) {
+    if (error.code !== "EEXIST") {
+      throw lockError("LOCK_PARENT_FAILED", `could not create Windows state root ${stateRoot}`, error);
+    }
+  }
+  const metadata = await lstat(stateRoot);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw lockError("LOCK_PATH_INVALID", `Windows state root must be a real directory: ${stateRoot}`);
+  }
+  try {
+    if (created) {
+      await security.protectDirectory(stateRoot);
+    } else {
+      await security.migrateDirectory(stateRoot);
+    }
+    await security.verifyDirectory(stateRoot);
+  } catch (cause) {
+    throw lockError("LOCK_PERMISSIONS", `Windows state root ACL is not private: ${stateRoot}`, cause);
+  }
+}
+
+async function writeWindowsOwnerStaging({ path, owner, security }) {
+  try {
+    await mkdir(path);
+  } catch (cause) {
+    throw lockError("LOCK_STAGING_WRITE_FAILED", `could not create Windows owner staging ${path}`, cause);
+  }
+  try {
+    await security.protectDirectory(path);
+    await security.verifyDirectory(path);
+    const ownerPath = join(path, WINDOWS_OWNER_FILE);
+    const handle = await open(ownerPath, "wx");
+    try {
+      await handle.writeFile(serializeJson(owner), "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await security.protectFile(ownerPath);
+    await security.verifyFile(ownerPath);
+    return await readWindowsOwnerDirectory(path, security);
+  } catch (error) {
+    await rm(path, { recursive: true, force: true }).catch(() => {});
+    if (error instanceof OperationLockError) throw error;
+    throw lockError("LOCK_STAGING_WRITE_FAILED", `could not prepare Windows owner staging ${path}`, error);
+  }
+}
+
+async function removeWindowsClaimDirectory(path, expected, security) {
+  const observed = await readWindowsOwnerDirectory(path, security);
+  if (!sameWindowsClaim(expected, observed)) {
+    throw lockError("LOCK_ARTIFACT_CHANGED", `Windows owner directory changed before removal: ${path}`);
+  }
+  await rm(path, { recursive: true, force: false });
+}
+
+async function cleanupWindowsArtifacts({ stateRoot, lockPath, security, readProcessIdentity }) {
+  const base = basename(lockPath);
+  const names = await readdir(stateRoot);
+  for (const name of names) {
+    if (!name.startsWith(`${WINDOWS_ARTIFACT_PREFIX}${base}.`)) continue;
+    const path = join(stateRoot, name);
+    const claim = await readWindowsOwnerDirectory(path, security);
+    const hasPotentiallyLiveProducer =
+      name.startsWith(`${WINDOWS_ARTIFACT_PREFIX}${base}.staging.`) ||
+      name.startsWith(`${WINDOWS_ARTIFACT_PREFIX}${base}.released.`);
+    if (hasPotentiallyLiveProducer) {
+      const current = await probeOwner(claim.owner, readProcessIdentity);
+      if (processStillOwnsRecord(claim.owner, current)) continue;
+    }
+    await removeWindowsClaimDirectory(path, claim, security);
+  }
+}
+
+async function assertWindowsClaimOwned(capability) {
+  try {
+    await capability.security.verifyDirectory(capability.stateRoot);
+    const observed = await readWindowsOwnerDirectory(
+      capability.lockPath,
+      capability.security,
+    );
+    if (!sameWindowsClaim(capability.claim, observed)) {
+      throw notOwnedError("Windows owner directory no longer matches this lease", {
+        definitive: true,
+      });
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof OperationLockError && error.code === "LOCK_NOT_OWNED") throw error;
+    if (error instanceof OperationLockError && error.code === "LOCK_DISAPPEARED") {
+      throw notOwnedError("Windows owner directory disappeared", {
+        cause: error,
+        definitive: true,
+      });
+    }
+    throw notOwnedError("could not prove Windows operation lease ownership", { cause: error });
+  }
+}
+
+async function heartbeatWindowsLease(capability) {
+  await assertWindowsClaimOwned(capability);
+  const heartbeat = timestampFrom(capability.now);
+  const finalPath = join(capability.lockPath, WINDOWS_HEARTBEAT_FILE);
+  const temporaryPath = join(capability.lockPath, `.heartbeat.${createNonce()}.tmp`);
+  const record = serializeJson({
+    schemaVersion: LOCK_SCHEMA_VERSION,
+    nonce: capability.claim.owner.nonce,
+    pid: capability.claim.owner.pid,
+    startedAt: capability.claim.owner.startedAt,
+    heartbeat,
+  });
+  const handle = await open(temporaryPath, "wx");
+  try {
+    await handle.writeFile(record, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await capability.security.protectFile(temporaryPath);
+  await capability.security.verifyFile(temporaryPath);
+  await assertWindowsClaimOwned(capability);
+  await rename(temporaryPath, finalPath);
+  await capability.security.verifyFile(finalPath);
+  await assertWindowsClaimOwned(capability);
+  return heartbeat;
+}
+
+function createWindowsLease({ lockPath, stateRoot, claim, now, options, security }) {
+  let lease;
+  lease = Object.freeze({
+    chainDepth: 1,
+    heartbeatPath: join(lockPath, WINDOWS_HEARTBEAT_FILE),
+    lockPath,
+    nonce: claim.owner.nonce,
+    owner: Object.freeze({ ...claim.owner }),
+    async assertOwned() {
+      const capability = requireLeaseCapability(lease);
+      return assertWindowsClaimOwned(capability);
+    },
+    async heartbeat() {
+      const capability = requireLeaseCapability(lease);
+      return heartbeatWindowsLease(capability);
+    },
+    async release() {
+      return releaseOperationLease(lease);
+    },
+  });
+  leaseCapabilities.set(lease, {
+    claim,
+    commitTail: Promise.resolve(),
+    lifecycle: "active",
+    lockPath,
+    now,
+    options,
+    provider: "windows",
+    releasePromise: null,
+    security,
+    stateRoot,
+  });
+  return lease;
+}
+
+async function acquireWindowsOperationLock(options) {
+  const { lockPath, stateRoot } = validatePaths(options.lockPath, options.stateRoot);
+  const operation = validateOperation(options.operation);
+  const identity = validateIdentity(options.identity);
+  validateCompactionThreshold(options.compactionThreshold);
+  const now = options.now ?? (() => new Date());
+  if (typeof now !== "function") throw lockError("LOCK_CLOCK_FAILED", "now must be a function");
+  if (options.faultAt !== undefined && !SUPPORTED_FAULTS.has(options.faultAt)) {
+    throw lockError("LOCK_FAULT_INVALID", "unknown fault injection point");
+  }
+  if (
+    options.testHooks !== undefined &&
+    (options.testHooks === null || typeof options.testHooks !== "object" || Array.isArray(options.testHooks))
+  ) {
+    throw lockError("LOCK_HOOK_INVALID", "testHooks must be an object");
+  }
+  const security = validateWindowsSecurity(options.windowsSecurity);
+  await prepareWindowsStateRoot(stateRoot, security);
+  await cleanupWindowsArtifacts({
+    stateRoot,
+    lockPath,
+    security,
+    readProcessIdentity: options.readProcessIdentity,
+  });
+
+  for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
+    const existing = await readWindowsOwnerDirectory(lockPath, security, { allowMissing: true });
+    if (existing !== null) {
+      const current = await probeOwner(existing.owner, options.readProcessIdentity);
+      if (processStillOwnsRecord(existing.owner, current)) {
+        throw lockError(
+          "LOCK_HELD",
+          `operation ${existing.owner.operation} is held by live pid ${existing.owner.pid}`,
+        );
+      }
+      const rechecked = await readWindowsOwnerDirectory(lockPath, security, { allowMissing: true });
+      if (!sameWindowsClaim(existing, rechecked)) continue;
+      const stalePath = join(
+        stateRoot,
+        `${WINDOWS_ARTIFACT_PREFIX}${basename(lockPath)}.stale.${existing.owner.nonce}.${createNonce()}`,
+      );
+      try {
+        await rename(lockPath, stalePath);
+      } catch (error) {
+        if (["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) continue;
+        throw lockError("LOCK_PUBLISH_FAILED", "could not quarantine a dead Windows owner", error);
+      }
+      const moved = await readWindowsOwnerDirectory(stalePath, security);
+      if (!sameWindowsClaim(existing, moved)) {
+        throw lockError("LOCK_ARTIFACT_CHANGED", "dead Windows owner changed during quarantine");
+      }
+      await removeWindowsClaimDirectory(stalePath, moved, security);
+    }
+
+    const timestamp = timestampFrom(now);
+    const owner = ownerRecord({ identity, operation, timestamp, predecessor: null });
+    const stagingPath = join(
+      stateRoot,
+      `${WINDOWS_ARTIFACT_PREFIX}${basename(lockPath)}.staging.${identity.pid}.${owner.nonce}`,
+    );
+    let staging;
+    let published = false;
+    try {
+      await runStage(options, "before-staging-open", { owner, stagingPath });
+      staging = await writeWindowsOwnerStaging({ path: stagingPath, owner, security });
+      await runStage(options, "before-publish", { owner, stagingPath });
+      try {
+        await rename(stagingPath, lockPath);
+      } catch (error) {
+        if (["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) {
+          await removeWindowsClaimDirectory(stagingPath, staging, security);
+          staging = undefined;
+          continue;
+        }
+        throw lockError("LOCK_PUBLISH_FAILED", "could not atomically publish Windows owner", error);
+      }
+      published = true;
+      const claim = await readWindowsOwnerDirectory(lockPath, security);
+      if (!sameWindowsClaim(staging, claim)) {
+        throw lockError("LOCK_PUBLISH_VERIFY_FAILED", "published Windows owner changed before lease creation");
+      }
+      await runStage(options, "after-publish", { claim });
+      return createWindowsLease({ lockPath, stateRoot, claim, now, options, security });
+    } catch (error) {
+      if (published && staging !== undefined) {
+        const current = await readWindowsOwnerDirectory(lockPath, security, { allowMissing: true });
+        if (sameWindowsClaim(staging, current)) {
+          await removeWindowsClaimDirectory(lockPath, current, security).catch(() => {});
+        }
+      }
+      throw error;
+    } finally {
+      if (!published && staging !== undefined) {
+        await removeWindowsClaimDirectory(stagingPath, staging, security).catch(() => {});
+      }
+    }
+  }
+  throw lockError(
+    "LOCK_CONTENTION_LIMIT",
+    `Windows operation lock changed more than ${MAX_ACQUIRE_ATTEMPTS} times`,
+  );
+}
+
 export async function acquireOperationLock(options) {
   if (options === null || typeof options !== "object" || Array.isArray(options)) {
     throw lockError("LOCK_OPTIONS_INVALID", "lock options must be an object");
   }
-  const durability = createDurabilityAdapter(options.platform ?? process.platform);
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return acquireWindowsOperationLock(options);
+  const durability = createDurabilityAdapter(platform);
   durability.assertSupported();
   const { lockPath, stateRoot } = validatePaths(
     options.lockPath,

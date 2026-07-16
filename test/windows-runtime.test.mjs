@@ -1,0 +1,212 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  classifyWindowsPreflightSnapshot,
+  queryWindowsRuntimeSnapshot,
+} from "../src/windows-runtime.mjs";
+import { createWindowsSecurityAdapter } from "../src/windows-secure-fs.mjs";
+
+const APP = Object.freeze({
+  kind: "Win32",
+  executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+  installPath: "C:\\Program Files\\Codex",
+  productName: "Codex",
+  packageFullName: null,
+  aumid: null,
+  launchTarget: "C:\\Program Files\\Codex\\Codex.exe",
+});
+
+function processRecord(overrides = {}) {
+  return {
+    pid: 4242,
+    parentProcessId: 100,
+    executablePath: APP.executablePath,
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+    ...overrides,
+  };
+}
+
+function listenerRecord(overrides = {}) {
+  const process = processRecord();
+  return {
+    pid: process.pid,
+    executablePath: process.executablePath,
+    startedAt: process.startedAt,
+    processName: "Codex",
+    localAddress: "127.0.0.1",
+    localPort: 9341,
+    ...overrides,
+  };
+}
+
+function snapshot(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    app: APP,
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    processes: [],
+    listeners: [],
+    ...overrides,
+  };
+}
+
+test("Windows runtime query uses one trusted PowerShell command and accepts only strict JSON", async () => {
+  const calls = [];
+  const expected = snapshot();
+  const result = await queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    execFileImpl: async (file, args, options) => {
+      calls.push({ file, args, options });
+      return { stdout: `${JSON.stringify(expected)}\r\n`, stderr: "" };
+    },
+  });
+  assert.deepEqual(result, expected);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(calls[0].args.includes("C:\\repo\\scripts\\windows\\lib\\common.ps1"), true);
+  assert.equal(calls[0].args.includes("9341"), true);
+  assert.deepEqual(calls[0].options, {
+    timeout: 15_000,
+    maxBuffer: 256 * 1024,
+    windowsHide: true,
+  });
+
+  await assert.rejects(queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: calls[0].file,
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    execFileImpl: async () => ({ stdout: `${JSON.stringify(expected)}\nnoise`, stderr: "" }),
+  }), /JSON|stdout|snapshot/i);
+  await assert.rejects(queryWindowsRuntimeSnapshot({
+    port: 9341,
+    powershellPath: calls[0].file,
+    commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({ ...expected, unexpected: true }),
+      stderr: "",
+    }),
+  }), /schema|field|snapshot/i);
+});
+
+test("Windows ACL adapter protects files explicitly and bounds trusted PowerShell", async () => {
+  const calls = [];
+  const path = "C:\\Users\\Alice\\AppData\\Roaming\\HeiGeCodexSkinStudio\\owner.json";
+  const adapter = createWindowsSecurityAdapter({
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    execFileImpl: async (file, args, options) => {
+      calls.push({ file, args, options });
+      return {
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          action: args.at(-2),
+          path: args.at(-1),
+          ownerSid: "S-1-5-21-1",
+          private: true,
+        }),
+        stderr: "",
+      };
+    },
+  });
+  await adapter.protectFile(path);
+  await adapter.migrateFile(path);
+  await adapter.verifyFile(path);
+  assert.deepEqual(calls.map((entry) => entry.args.at(-2)), [
+    "protect-file",
+    "migrate-file",
+    "verify-file",
+  ]);
+  assert.equal(calls.every((entry) => entry.file.endsWith("\\powershell.exe")), true);
+  assert.equal(calls.every((entry) => entry.options.timeout === 15_000), true);
+  assert.equal(calls.every((entry) => entry.options.maxBuffer === 256 * 1024), true);
+  assert.equal(calls.every((entry) => entry.options.windowsHide === true), true);
+});
+
+test("Windows preflight selects one exact root and exact loopback owner", () => {
+  const root = processRecord();
+  const child = processRecord({ pid: 5252, parentProcessId: root.pid });
+  const observed = classifyWindowsPreflightSnapshot(snapshot({
+    processes: [root, child],
+    listeners: [listenerRecord()],
+  }), { port: 9341, requirePort: true });
+  assert.deepEqual(observed, {
+    appPath: APP.launchTarget,
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    process: {
+      pid: root.pid,
+      executablePath: root.executablePath,
+      startedAt: root.startedAt,
+    },
+  });
+});
+
+test("Windows preflight treats closed and one native root as offline only when the port is free", () => {
+  assert.deepEqual(classifyWindowsPreflightSnapshot(snapshot(), {
+    port: 9341,
+    requirePort: false,
+  }).process, null);
+  assert.deepEqual(classifyWindowsPreflightSnapshot(snapshot({
+    processes: [processRecord()],
+  }), { port: 9341, requirePort: false }).process, {
+    pid: 4242,
+    executablePath: APP.executablePath,
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  });
+  assert.throws(() => classifyWindowsPreflightSnapshot(snapshot({
+    listeners: [listenerRecord()],
+  }), { port: 9341, requirePort: false }), /occupied|listener|port/i);
+  for (const value of [snapshot(), snapshot({ processes: [processRecord()] })]) {
+    assert.throws(
+      () => classifyWindowsPreflightSnapshot(value, { port: 9341, requirePort: true }),
+      (error) => error.code === "CDP_NOT_OWNED",
+    );
+  }
+});
+
+test("Windows preflight fails closed for ambiguous roots and non-exact listener ownership", () => {
+  const root = processRecord();
+  for (const value of [
+    snapshot({ processes: [root, processRecord({ pid: 5252, parentProcessId: 101 })] }),
+    snapshot({ processes: [root], listeners: [listenerRecord({ localAddress: "0.0.0.0" })] }),
+    snapshot({ processes: [root], listeners: [listenerRecord(), listenerRecord({ pid: 5252 })] }),
+    snapshot({ processes: [root], listeners: [listenerRecord({ startedAt: "2026-07-17T08:01:00.0000000Z" })] }),
+    snapshot({ processes: [root], listeners: [listenerRecord({ executablePath: "C:\\Temp\\ChatGPT.exe" })] }),
+    snapshot({
+      processes: [
+        processRecord({ pid: 4242, parentProcessId: 5252 }),
+        processRecord({ pid: 5252, parentProcessId: 4242 }),
+      ],
+    }),
+    snapshot({
+      processes: [
+        root,
+        processRecord({ pid: 5252, parentProcessId: 6262 }),
+        processRecord({ pid: 6262, parentProcessId: 5252 }),
+      ],
+    }),
+  ]) {
+    assert.throws(() => classifyWindowsPreflightSnapshot(value, {
+      port: 9341,
+      requirePort: value.listeners.length > 0,
+    }), /ambiguous|unique|loopback|owner|identity|process/i);
+  }
+});
+
+test("Windows StoreAumid closed snapshots remain valid with null executablePath", () => {
+  const store = snapshot({
+    app: {
+      kind: "StoreAumid",
+      executablePath: null,
+      installPath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0.0.0_x64__abc",
+      productName: "Codex",
+      packageFullName: "OpenAI.Codex_1.0.0.0_x64__abc",
+      aumid: "OpenAI.Codex_abc!App",
+      launchTarget: "aumid:OpenAI.Codex_abc!App",
+    },
+  });
+  const result = classifyWindowsPreflightSnapshot(store, { port: 9341, requirePort: false });
+  assert.equal(result.appPath, "aumid:OpenAI.Codex_abc!App");
+  assert.equal(result.process, null);
+});

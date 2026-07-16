@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("All", "Resolver", "ScheduledTask", "Entrypoints", "Installer")]
+    [ValidateSet("All", "Resolver", "ScheduledTask", "Entrypoints", "Installer", "NodeCli")]
     [string]$Suite = "All"
 )
 
@@ -16,6 +16,9 @@ if ($Suite -eq "All" -or $Suite -eq "Entrypoints") {
 }
 if ($Suite -eq "All" -or $Suite -eq "Installer") {
     $suites += (Join-Path $PSScriptRoot "installer.test.ps1")
+}
+if ($Suite -eq "All" -or $Suite -eq "NodeCli") {
+    $suites += (Join-Path $PSScriptRoot "node-cli.test.ps1")
 }
 
 try {

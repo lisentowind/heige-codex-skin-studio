@@ -603,19 +603,137 @@ test("a symlink ancestor below stateRoot is rejected without touching its target
   assert.equal(await exists(join(outside, "runtime")), false);
 });
 
-test("unsupported Windows durability fails closed before touching the state root", async (t) => {
+function fakeWindowsSecurity(events = []) {
+  return {
+    async protectDirectory(path) { events.push(["protect-directory", path]); },
+    async protectFile(path) { events.push(["protect-file", path]); },
+    async migrateDirectory(path) { events.push(["migrate-directory", path]); },
+    async migrateFile(path) { events.push(["migrate-file", path]); },
+    async verifyDirectory(path) { events.push(["verify-directory", path]); },
+    async verifyFile(path) { events.push(["verify-file", path]); },
+  };
+}
+
+test("Windows operation lease publishes atomically and releases its exact private owner", async (t) => {
   const { root } = await fixture(t);
   const stateRoot = join(root, "not-created");
   const lockPath = join(stateRoot, "operation.lock");
+  const securityEvents = [];
+  const options = acquisitionOptions(lockPath, {
+    platform: "win32",
+    stateRoot,
+    windowsSecurity: fakeWindowsSecurity(securityEvents),
+  });
 
+  const lease = await acquireOperationLock(options);
+  assert.equal(await lease.assertOwned(), true);
+  assert.equal(await exists(lockPath), true);
+  assert.equal(await lease.release(), true);
+  assert.equal(await exists(lockPath), false);
+  assert.equal(securityEvents.some(([action]) => action === "protect-directory"), true);
+  assert.equal(securityEvents.some(([action]) => action === "verify-file"), true);
+});
+
+test("Windows operation lease safely migrates a current-user-owned legacy state root ACL", async (t) => {
+  const { root } = await fixture(t);
+  const stateRoot = join(root, "legacy-windows-state");
+  const lockPath = join(stateRoot, "operation.lock");
+  await mkdir(stateRoot);
+  const securityEvents = [];
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath, {
+    platform: "win32",
+    stateRoot,
+    windowsSecurity: fakeWindowsSecurity(securityEvents),
+  }));
+  t.after(() => lease.release());
+
+  assert.deepEqual(securityEvents.slice(0, 2), [
+    ["migrate-directory", stateRoot],
+    ["verify-directory", stateRoot],
+  ]);
+  assert.equal(await lease.assertOwned(), true);
+});
+
+test("Windows operation lease has one concurrent winner and recovers a proven-dead owner", async (t) => {
+  const { root } = await fixture(t);
+  const stateRoot = join(root, "windows-state");
+  const lockPath = join(stateRoot, "operation.lock");
+  const windowsSecurity = fakeWindowsSecurity();
+  const live = new Map([[CONTENDER.pid, CONTENDER.startedAt]]);
+  const options = (identity) => acquisitionOptions(lockPath, {
+    platform: "win32",
+    stateRoot,
+    identity,
+    windowsSecurity,
+    readProcessIdentity: async (pid) => live.has(pid)
+      ? { pid, startedAt: live.get(pid) }
+      : null,
+  });
+
+  const first = await acquireOperationLock(options(CONTENDER));
   await assert.rejects(
-    acquireOperationLock(
-      acquisitionOptions(lockPath, { platform: "win32", stateRoot }),
-    ),
-    (error) => error.code === "LOCK_DURABILITY_UNSUPPORTED",
+    acquireOperationLock(options({ pid: 31_003, startedAt: "2026-07-17T00:03:00.000Z" })),
+    (error) => error.code === "LOCK_HELD",
   );
+  live.delete(CONTENDER.pid);
+  const successorIdentity = { pid: 31_003, startedAt: "2026-07-17T00:03:00.000Z" };
+  live.set(successorIdentity.pid, successorIdentity.startedAt);
+  const successor = await acquireOperationLock(options(successorIdentity));
+  assert.equal(await successor.assertOwned(), true);
+  assert.equal(await first.release(), false);
+  assert.equal(await successor.release(), true);
 
-  assert.equal(await exists(stateRoot), false);
+  const artifacts = await readdir(stateRoot);
+  assert.deepEqual(artifacts, []);
+});
+
+test("Windows cleanup preserves a live producer's delayed released artifact during successor acquire", async (t) => {
+  const { root } = await fixture(t);
+  const stateRoot = join(root, "windows-release-race");
+  const lockPath = join(stateRoot, "operation.lock");
+  const security = fakeWindowsSecurity();
+  const releaseRenamed = deferred();
+  const allowReleaseCleanup = deferred();
+  const successorIdentity = {
+    pid: 31_003,
+    startedAt: "2026-07-17T00:03:00.000Z",
+  };
+  const live = new Map([
+    [CONTENDER.pid, CONTENDER.startedAt],
+    [successorIdentity.pid, successorIdentity.startedAt],
+  ]);
+  const common = {
+    platform: "win32",
+    stateRoot,
+    windowsSecurity: security,
+    readProcessIdentity: async (pid) => live.has(pid)
+      ? { pid, startedAt: live.get(pid) }
+      : null,
+  };
+  const first = await acquireOperationLock(acquisitionOptions(lockPath, {
+    ...common,
+    testHooks: {
+      "after-windows-release-rename": async ({ releasePath: path }) => {
+        releaseRenamed.resolve(path);
+        await allowReleaseCleanup.promise;
+      },
+    },
+  }));
+
+  const release = first.release();
+  const releasedPath = await releaseRenamed.promise;
+  assert.equal(await exists(releasedPath), true);
+  const successor = await acquireOperationLock(acquisitionOptions(lockPath, {
+    ...common,
+    identity: successorIdentity,
+  }));
+  t.after(() => successor.release());
+  assert.equal(await exists(releasedPath), true);
+  assert.equal(await successor.assertOwned(), true);
+
+  allowReleaseCleanup.resolve();
+  assert.equal(await release, true);
+  assert.equal(await exists(releasedPath), false);
 });
 
 test("withOperationLock preserves both action and release errors", async (t) => {

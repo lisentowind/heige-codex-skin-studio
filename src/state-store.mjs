@@ -23,6 +23,7 @@ import {
   guardOperationLease,
 } from "./operation-lock.mjs";
 import { readBoundedFile } from "./resource-limits.mjs";
+import { windowsSecurityAdapter } from "./windows-secure-fs.mjs";
 
 const STATE_KEYS = [
   "schemaVersion",
@@ -96,12 +97,6 @@ function isNonNegativeInteger(value) {
 
 async function mutationPath(lease, path, fileName) {
   const capability = assertOperationLeaseCapability(lease);
-  if (process.platform === "win32") {
-    throw statePathError(
-      "STATE_MUTATION_UNSUPPORTED",
-      "Windows durability and ACL enforcement are not implemented; refusing before filesystem access",
-    );
-  }
   const expectedPath = join(capability.stateRoot, fileName);
   if (path !== expectedPath) {
     throw statePathError(
@@ -247,6 +242,11 @@ async function inspectPrivateJsonPath(path) {
   }
   enforcePosixFileSecurity(parentStats, "parent");
   enforcePosixFileSecurity(fileStats, "file");
+  if (process.platform === "win32") {
+    const security = windowsSecurityAdapter();
+    await security.verifyDirectory(dirname(path));
+    await security.verifyFile(path);
+  }
   return fileStats;
 }
 
@@ -283,8 +283,10 @@ async function ensurePrivateParent(path) {
   }
 
   for (const directory of missing.reverse()) {
+    let created = false;
     try {
       await mkdir(directory, { mode: 0o700 });
+      created = true;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
     }
@@ -302,17 +304,28 @@ async function ensurePrivateParent(path) {
     ) {
       throw statePathError("STATE_PARENT_OWNER_INVALID", "状态目录不属于当前用户");
     }
-    await chmod(directory, 0o700);
-    await syncDirectory(directory);
-    await syncDirectory(dirname(directory));
+    if (process.platform === "win32") {
+      const security = windowsSecurityAdapter();
+      if (created) await security.protectDirectory(directory);
+      await security.verifyDirectory(directory);
+    } else {
+      await chmod(directory, 0o700);
+      await syncDirectory(directory);
+      await syncDirectory(dirname(directory));
+    }
   }
 
-  await chmod(parent, 0o700);
-  await syncDirectory(parent);
+  if (process.platform === "win32") {
+    await windowsSecurityAdapter().verifyDirectory(parent);
+  } else {
+    await chmod(parent, 0o700);
+    await syncDirectory(parent);
+  }
   return parent;
 }
 
 async function syncDirectory(path) {
+  if (process.platform === "win32") return;
   const handle = await open(path, "r");
   try {
     await handle.sync();
@@ -341,6 +354,12 @@ async function atomicWriteJson(path, value, { faultAt } = {}) {
     await handle.close();
     handle = null;
 
+    if (process.platform === "win32") {
+      const security = windowsSecurityAdapter();
+      await security.protectFile(temporary);
+      await security.verifyFile(temporary);
+    }
+
     if (faultAt === "after-temp-sync") {
       throw statePathError(
         "FAULT_AFTER_TEMP_SYNC",
@@ -349,6 +368,9 @@ async function atomicWriteJson(path, value, { faultAt } = {}) {
     }
     await rename(temporary, path);
     renamed = true;
+    if (process.platform === "win32") {
+      await windowsSecurityAdapter().verifyFile(path);
+    }
     await syncDirectory(parent);
     return value;
   } catch (error) {
