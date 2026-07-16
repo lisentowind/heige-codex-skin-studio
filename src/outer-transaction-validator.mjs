@@ -99,11 +99,20 @@ export function validateKnownOuterTransactionDocument(document, {
   if (transactionId !== null && document.transactionId !== transactionId) {
     throw conflict("outer transaction id does not match the participant");
   }
-  if (
-    document.operation === "legacy-migration" &&
-    !(document.ack === null || validExactAck(document.ack))
-  ) {
-    throw new Error("outer legacy migration exact ACK schema is invalid");
+  if (document.operation === "legacy-migration") {
+    const servicePrepared = isRecord(document.serviceParticipant);
+    const hasExactAck = validExactAck(document.ack);
+    const ackOptional = document.phase === "rollback-decided";
+    const ackRequired = document.phase === "ready-acked" ||
+      (document.phase === "commit-decided" && servicePrepared);
+    const ackForbidden = !ackOptional && !ackRequired;
+    if (
+      (ackRequired && !hasExactAck) ||
+      (ackForbidden && document.ack !== null) ||
+      (ackOptional && !(document.ack === null || hasExactAck))
+    ) {
+      throw new Error("outer legacy migration exact ACK authority is invalid");
+    }
   }
   if (participant !== null) {
     if (!isRecord(participant) || participant.transactionId !== document.transactionId) {

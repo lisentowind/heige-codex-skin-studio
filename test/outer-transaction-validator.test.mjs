@@ -114,7 +114,7 @@ test("outer decision validator rejects unknown top-level authority fields", () =
   );
 });
 
-test("outer decision validator accepts exact ACK legacy commit and precommit rollback documents", () => {
+test("outer decision validator accepts exact ACK service commit and null-ACK state-only commit", () => {
   const transactionId = randomUUID();
   const base = {
     schemaVersion: 1,
@@ -126,7 +126,7 @@ test("outer decision validator accepts exact ACK legacy commit and precommit rol
     previousNonce: randomUUID(),
     createdAt: new Date().toISOString(),
     stateParticipant: {},
-    serviceParticipant: null,
+    serviceParticipant: {},
   };
   const commit = {
     ...base,
@@ -140,14 +140,32 @@ test("outer decision validator accepts exact ACK legacy commit and precommit rol
   };
   assert.equal(validateKnownOuterTransactionDocument(commit).decision, "commit");
   assert.equal(validateKnownOuterTransactionDocument({
+    ...commit,
+    decision: "undecided",
+    phase: "ready-acked",
+  }).phase, "ready-acked");
+  assert.equal(validateKnownOuterTransactionDocument({
+    ...base,
+    decision: "commit",
+    phase: "commit-decided",
+    serviceParticipant: null,
+    ack: null,
+  }).decision, "commit");
+  assert.equal(validateKnownOuterTransactionDocument({
     ...base,
     decision: "rollback",
     phase: "rollback-decided",
+    serviceParticipant: null,
     ack: null,
+  }).decision, "rollback");
+  assert.equal(validateKnownOuterTransactionDocument({
+    ...commit,
+    decision: "rollback",
+    phase: "rollback-decided",
   }).decision, "rollback");
 });
 
-test("outer decision validator rejects missing or malformed legacy ACK authority fields", () => {
+test("outer decision validator rejects missing malformed or semantically misplaced legacy ACKs", () => {
   const transactionId = randomUUID();
   const document = {
     schemaVersion: 1,
@@ -161,11 +179,24 @@ test("outer decision validator rejects missing or malformed legacy ACK authority
     phase: "commit-decided",
     createdAt: new Date().toISOString(),
     stateParticipant: {},
-    serviceParticipant: null,
+    serviceParticipant: {},
   };
   assert.throws(() => validateKnownOuterTransactionDocument(document), /schema/i);
   assert.throws(() => validateKnownOuterTransactionDocument({
     ...document,
     ack: { persistenceEnabled: true, revision: 1 },
-  }), /ACK schema/i);
+  }), /ACK authority/i);
+  assert.throws(() => validateKnownOuterTransactionDocument({
+    ...document,
+    serviceParticipant: null,
+    ack: {
+      persistenceEnabled: true,
+      revision: 1,
+      processIdentity: { pid: 8301, startedAt: "Fri Jul 17 16:50:00 2026" },
+    },
+  }), /ACK authority/i);
+  assert.throws(() => validateKnownOuterTransactionDocument({
+    ...document,
+    ack: null,
+  }), /ACK authority/i);
 });
