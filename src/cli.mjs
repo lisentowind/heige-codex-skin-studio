@@ -1105,6 +1105,14 @@ export async function productionController({
       return validatePortOwner(port, candidate, { platform });
     },
     inspectSkin: () => deps.skinStatus({ port }),
+    validateThemeSelection: async (themeId) => {
+      try {
+        await themeBundle({ deps, roots, themeId });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     injectSkin: async ({ themeId, control, targetIds }) => {
       const state = await readStudioState(paths.statePath);
       const effectiveThemeId = themeId === NATIVE_THEME_ID

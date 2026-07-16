@@ -197,6 +197,7 @@ function fixture(overrides = {}) {
       if (health instanceof Error) throw health;
       return clone(health);
     },
+    validateThemeSelection: overrides.validateThemeSelection ?? (async () => false),
     injectSkin: async (input) => {
       calls.inject.push(clone(input));
       if (overrides.injectFailure) throw new Error("inject failed");
@@ -636,6 +637,63 @@ function rendererStatus(overrides = {}) {
     ...overrides,
   };
 }
+
+test("a unanimous menu theme change becomes the authoritative last non-native theme", async () => {
+  const selected = "genshin-night";
+  const fx = fixture({
+    validateThemeSelection: async (themeId) => themeId === selected,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth({
+    statuses: [rendererStatus({ themeId: selected })],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value: rendererStatus({ themeId: selected }) }],
+      failed: [],
+      skipped: [],
+    },
+  });
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "repair");
+  assert.equal(fx.state.selectedThemeId, selected);
+  assert.equal(fx.state.lastNonNativeThemeId, selected);
+  assert.equal(fx.state.revision, 2);
+  assert.equal(fx.session.activeThemeId, selected);
+  assert.equal(fx.calls.inject.at(-1).themeId, selected);
+  assert.equal(fx.calls.inject.at(-1).control.revision, 2);
+});
+
+test("a unanimous native menu choice preserves the last non-native launcher theme", async () => {
+  const lastNonNativeThemeId = "genshin-night";
+  const fx = fixture({
+    state: { lastNonNativeThemeId },
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const native = rendererStatus({ mode: "native", themeId: null });
+  fx.setHealth({
+    statuses: [native],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value: native }],
+      failed: [],
+      skipped: [],
+    },
+  });
+
+  const result = await controller.tick();
+
+  assert.equal(result.mode, "native");
+  assert.equal(fx.state.selectedThemeId, NATIVE_THEME_ID);
+  assert.equal(fx.state.lastNonNativeThemeId, lastNonNativeThemeId);
+  assert.equal(fx.state.revision, 2);
+  assert.equal(fx.session.mode, "native");
+  assert.equal(fx.session.activeThemeId, null);
+  assert.equal(fx.calls.inject.at(-1).themeId, NATIVE_THEME_ID);
+});
 
 test("tick repairs only missing stale or divergent renderer targets", async () => {
   const fx = fixture();

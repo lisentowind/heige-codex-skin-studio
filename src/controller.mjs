@@ -159,6 +159,9 @@ function normalizedDependencies(input) {
     probeCurrentProcess: requireFunction(input.probeCurrentProcess, "probeCurrentProcess"),
     validatePortOwner: requireFunction(input.validatePortOwner, "validatePortOwner"),
     inspectSkin: input.inspectSkin,
+    validateThemeSelection: input.validateThemeSelection === undefined
+      ? async () => false
+      : requireFunction(input.validateThemeSelection, "validateThemeSelection"),
     injectSkin: requireFunction(input.injectSkin, "injectSkin"),
     removeSkin: requireFunction(input.removeSkin, "removeSkin"),
     startControlServer: input.startControlServer ?? startLoopbackControlServer,
@@ -291,6 +294,54 @@ function rendererStatusIsHealthy(value, state) {
   } catch {
     return false;
   }
+}
+
+function rendererStatusSelection(value, state) {
+  if (!isRecord(value)) return null;
+  try {
+    if (
+      value.installed !== true ||
+      typeof value.generation !== "string" ||
+      !RENDERER_GENERATION.test(value.generation) ||
+      value.menu !== true ||
+      value.persistenceEnabled !== state.persistenceEnabled ||
+      value.revision !== state.revision
+    ) {
+      return null;
+    }
+    if (value.mode === "native" && (value.themeId === null || value.themeId === NATIVE_THEME_ID)) {
+      return NATIVE_THEME_ID;
+    }
+    if (value.mode === "active" && typeof value.themeId === "string" && value.themeId.length > 0) {
+      return value.themeId;
+    }
+  } catch {}
+  return null;
+}
+
+function unanimousRendererSelection(health, state) {
+  if (!isRecord(health)) return null;
+  let statuses;
+  try {
+    const succeeded = health.results?.succeeded;
+    const failed = health.results?.failed;
+    if (Array.isArray(succeeded) && Array.isArray(failed)) {
+      if (succeeded.length === 0 || failed.length !== 0) return null;
+      statuses = succeeded.map((entry) => entry?.value);
+    } else if (Array.isArray(health.statuses)) {
+      if (health.statuses.length === 0 || (Array.isArray(health.failed) && health.failed.length !== 0)) {
+        return null;
+      }
+      statuses = health.statuses;
+    } else {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const selections = statuses.map((value) => rendererStatusSelection(value, state));
+  if (selections.some((value) => value === null)) return null;
+  return selections.every((value) => value === selections[0]) ? selections[0] : null;
 }
 
 function rendererId(entry, seen) {
@@ -628,7 +679,7 @@ export function createSkinController(input) {
   };
 
   const reconcile = async ({ lease, recovered = false, includeHealthCount = false }) => {
-    const state = validateControlState(await deps.readState());
+    let state = validateControlState(await deps.readState());
     lastKnownState = state;
     let session = await deps.readSession();
     const processIdentity = await probeProcess();
@@ -667,7 +718,7 @@ export function createSkinController(input) {
     }
 
     await assertPortOwner(processIdentity);
-    const { control, started: serverStarted } = await ensureServer(state);
+    let { control, started: serverStarted } = await ensureServer(state);
     const sameSessionProcess = isRecord(session) &&
       sameProcessIdentity(session.process, processIdentity);
 
@@ -675,7 +726,7 @@ export function createSkinController(input) {
       return result("paused", "paused", state);
     }
 
-    const expectedMode = state.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
+    let expectedMode = state.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
     let action = sameSessionProcess && session.mode === expectedMode ? "repair" : "inject";
     let targetHealth = {
       selective: false,
@@ -701,6 +752,38 @@ export function createSkinController(input) {
         health = { results: failedResults };
       }
       targetHealth = analyzeRendererHealth(health, state);
+      const observedSelection = unanimousRendererSelection(health, state);
+      if (
+        observedSelection !== null &&
+        observedSelection !== state.selectedThemeId &&
+        (
+          observedSelection === NATIVE_THEME_ID ||
+          await deps.validateThemeSelection(observedSelection) === true
+        )
+      ) {
+        state = validateControlState(await deps.compareAndUpdate({
+          expectedRevision: state.revision,
+          mutate: (current) => ({
+            ...current,
+            selectedThemeId: observedSelection,
+            ...(observedSelection === NATIVE_THEME_ID
+              ? {}
+              : { lastNonNativeThemeId: observedSelection }),
+          }),
+        }, lease));
+        lastKnownState = state;
+        session = sessionForState(state, processIdentity, {
+          keepUntilProcessExit: !state.persistenceEnabled,
+        });
+        await deps.writeSession(session, lease);
+        expectedMode = state.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
+        ({ control } = await ensureServer(state));
+        targetHealth = {
+          selective: false,
+          healthyTargets: [],
+          repairTargets: null,
+        };
+      }
       if (targetHealth.repairTargets?.length === 0) {
         consecutiveFailures = 0;
         return result("idle", expectedMode, state, includeHealthCount
