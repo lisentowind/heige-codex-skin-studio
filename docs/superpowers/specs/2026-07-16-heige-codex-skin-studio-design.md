@@ -186,7 +186,7 @@ restore
 
 ### 6.6 渲染器注入
 
-`src/renderer-inject.mjs` 负责把主题 manifest 和素材编译为可重复执行的 payload：
+`src/renderer-payload.mjs` 负责把主题 manifest、CSS 和素材安全编译为 payload，`src/renderer-runtime.js` 负责在渲染器内重复执行 apply 与 cleanup：
 
 1. 使用唯一 style ID 和根节点标记。
 2. 重复执行不会叠加元素或监听器。
