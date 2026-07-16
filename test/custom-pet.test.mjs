@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -39,4 +47,37 @@ test("packages the independent native v2 Miku Future custom pet", async () => {
   const sizeBits = bytes.readUInt32LE(21);
   assert.equal((sizeBits & 0x3fff) + 1, 1536, "pet spritesheet width drifted");
   assert.equal(((sizeBits >>> 14) & 0x3fff) + 1, 2288, "pet spritesheet height drifted");
+});
+
+test("both pet entrypoints are syntax-valid thin CLI wrappers", async () => {
+  const wrappers = ["scripts/install-pet.command", "custom-pet/install.command"];
+  await execFileAsync("/bin/zsh", ["-n", ...wrappers.map((path) => join(repoRoot, path))]);
+
+  for (const relative of wrappers) {
+    const body = await readFile(join(repoRoot, relative), "utf8");
+    assert.match(body, /src\/cli\.mjs" install-pet --source/);
+    assert.doesNotMatch(body, /\bcp\b|\bsed\b|selected-avatar-id|已安装/);
+  }
+});
+
+test("custom-pet wrapper reports success only after installing files and config", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "heige-custom-pet-wrapper-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  const { stdout, stderr } = await execFileAsync(join(repoRoot, "custom-pet/install.command"), [], {
+    env: { ...process.env, HOME: home, HEIGE_NODE: process.execPath },
+  });
+  const result = JSON.parse(stdout);
+
+  assert.equal(stderr, "");
+  assert.equal(result.installed, true);
+  assert.equal(result.petId, "miku-future");
+  assert.deepEqual(
+    await readFile(join(home, ".codex/pets/miku-future/pet.json")),
+    await readFile(join(repoRoot, "custom-pet/miku-future/pet.json")),
+  );
+  assert.match(
+    await readFile(join(home, ".codex/config.toml"), "utf8"),
+    /^selected-avatar-id = "custom:miku-future"$/m,
+  );
 });

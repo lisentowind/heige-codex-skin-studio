@@ -6,10 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyInjection, discoverCodex, runtimeDiagnostics } from "./codex-app.mjs";
 import { DEFAULT_CDP_PORT, DEFAULT_THEME_ID, resolveStudioPaths } from "./constants.mjs";
 import { applySkin, removeSkin, skinStatus } from "./injector.mjs";
+import { installPet } from "./pet-installer.mjs";
 import { loadTheme } from "./theme-schema.mjs";
 import { createSingleImageTheme, listThemes } from "./theme-store.mjs";
 
-const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const BOOLEAN_FLAGS = new Set(["prefer-stored"]);
 
@@ -37,11 +38,13 @@ function portFrom(value) {
 function defaults(overrides) {
   const paths = resolveStudioPaths();
   return {
-    bundledThemesRoot: join(sourceRoot, "themes"),
+    bundledThemesRoot: join(repositoryRoot, "themes"),
     userThemesRoot: paths.userThemesRoot,
+    home: process.env.HOME,
     loadTheme,
     listThemes,
     createSingleImageTheme,
+    installPet,
     applySkin,
     removeSkin,
     skinStatus,
@@ -57,7 +60,7 @@ export async function runCli(argv, overrides = {}) {
 
   if (command === "help") {
     return {
-      commands: ["list", "create --image PATH --name NAME", "apply [--theme ID] [--port 9341]", "pause", "status", "doctor"],
+      commands: ["list", "create --image PATH --name NAME", "apply [--theme ID] [--port 9341]", "pause", "status", "doctor", "install-pet [--source PATH]"],
     };
   }
   if (command === "list") return deps.listThemes({ roots });
@@ -90,6 +93,12 @@ export async function runCli(argv, overrides = {}) {
     return deps.removeSkin({ port: portFrom(args.port) });
   }
   if (command === "status") return deps.skinStatus({ port: portFrom(args.port) });
+  if (command === "install-pet") {
+    return deps.installPet({
+      sourceRoot: args.source ?? join(repositoryRoot, "custom-pet/miku-future"),
+      home: deps.home,
+    });
+  }
   if (command === "doctor") {
     const discovery = await (deps.discoverCodex ?? discoverCodex)();
     const runtime = await (deps.runtimeDiagnostics ?? runtimeDiagnostics)({
