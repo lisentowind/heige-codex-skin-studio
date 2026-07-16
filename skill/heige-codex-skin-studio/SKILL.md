@@ -45,6 +45,18 @@ Windows 用户也可双击 `scripts\install.bat`。Windows 入口只转发到包
 
 macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 对应入口是 `scripts\windows` 下的同名 `.ps1` 或 `.bat`。
 
+用户意图必须分开：
+
+- `pause` 只移除当前会话的皮肤与菜单，不改变常驻选择。
+- `resume` 只恢复同一个已验证进程中被 `pause` 暂停的皮肤，不是通用重启入口。
+- `restore` 关闭常驻、注销后台控制器并恢复原生界面。Codex 已关闭时保持关闭；已是原生状态时不为了恢复而额外启动。
+
+## 内置预设与菜单自定义
+
+默认回退主题是 `miku-488137`。另有 `genshin-dawn`、`genshin-night`、`wuthering-tide`、`wuthering-echo`、`naruto-hokage`、`naruto-sasuke`、`deepspace-dawn`、`deepspace-star` 和 `dalao-dianyan`，合计 10 个内置预设。
+
+顶部菜单的「＋ 自定义图片」可选择本地图片、自动压缩取色并立即应用。它只有一个本地槽位，再次上传会覆盖，行尾 × 可删除。快速试图优先用这个入口；需要分发或长期管理时，用 `create` 生成正式主题。
+
 ## 状态与诊断
 
 macOS 只读状态：
@@ -63,9 +75,37 @@ Windows 只读后台任务状态：
 
 ## 图片与主题
 
-用户给出图片时，先验证非空 PNG、JPG、JPEG 或 WebP，再用已验证的 Node.js 22 或更高版本运行 `src/cli.mjs create --image <绝对路径> --name <主题名>`。读取 JSON 返回的 `id`，传给对应平台的 `apply` 入口。
+用户给出图片时，先验证非空 PNG、JPG、JPEG 或 WebP，再用已验证的 Node.js 22 或更高版本运行：
+
+```text
+<verified-node> "$ROOT/src/cli.mjs" create --image "<绝对路径>" --name "<主题名>"
+```
+
+从 JSON 返回中读取 `id`。设为 `$id` 后，macOS 运行：
+
+```bash
+"$ROOT/scripts/apply.command" "$id"
+```
+
+Windows PowerShell 运行：
+
+```powershell
+& "$root\scripts\windows\apply.ps1" -Theme $id -Port 9341
+```
+
+这两个入口都只应用当前会话，不暗中打开常驻。
 
 用户只给创意描述时，先用当前可用的 `imagegen` 生成横向 UI 主图。为左侧导航和底部输入区留出可读空间，不要把按钮、菜单文字或聊天内容烘焙到图片中。
+
+## 可选 Miku Future 宠物
+
+仅当用户明确要求安装 `Miku Future` 时才执行。macOS 优先使用统一 wrapper：
+
+```bash
+"$ROOT/scripts/install-pet.command"
+```
+
+需要直接调用 CLI 时，使用 `<verified-node> "$ROOT/src/cli.mjs" install-pet --source "$ROOT/custom-pet/miku-future"`。不因用户只要换肤而自动安装宠物。
 
 ## Windows 验证边界
 

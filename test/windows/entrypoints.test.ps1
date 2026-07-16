@@ -512,6 +512,38 @@ try {
         Assert-Match 'GUID' $skill
     }
 
+    Test-Case "Packaged Skill retains preset and custom-image capabilities" {
+        $skill = [System.IO.File]::ReadAllText($script:SkillInstructions)
+        foreach ($theme in @(
+            "miku-488137", "genshin-dawn", "genshin-night", "wuthering-tide",
+            "wuthering-echo", "naruto-hokage", "naruto-sasuke", "deepspace-dawn",
+            "deepspace-star", "dalao-dianyan"
+        )) {
+            Assert-Match ([regex]::Escape($theme)) $skill
+        }
+        Assert-Match '自定义图片' $skill
+        Assert-Match '覆盖' $skill
+        Assert-Match '删除' $skill
+        Assert-Match '正式主题' $skill
+    }
+
+    Test-Case "Skill routes create results to real macOS and Windows apply parameters" {
+        $skill = [System.IO.File]::ReadAllText($script:SkillInstructions)
+        Assert-Match 'create --image' $skill
+        Assert-Match '返回[^\r\n]*`id`' $skill
+        Assert-Match 'apply\.command[^\r\n]*\$id' $skill
+        Assert-Match 'apply\.ps1[^\r\n]*-Theme[^\r\n]*\$id[^\r\n]*-Port 9341' $skill
+    }
+
+    Test-Case "Skill keeps pet installation explicit and lifecycle intents distinct" {
+        $skill = [System.IO.File]::ReadAllText($script:SkillInstructions)
+        Assert-Match '仅当用户明确要求[^\r\n]*Miku Future' $skill
+        Assert-Match 'install-pet' $skill
+        Assert-Match '`pause`[^\r\n]*当前会话' $skill
+        Assert-Match '`resume`[^\r\n]*同一[^\r\n]*进程' $skill
+        Assert-Match '`restore`[^\r\n]*关闭常驻' $skill
+    }
+
     Test-Case "Windows Skill installer forwards only to the packaged Windows payload" {
         Assert-True (Test-Path -LiteralPath $script:SkillInstallPs1 -PathType Leaf)
         $source = [System.IO.File]::ReadAllText($script:SkillInstallPs1)

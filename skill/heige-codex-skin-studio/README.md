@@ -16,6 +16,8 @@
 
 `apply` 只改变当前会话，不改变常驻选择。启用与完整恢复可能让 Codex 正常重启，执行前要先告知用户。`status` 严格只读，不应启动、退出、重启或注入 Codex。
 
+Skill 保留 10 个内置预设，默认是 `miku-488137`。顶部菜单可上传、覆盖或删除一个快速自定义图片；需要正式主题时使用 `create`，再把返回的 `id` 传给 macOS 或 Windows 的 `apply` 入口。`pause` 暂停当前会话，`resume` 只恢复同一进程，`restore` 关闭常驻并还原。仅当用户明确要求 `Miku Future` 时才调用统一 `install-pet` 入口。
+
 ## Windows 证据边界
 
 自动化门禁要求在 `windows-latest` 上同时通过 Windows PowerShell 5.1 与 PowerShell 7 测试，覆盖解析、Node.js 22、当前用户 Scheduled Task、入口语义、编码和中文空格路径。真实任务集成测试只使用 GUID 测试名，不触碰生产任务。
