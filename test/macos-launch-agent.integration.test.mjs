@@ -8,19 +8,16 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
+  inspectTrustedProductionRuntime,
   inspectLaunchAgent,
+  isExactLaunchctlPrintNotFound,
   registerControllerAgent,
+  trustedUserHome,
   unregisterControllerAgent,
 } from "../src/macos-launch-agent.mjs";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "darwin" && process.env.HEIGE_RUN_LAUNCHD_INTEGRATION === "1";
-
-function isExactLaunchdAbsence(error, { label, processUid }) {
-  const text = `${error?.message ?? ""}\n${error?.stderr ?? ""}`;
-  return [3, 113, "3", "113"].includes(error?.code) &&
-    text.includes(`Could not find service "${label}" in domain for user gui: ${processUid}`);
-}
 
 test("isolated random-label LaunchAgent can be registered and removed", { skip: !enabled }, async (t) => {
   const root = await realpath(
@@ -45,7 +42,7 @@ test("isolated random-label LaunchAgent can be registered and removed", { skip: 
       await execFileAsync("/bin/launchctl", ["print", `gui/${processUid}/${label}`]);
       loaded = true;
     } catch (error) {
-      if (!isExactLaunchdAbsence(error, { label, processUid })) errors.push(error);
+      if (!isExactLaunchctlPrintNotFound(error, { label, processUid })) errors.push(error);
     }
     if (loaded) {
       try {
@@ -63,7 +60,7 @@ test("isolated random-label LaunchAgent can be registered and removed", { skip: 
       await execFileAsync("/bin/launchctl", ["print", `gui/${processUid}/${label}`]);
       errors.push(new Error(`cleanup left LaunchAgent loaded: ${label}`));
     } catch (error) {
-      if (!isExactLaunchdAbsence(error, { label, processUid })) errors.push(error);
+      if (!isExactLaunchctlPrintNotFound(error, { label, processUid })) errors.push(error);
     }
     try {
       await rm(root, { recursive: true, force: true });
@@ -75,6 +72,13 @@ test("isolated random-label LaunchAgent can be registered and removed", { skip: 
       throw new AggregateError(errors, `isolated LaunchAgent cleanup failed for ${label}`);
     }
   });
+
+  const trustedRuntime = await inspectTrustedProductionRuntime();
+  assert.match(trustedRuntime.nodePath, /\/Contents\/Resources\/cua_node\/bin\/node$/);
+  assert.equal(
+    trustedRuntime.controllerPath,
+    join(trustedUserHome(), ".codex", "heige-codex-skin-studio", "src", "cli.mjs"),
+  );
 
   await registerControllerAgent(options);
   assert.equal((await inspectLaunchAgent(options)).loaded, true);

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   inspectLaunchAgent,
@@ -17,6 +19,7 @@ import {
 const CONTROLLER_LABEL = "com.heige.codex-skin-controller";
 const LEGACY_LABEL = "com.heige.codex-skin-watchdog";
 const UID = 501;
+const execFileAsync = promisify(execFileCallback);
 
 function renderedLabel(xml) {
   const match = String(xml).match(/<key>Label<\/key>\s*<string>([^<]+)<\/string>/);
@@ -36,6 +39,44 @@ async function pathExists(path) {
       throw error;
     },
   );
+}
+
+function exchangePathBeforeMutation(deps, targetPath, foreignBytes, { attempt = 1 } = {}) {
+  const originalRm = deps.fs.rm.bind(deps.fs);
+  const originalRename = deps.fs.rename.bind(deps.fs);
+  const originalLink = deps.fs.link.bind(deps.fs);
+  let mutationAttempts = 0;
+  let exchanged = false;
+  const exchange = async (from, to) => {
+    if (exchanged || (from !== targetPath && to !== targetPath)) return;
+    mutationAttempts += 1;
+    if (mutationAttempts !== attempt) return;
+    exchanged = true;
+    if (await pathExists(targetPath)) {
+      await fsPromises.rename(targetPath, `${targetPath}.attacker-saved.${randomUUID()}`);
+    }
+    await writeFile(targetPath, foreignBytes, { mode: 0o600 });
+  };
+  deps.fs = {
+    ...deps.fs,
+    async rm(path, ...args) {
+      await exchange(String(path), null);
+      return originalRm(path, ...args);
+    },
+    async rename(from, to, ...args) {
+      await exchange(String(from), String(to));
+      return originalRename(from, to, ...args);
+    },
+    async link(from, to, ...args) {
+      await exchange(String(from), String(to));
+      return originalLink(from, to, ...args);
+    },
+  };
+  return {
+    get exchanged() {
+      return exchanged;
+    },
+  };
 }
 
 function legacyPlistObject({
@@ -181,10 +222,36 @@ async function fixture(t, overrides = {}) {
     if (file === nodePath && args.length === 1 && args[0] === "--version") {
       return { stdout: `${overrides.nodeVersion ?? "v22.17.0"}\n`, stderr: "" };
     }
+    if (file === nodePath && args[0] === "--input-type=module" && args[1] === "--eval") {
+      if (overrides.nodeHealthFailure) throw overrides.nodeHealthFailure;
+      const nonce = args.at(-1);
+      const health = typeof overrides.nodeHealth === "function"
+        ? overrides.nodeHealth({ nonce, nodePath, controllerPath })
+        : overrides.nodeHealth ?? {
+        nonce,
+        pid: 4242,
+        execPath: nodePath,
+        version: overrides.nodeVersion ?? "v22.17.0",
+        release: "node",
+        controllerPath,
+        };
+      return { stdout: `${JSON.stringify(health)}\n`, stderr: "" };
+    }
     if (file === "/usr/bin/plutil" && args[0] === "-lint") {
       if (overrides.lintFailure) throw new Error("lint failed");
       if (overrides.swapStagedAfterLint) {
         await writeFile(args.at(-1), "foreign staged plist\n");
+      }
+      if (overrides.swapStateAfterLint) {
+        const support = dirname(stateDir);
+        const moved = join(home, "moved-state-after-lint");
+        await fsPromises.rename(support, moved);
+        await symlink(moved, support);
+      }
+      if (overrides.swapLaunchAgentsAfterLint) {
+        const moved = join(home, "moved-launch-agents-after-lint");
+        await fsPromises.rename(launchAgentsDir, moved);
+        await symlink(moved, launchAgentsDir);
       }
       return { stdout: `${args.at(-1)}: OK\n`, stderr: "" };
     }
@@ -193,12 +260,11 @@ async function fixture(t, overrides = {}) {
       const label = args[1].split("/").at(-1);
       if (loaded.has(label)) return { stdout: `service = ${label}\n`, stderr: "" };
       if (overrides.printError) throw overrides.printError({ label, target: args[1] });
-      const error = new Error(
-        `Command failed: launchctl print ${args[1]}\n` +
-        `Bad request.\nCould not find service "${label}" in domain for user gui: ${UID}`,
-      );
+      const stderr = `Bad request.\nCould not find service "${label}" in domain for user gui: ${UID}\n`;
+      const error = new Error(`Command failed: /bin/launchctl print ${args[1]}\n${stderr}`);
       error.code = 113;
-      error.stderr = `Bad request.\nCould not find service "${label}" in domain for user gui: ${UID}\n`;
+      error.stdout = "";
+      error.stderr = stderr;
       throw error;
     }
     if (args[0] === "bootstrap") {
@@ -318,6 +384,29 @@ test("controller plist rejects relative executable and log paths", () => {
     }),
     /absolute/,
   );
+  assert.throws(
+    () => renderControllerPlist({
+      label: CONTROLLER_LABEL,
+      nodePath: "/stable/node",
+      controllerPath: "cli.mjs",
+      stateDir: "/stable/state",
+    }),
+    /controllerPath.*absolute/i,
+  );
+});
+
+test("trusted production home ignores a forged HOME environment value", async () => {
+  const module = await import("../src/macos-launch-agent.mjs");
+  assert.equal(typeof module.trustedUserHome, "function");
+  const previous = process.env.HOME;
+  process.env.HOME = "/tmp/forged-home";
+  try {
+    assert.equal(module.trustedUserHome(), userInfo().homedir);
+    assert.notEqual(module.trustedUserHome(), process.env.HOME);
+  } finally {
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
+  }
 });
 
 test("production registration cannot replace the stable controller entrypoint", async () => {
@@ -355,12 +444,16 @@ test("production mode fixes homedir uid and platform dependencies to the current
     }),
     /production platform context cannot be overridden/i,
   );
-});
-
-test("production mode requires explicit stable node and controller paths", async () => {
   await assert.rejects(
-    registerControllerAgent(),
-    /explicit trusted nodePath and controllerPath/i,
+    migrateLegacyWatchdog({ legacyRoots: ["/tmp/self-declared-legacy"] }),
+    /production platform context cannot be overridden/i,
+  );
+  await assert.rejects(
+    registerControllerAgent({
+      nodePath: "/bin/sh",
+      controllerPath: join(userInfo().homedir, ".codex", "heige-codex-skin-studio", "src", "cli.mjs"),
+    }),
+    /production platform context cannot be overridden/i,
   );
 });
 
@@ -389,6 +482,59 @@ test("runtime validation requires Node 22 plus regular canonical executable file
     await assert.rejects(registerControllerAgent(deps), /stable controller entrypoint/i);
     assert.equal(await pathExists(deps.controllerPlistPath), false);
   });
+
+  await t.test("health response without a PID", async (t) => {
+    const deps = await fixture(t, {
+      nodeHealth: ({ nonce, nodePath, controllerPath }) => ({
+        nonce,
+        execPath: nodePath,
+        version: "v22.17.0",
+        release: "node",
+        controllerPath,
+      }),
+    });
+    deps.loaded.clear();
+    await assert.rejects(registerControllerAgent(deps), /health.*PID/i);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+  });
+
+  await t.test("version-printing shell cannot impersonate a healthy Node runtime", async (t) => {
+    const deps = await fixture(t, {
+      nodeHealthFailure: new Error("shell does not implement the module health probe"),
+    });
+    deps.loaded.clear();
+    await assert.rejects(registerControllerAgent(deps), /health probe failed/i);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+  });
+
+  await t.test("controller JavaScript must import successfully in the real runtime probe", async (t) => {
+    const deps = await fixture(t, {
+      nodeHealthFailure: new SyntaxError("invalid controller JavaScript"),
+    });
+    deps.loaded.clear();
+    await assert.rejects(registerControllerAgent(deps), /health probe failed/i);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+  });
+
+  await t.test("a real version-printing shell fails the module health probe", async (t) => {
+    const deps = await fixture(t);
+    deps.loaded.clear();
+    await writeFile(deps.nodePath, "#!/bin/sh\nprintf 'v22.17.0\\n'\n", { mode: 0o755 });
+    await fsPromises.chmod(deps.nodePath, 0o755);
+    deps.execFile = execFileAsync;
+    await assert.rejects(registerControllerAgent(deps), /health probe failed/i);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+  });
+
+  await t.test("invalid JavaScript is rejected by an actual Node process", async (t) => {
+    const deps = await fixture(t);
+    deps.loaded.clear();
+    await writeFile(deps.controllerPath, "export const = invalid syntax;\n");
+    deps.nodePath = process.execPath;
+    deps.execFile = execFileAsync;
+    await assert.rejects(registerControllerAgent(deps), /health probe failed/i);
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+  });
 });
 
 test("launchctl not-found detection requires matching code target and native semantics", async (t) => {
@@ -409,6 +555,13 @@ test("launchctl not-found detection requires matching code target and native sem
       new Error(`Could not find service \"${label}\" in domain for user gui: 501`),
       { code: 77, stderr: `Could not find service \"${label}\" in domain for user gui: 501\n` },
     )],
+    ["native absence mixed with a policy error", ({ label, target }) => {
+      const stderr = `Bad request.\nCould not find service \"${label}\" in domain for user gui: 501\nOperation not permitted\n`;
+      return Object.assign(
+        new Error(`Command failed: /bin/launchctl print ${target}\n${stderr}`),
+        { code: 113, stdout: "", stderr },
+      );
+    }],
   ]) {
     await t.test(name, async (t) => {
       const deps = await fixture(t, { printError });
@@ -479,6 +632,32 @@ test("register refuses a staged plist swapped during lint", async (t) => {
   assert.equal(deps.commands.some((command) => command[1] === "bootstrap"), false);
 });
 
+test("staged creation never overwrites a path created at the publish syscall", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const foreign = Buffer.from("foreign staged creation race\n");
+  const originalLink = deps.fs.link.bind(deps.fs);
+  let attackedPath;
+  deps.fs = {
+    ...deps.fs,
+    async link(from, to, ...args) {
+      if (!attackedPath && String(to).includes(".staged.")) {
+        attackedPath = String(to);
+        await writeFile(attackedPath, foreign, { mode: 0o600 });
+      }
+      return originalLink(from, to, ...args);
+    },
+  };
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "FILE_CAPABILITY_CONFLICT",
+  );
+  assert.equal(typeof attackedPath, "string");
+  assert.deepEqual(await readFile(attackedPath), foreign);
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
 test("register restores an existing loaded controller when replacement bootstrap fails", async (t) => {
   const deps = await fixture(t, { controllerBootstrapFailures: 1 });
   const previous = Buffer.from(renderControllerPlist({
@@ -547,6 +726,40 @@ test("register does not roll back over a plist swapped after attribution", async
   assert.equal(deps.commands.some((command) => command[1] === "bootout"), false);
 });
 
+test("register never overwrites a path exchanged at the publish syscall", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const foreign = Buffer.from("foreign publish race\n");
+  const exchange = exchangePathBeforeMutation(deps, deps.controllerPlistPath, foreign);
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "FILE_CAPABILITY_CONFLICT",
+  );
+  assert.equal(exchange.exchanged, true);
+  assert.deepEqual(await readFile(deps.controllerPlistPath), foreign);
+  assert.equal(deps.loaded.has(deps.label), false);
+});
+
+test("registration rollback never overwrites a path exchanged at restore", async (t) => {
+  const deps = await fixture(t, { controllerBootstrapFailures: 1 });
+  deps.loaded.clear();
+  const foreign = Buffer.from("foreign rollback race\n");
+  const exchange = exchangePathBeforeMutation(
+    deps,
+    deps.controllerPlistPath,
+    foreign,
+    { attempt: 2 },
+  );
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "REGISTRATION_ROLLBACK_FAILED",
+  );
+  assert.equal(exchange.exchanged, true);
+  assert.deepEqual(await readFile(deps.controllerPlistPath), foreign);
+});
+
 test("inspect reports plist identity and verified launchctl state", async (t) => {
   const deps = await fixture(t);
   deps.loaded.clear();
@@ -598,8 +811,10 @@ test("the plist reader rejects its immutable parse copy being swapped", async (t
   const deps = await fixture(t);
   deps.loaded.clear();
   await registerControllerAgent(deps);
+  let parseCopyPath;
   const execFile = async (file, args) => {
     if (file === "/usr/bin/plutil" && args[0] === "-convert") {
+      parseCopyPath = args.at(-1);
       await writeFile(args.at(-1), "swapped parse copy\n");
       return { stdout: JSON.stringify({ Label: deps.label }), stderr: "" };
     }
@@ -610,6 +825,7 @@ test("the plist reader rejects its immutable parse copy being swapped", async (t
     inspectLaunchAgent({ ...deps, execFile, readPlist: undefined }),
     (error) => error.code === "FILE_CHANGED_DURING_VALIDATION",
   );
+  assert.equal(await readFile(parseCopyPath, "utf8"), "swapped parse copy\n");
 });
 
 test("unregister verifies absence and deletes only its matching generated plist", async (t) => {
@@ -675,6 +891,34 @@ test("unregister verifies the complete generated tuple before bootout or deletio
   assert.equal(deps.commands.some((command) => command[1] === "bootout"), false);
 });
 
+test("unregister rejects unknown plist keys and KeepAlive extensions", async (t) => {
+  for (const [name, mutate] of [
+    ["unknown top-level key", (plist) => ({ ...plist, ThrottleInterval: 1 })],
+    ["KeepAlive extension", (plist) => ({
+      ...plist,
+      KeepAlive: { ...plist.KeepAlive, OtherJobEnabled: { "example.foreign": true } },
+    })],
+  ]) {
+    await t.test(name, async (t) => {
+      const deps = await fixture(t);
+      deps.loaded.clear();
+      await registerControllerAgent(deps);
+      deps.loaded.add(deps.label);
+      const readPlist = async (path) => path === deps.controllerPlistPath
+        ? mutate(await deps.readPlist(path))
+        : deps.readPlist(path);
+
+      await assert.rejects(
+        unregisterControllerAgent({ ...deps, readPlist }),
+        (error) => error.code === "CONTROLLER_PRESTATE_INVALID",
+      );
+      assert.equal(deps.loaded.has(deps.label), true);
+      assert.equal(await pathExists(deps.controllerPlistPath), true);
+      assert.equal(deps.commands.filter((command) => command[1] === "bootout").length, 0);
+    });
+  }
+});
+
 test("unregister fails closed when the label is loaded without a trusted canonical plist", async (t) => {
   const deps = await fixture(t);
   deps.loaded.add(deps.label);
@@ -705,6 +949,21 @@ test("unregister detects a canonical plist swap after attribution", async (t) =>
   assert.deepEqual(await readFile(deps.controllerPlistPath), foreign);
 });
 
+test("unregister never deletes a path exchanged at the remove syscall", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+  const foreign = Buffer.from("foreign remove race\n");
+  const exchange = exchangePathBeforeMutation(deps, deps.controllerPlistPath, foreign);
+
+  await assert.rejects(
+    unregisterControllerAgent(deps),
+    (error) => error.code === "FILE_CAPABILITY_CONFLICT",
+  );
+  assert.equal(exchange.exchanged, true);
+  assert.deepEqual(await readFile(deps.controllerPlistPath), foreign);
+});
+
 test("legacy migration removes only a fully attributed old plist", async (t) => {
   const deps = await fixture(t);
   const result = await migrateLegacyWatchdog(deps);
@@ -721,7 +980,8 @@ test("legacy migration removes only a fully attributed old plist", async (t) => 
   assert.equal(await pathExists(deps.journalPath), false);
   assert.deepEqual(
     deps.deletedPaths.filter((path) => path === deps.oldPlistPath),
-    [deps.oldPlistPath],
+    [],
+    "the validated legacy inode is quarantined before deletion",
   );
   const firstWritableOpen = deps.openCalls.find(([, flags]) => /[wax+]/.test(String(flags)));
   assert.deepEqual(firstWritableOpen?.slice(0, 2), [deps.journalPath, "wx"]);
@@ -757,6 +1017,43 @@ test("migration creates its recovery journal exclusively and never overwrites an
   assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
 });
 
+test("every journal update uses nonce and inode CAS without overwriting a replacement", async (t) => {
+  const deps = await fixture(t);
+  const foreign = Buffer.from('{"foreign":true}\n');
+  const originalRename = deps.fs.rename.bind(deps.fs);
+  const originalLink = deps.fs.link.bind(deps.fs);
+  let exchanged = false;
+  const exchange = async (from, to) => {
+    if (!exchanged && (from === deps.journalPath || to === deps.journalPath)) {
+      exchanged = true;
+      await rm(deps.journalPath, { force: true });
+      await writeFile(deps.journalPath, foreign, { mode: 0o600 });
+    }
+  };
+  deps.fs = {
+    ...deps.fs,
+    async rename(from, to, ...args) {
+      await exchange(String(from), String(to));
+      return originalRename(from, to, ...args);
+    },
+    async link(from, to, ...args) {
+      await exchange(String(from), String(to));
+      return originalLink(from, to, ...args);
+    },
+  };
+
+  await assert.rejects(
+    migrateLegacyWatchdog(deps),
+    (error) => error.code === "JOURNAL_CONFLICT",
+  );
+  assert.equal(exchanged, true);
+  assert.deepEqual(await readFile(deps.journalPath), foreign);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+  assert.equal(deps.loaded.has(deps.label), false);
+  assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+});
+
 test("migration refuses an oversized recovery snapshot before creating a journal", async (t) => {
   const oversized = Buffer.alloc(256 * 1024 + 1, 0x61);
   const deps = await fixture(t, { originalPlistBytes: oversized });
@@ -767,6 +1064,19 @@ test("migration refuses an oversized recovery snapshot before creating a journal
   );
   assert.equal(await pathExists(deps.journalPath), false);
   assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
+});
+
+test("migration never deletes or restores over a legacy plist exchanged at removal", async (t) => {
+  const deps = await fixture(t);
+  const foreign = Buffer.from("foreign legacy removal race\n");
+  const exchange = exchangePathBeforeMutation(deps, deps.oldPlistPath, foreign);
+
+  await assert.rejects(
+    migrateLegacyWatchdog(deps),
+    (error) => error.code === "MIGRATION_ROLLBACK_FAILED",
+  );
+  assert.equal(exchange.exchanged, true);
+  assert.deepEqual(await readFile(deps.oldPlistPath), foreign);
 });
 
 test("polluted legacy state and log paths are never followed or deleted", async (t) => {
@@ -844,6 +1154,72 @@ test("register refuses a symlink at the canonical controller plist", async (t) =
   await symlink(backing, deps.controllerPlistPath);
   await assert.rejects(registerControllerAgent(deps), /non-regular file/);
   assert.equal(await readFile(backing, "utf8"), "foreign\n");
+});
+
+test("state directory rejects every symlinked ancestor", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const applicationSupport = dirname(deps.stateDir);
+  const outside = join(deps.home, "outside-state-root");
+  await fsPromises.mkdir(outside, { recursive: true });
+  await symlink(outside, applicationSupport);
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "STATE_PATH_UNTRUSTED",
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
+test("state directory rejects an ancestor exchanged during secure creation", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const applicationSupport = dirname(deps.stateDir);
+  const movedSupport = join(deps.home, "moved-application-support");
+  const originalMkdir = deps.fs.mkdir.bind(deps.fs);
+  let exchanged = false;
+  deps.fs = {
+    ...deps.fs,
+    async mkdir(path, options) {
+      const result = await originalMkdir(path, options);
+      if (!exchanged && path === deps.stateDir) {
+        exchanged = true;
+        await fsPromises.rename(applicationSupport, movedSupport);
+        await symlink(movedSupport, applicationSupport);
+      }
+      return result;
+    },
+  };
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "STATE_PATH_UNTRUSTED",
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
+test("state directory capability is revalidated immediately before publish", async (t) => {
+  const deps = await fixture(t, { swapStateAfterLint: true });
+  deps.loaded.clear();
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "STATE_PATH_UNTRUSTED",
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(deps.commands.some((command) => command[1] === "bootstrap"), false);
+});
+
+test("LaunchAgents ancestor capability is revalidated immediately before publish", async (t) => {
+  const deps = await fixture(t, { swapLaunchAgentsAfterLint: true });
+  deps.loaded.clear();
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "LAUNCH_AGENTS_PATH_UNTRUSTED",
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(deps.commands.some((command) => command[1] === "bootstrap"), false);
 });
 
 for (const [field, value] of [
@@ -1002,6 +1378,24 @@ test("rollback reports primary and rollback failures and retains the journal", a
   assert.equal(journal.newBackup.existed, false);
   assert.equal(journal.newBackup.bytesBase64, null);
   assert.equal(journal.newBackup.sha256, null);
+  const forwardBytes = Buffer.from(renderControllerPlist({
+    label: deps.label,
+    programArguments: [deps.nodePath, deps.controllerPath, "controller"],
+    stateDir: deps.stateDir,
+  }));
+  assert.match(journal.nonce, /^[0-9a-f-]{36}$/i);
+  assert.equal(Number.isInteger(journal.revision), true);
+  assert.equal(journal.revision > 0, true);
+  assert.equal(journal.forward.plistPath, deps.controllerPlistPath);
+  assert.match(journal.forward.stagedPath, new RegExp(
+    `^${deps.controllerPlistPath.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.staged\\.`,
+  ));
+  assert.deepEqual(journal.forward.programArguments, [deps.nodePath, deps.controllerPath, "controller"]);
+  assert.equal(journal.forward.bytesBase64, forwardBytes.toString("base64"));
+  assert.equal(
+    journal.forward.sha256,
+    createHash("sha256").update(forwardBytes).digest("hex"),
+  );
 });
 
 test("recovery journal durably embeds an existing controller pre-state", async (t) => {
