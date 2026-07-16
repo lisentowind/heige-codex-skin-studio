@@ -35,7 +35,28 @@ export function bundledNodeCandidates(appPath, { platform = process.platform } =
       win32.join(appDir, "resources", "cua_node", "bin", "node.exe"),
     ];
   }
-  return [posix.join(appPath, "Contents", "Resources", "cua_node", "bin", "node")];
+  return [
+    posix.join(appPath, "Contents", "Resources", "cua_node", "bin", "node"),
+    posix.join(appPath, "Contents", "Resources", "cua_node", "node"),
+  ];
+}
+
+export function codexInstallation(appPath, { platform = process.platform } = {}) {
+  const candidates = bundledNodeCandidates(appPath, { platform });
+  if (platform === "win32") {
+    return {
+      appPath,
+      executablePath: appPath,
+      bundledNodePath: candidates[0],
+      bundledNodeCandidates: candidates,
+    };
+  }
+  return {
+    appPath,
+    executablePath: posix.join(appPath, "Contents", "MacOS", "ChatGPT"),
+    bundledNodePath: candidates[0],
+    bundledNodeCandidates: candidates,
+  };
 }
 
 async function firstExisting(paths, exists) {
@@ -43,6 +64,84 @@ async function firstExisting(paths, exists) {
     if (await exists(path)) return path;
   }
   return null;
+}
+
+export async function resolveCodexApp({
+  platform = process.platform,
+  env = process.env,
+  home = homedir(),
+  exists = (path) => access(path).then(() => true, () => false),
+} = {}) {
+  const explicit = env.HEIGE_CODEX_APP;
+  if (explicit) {
+    if (!(await exists(explicit))) {
+      throw new Error(`HEIGE_CODEX_APP does not exist: ${explicit}`);
+    }
+    return {
+      platform,
+      ...codexInstallation(explicit, { platform }),
+      source: "env",
+    };
+  }
+
+  const candidates = codexAppCandidates({ platform, env, home });
+  for (let index = 0; index < candidates.length; index += 1) {
+    const appPath = candidates[index];
+    if (await exists(appPath)) {
+      const source = platform === "win32"
+        ? (index < 2 ? "user" : "system")
+        : (index === 0 ? "system" : "user");
+      return {
+        platform,
+        ...codexInstallation(appPath, { platform }),
+        source,
+      };
+    }
+  }
+
+  throw new Error(`Codex app was not found in: ${candidates.join(", ")}`);
+}
+
+export function sameProcessIdentity(left, right) {
+  return left?.pid === right?.pid &&
+    left?.executablePath === right?.executablePath &&
+    left?.startedAt === right?.startedAt;
+}
+
+export function parseMacPsTable(output) {
+  const rows = [];
+  for (const line of String(output).split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(.*)$/);
+    if (!match) continue;
+    rows.push({
+      pid: Number(match[1]),
+      startedAt: `${match[2]} ${match[3]} ${match[4]} ${match[5]} ${match[6]}`,
+      commandLine: match[7],
+    });
+  }
+  return rows;
+}
+
+export function parseCodexProcessTable(output, app) {
+  const executablePath = app.executablePath;
+  return parseMacPsTable(output)
+    .filter(({ commandLine }) => commandLine === executablePath || commandLine.startsWith(`${executablePath} `))
+    .map(({ pid, startedAt, commandLine }) => {
+      const portMatch = commandLine.match(/(?:^|\s)--remote-debugging-port(?:=|\s+)(\d+)(?=\s|$)/);
+      return {
+        pid,
+        executablePath,
+        startedAt,
+        commandLine,
+        hasCdp: /(?:^|\s)--remote-debugging-port(?:=|\s|$)/.test(commandLine),
+        cdpPort: portMatch ? Number(portMatch[1]) : null,
+      };
+    });
+}
+
+export async function listCodexProcesses({ app, exec = execFileAsync } = {}) {
+  const { stdout } = await exec("/bin/ps", ["-axo", "pid=,lstart=,command="]);
+  return parseCodexProcessTable(stdout, app);
 }
 
 // 运行态诊断：版本号、进程是否带调试参数、端口是否开放。
