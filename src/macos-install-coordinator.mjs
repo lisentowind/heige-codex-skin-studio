@@ -312,6 +312,13 @@ async function createFreshInstall(input, deps, launcherLock) {
 
 export async function coordinateMacosInstall(input, dependencies) {
   const deps = assertDependencies(dependencies);
+  return withMacosInstallParticipantLocks(deps, async ({ launcherLock }) => {
+    await recoverMacosInstallTransaction(deps);
+    return createFreshInstall(input, deps, launcherLock);
+  });
+}
+
+async function withMacosInstallParticipantLocks(deps, action) {
   return deps.withCoordinatorLock(async () => {
     const treeLock = await deps.acquireTreeLock();
     let launcherLock;
@@ -320,8 +327,7 @@ export async function coordinateMacosInstall(input, dependencies) {
       const initial = await deps.readJournal();
       if (initial === null) await deps.recoverStandaloneTree();
       launcherLock = await deps.acquireLauncherLock({ recover: initial === null });
-      await recoverMacosInstallTransaction(deps);
-      return await createFreshInstall(input, deps, launcherLock);
+      return await action({ initial, launcherLock });
     } catch (error) {
       primaryError = error;
       throw error;
@@ -342,6 +348,14 @@ export async function coordinateMacosInstall(input, dependencies) {
       }
     }
   });
+}
+
+export async function coordinateMacosInstallRecovery(dependencies) {
+  const deps = assertDependencies(dependencies);
+  return withMacosInstallParticipantLocks(
+    deps,
+    () => recoverMacosInstallTransaction(deps),
+  );
 }
 
 async function readPosixProcessIdentity(pid) {
@@ -529,6 +543,26 @@ export async function runProductionMacosInstall({ sourceRoot, targetRoot, port =
   }, dependencies);
 }
 
+export async function runProductionMacosInstallRecovery({
+  sourceRoot,
+  targetRoot,
+  port = DEFAULT_CDP_PORT,
+}) {
+  if (process.platform !== "darwin") throw new Error("macOS install coordinator requires Darwin");
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error("macOS install port is invalid");
+  }
+  const home = launchAgent.trustedUserHome();
+  const paths = resolveStudioPaths({ home, platform: "darwin" });
+  const dependencies = await productionMacosInstallDependencies({
+    home,
+    sourceRoot,
+    targetRoot,
+    stateRoot: paths.stateRoot,
+  });
+  return coordinateMacosInstallRecovery(dependencies);
+}
+
 function parseCli(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -536,14 +570,25 @@ function parseCli(argv) {
     const value = argv[index + 1];
     if (!flag?.startsWith("--") || value === undefined) throw new Error("invalid macOS install arguments");
     const name = flag.slice(2);
-    if (!new Set(["source", "target", "port"]).has(name) || Object.hasOwn(options, name)) {
+    if (
+      !new Set(["source", "target", "port", "recovery-only"]).has(name) ||
+      Object.hasOwn(options, name)
+    ) {
       throw new Error(`unknown or duplicate macOS install option: ${flag}`);
     }
     options[name] = value;
   }
   if (!options.source || !options.target) throw new Error("macOS install requires --source and --target");
   const port = options.port === undefined ? DEFAULT_CDP_PORT : Number(options.port);
-  return { sourceRoot: options.source, targetRoot: options.target, port };
+  if (options["recovery-only"] !== undefined && options["recovery-only"] !== "true") {
+    throw new Error("macOS install --recovery-only accepts only true");
+  }
+  return {
+    sourceRoot: options.source,
+    targetRoot: options.target,
+    port,
+    recoveryOnly: options["recovery-only"] === "true",
+  };
 }
 
 function isMainEntry() {
@@ -555,7 +600,11 @@ function isMainEntry() {
 }
 
 if (isMainEntry()) {
-  runProductionMacosInstall(parseCli(process.argv.slice(2)))
+  const input = parseCli(process.argv.slice(2));
+  const run = input.recoveryOnly
+    ? runProductionMacosInstallRecovery
+    : runProductionMacosInstall;
+  run(input)
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
       process.stderr.write(`HeiGe Codex Skin Studio：${error.message}\n`);

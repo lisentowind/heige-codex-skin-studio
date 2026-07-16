@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   coordinateMacosInstall,
+  coordinateMacosInstallRecovery,
   recoverMacosInstallTransaction,
 } from "../src/macos-install-coordinator.mjs";
 
@@ -405,6 +406,36 @@ test("postcommit recovery tolerates launchd PID replacement without reacquiring 
 
   assert.equal(fx.journal, null);
   assert.equal(fx.events.includes("state-finalize"), true);
+});
+
+test("recovery-only coordinator rolls forward under participant locks without creating a fresh install", async () => {
+  const fx = fixture({ persistenceEnabled: true, crashAt: "after-commit-decision" });
+  await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /after-commit-decision/);
+  const createsBefore = fx.events.filter((event) => event === "journal-create").length;
+
+  assert.deepEqual(await coordinateMacosInstallRecovery(fx.deps), {
+    recovered: true,
+    decision: "commit",
+  });
+
+  assert.equal(fx.journal, null);
+  assert.equal(
+    fx.events.filter((event) => event === "journal-create").length,
+    createsBefore,
+  );
+  assert.equal(fx.events.at(-2), "launcher-unlock");
+  assert.equal(fx.events.at(-1), "tree-unlock");
+});
+
+test("recovery-only coordinator returns false and only recovers orphan preparations when no outer exists", async () => {
+  const fx = fixture();
+  assert.deepEqual(await coordinateMacosInstallRecovery(fx.deps), { recovered: false });
+  assert.equal(fx.events.includes("tree-recover-under-lock"), true);
+  assert.deepEqual(
+    fx.events.find((event) => Array.isArray(event) && event[0] === "launcher-lock")[1],
+    { recover: true },
+  );
+  assert.equal(fx.events.includes("journal-create"), false);
 });
 
 for (const phase of [
