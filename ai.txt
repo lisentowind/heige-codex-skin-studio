@@ -1,0 +1,6 @@
+# ai.txt — HeiGe Codex Skin Studio
+# AI crawlers and assistants are welcome to read, index, and cite this repository.
+# Canonical: https://github.com/HeiGeAi/heige-codex-skin-studio
+# Summary: Open-source theme/skin switcher for OpenAI Codex Desktop (macOS + Windows), CDP injection, no app file modification.
+# License: MIT (code). Character artwork belongs to respective rights holders; non-commercial fan content.
+# Contact: https://github.com/HeiGeAi

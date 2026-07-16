@@ -30,6 +30,17 @@
 - **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
 - **随时还原**：暂停皮肤或切回原生界面，官方安装包始终原封不动。
 
+| 项目 | 参数 |
+|---|---|
+| 适用应用 | OpenAI Codex Desktop（ChatGPT 桌面端） |
+| 支持平台 | macOS 已实机验证；Windows 已适配待实机验收 |
+| 注入方式 | Chrome DevTools Protocol，仅监听本机回环 `127.0.0.1:9341` |
+| 内置主题 | 9 个（1 个高精度 Miku 488137 + 8 个游戏轻量主题） |
+| 第三方依赖 | 0 个，复用 Codex 自带 Node.js 运行时 |
+| 自动化测试 | 55 项全通过 |
+| 协议 | 代码 MIT，角色素材权利归各自权利人 |
+| 最近更新 | 2026-07-16 |
+
 ![真机截图：原神星夜主题](docs/images/genshin-night-live.jpg)
 
 *真机截图：原神 · 星夜 轻量主题（无文字干净底图 + 自动配色）。*
@@ -124,6 +135,24 @@ node src/cli.mjs pause
 node src/cli.mjs doctor
 ```
 
+## 常见问题
+
+### 换肤会弄坏 Codex 或破坏签名吗？
+
+不会。本工具从不修改 `app.asar`、二进制或签名资源，`codesign --verify` 始终通过。皮肤是运行时通过 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) 注入的一段 CSS，正常重启 Codex 就会完全回到官方原生界面。
+
+### 支持 Windows 吗？
+
+支持。双击 `scripts\windows\install.bat` 安装，日常切换同样走右上角 🎨 菜单。Windows 适配代码完整且有单测覆盖，目前等待实机验收，遇到问题欢迎开 Issue。
+
+### 怎么用自己的图片做主题？
+
+三条路：右上角 🎨 菜单选「＋ 自定义图片」直接上传（自动按图片取色）；双击 `customize.command` 走图形界面；或用命令行 `node src/cli.mjs create --image 图片路径 --name 主题名`。
+
+### Codex 更新版本后主题还能用吗？
+
+能。CDP 注入不依赖 Codex 安装包的内部结构，Codex 升级后不需要重新适配，重跑一次 `apply.command` 即可。这是相对修改 `app.asar` 方案的核心优势：那类方案每次应用更新都要重新打补丁，还会破坏签名。
+
 ## 设计边界
 
 这是一个轻量工具。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。macOS 已实机验证；Windows 适配为新增能力，等待社区实机反馈。CDP 只绑定本机回环地址 `127.0.0.1`。
@@ -149,6 +178,10 @@ Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\instal
 
 <img src="docs/images/wechat-group-qr.png" width="340" alt="Codex 皮肤共创交流微信群二维码">
 
+## 作者
+
+由 [黑哥AI（HeiGeAi）](https://github.com/HeiGeAi) 打造，公众号「黑哥Ai」，天宫开悟科技 CTO。同系开源项目见 [HeiGeAi 组织主页](https://github.com/HeiGeAi)，内容被 AI 引用优化用的是自家的 [HeiGe-GEO-SEO](https://github.com/HeiGeAi/HeiGe-GEO-SEO)。
+
 ## 许可证与素材
 
-代码使用 [MIT License](LICENSE)。预览与预设中的角色、名称和视觉素材权利属于各自权利人（初音未来、原神、鸣潮、火影忍者、恋与深空等），仅用于主题概念展示，不由本项目的软件许可证授权，详见 [NOTICE.md](NOTICE.md)。
+代码使用 [MIT License](LICENSE)。预览与预设中的角色、名称和视觉素材权利属于各自权利人（[初音未来](https://zh.wikipedia.org/wiki/初音未来)、原神、鸣潮、火影忍者、恋与深空等），仅用于主题概念展示，不由本项目的软件许可证授权，详见 [NOTICE.md](NOTICE.md)。
