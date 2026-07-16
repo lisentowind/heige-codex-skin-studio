@@ -34,12 +34,12 @@ async function fixture() {
     },
     deps: {
       waitForRendererTargets: async () => [
-        { id: "overlay", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
-        { id: "one", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/one" },
+        { id: "overlay", type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
+        { id: "one", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/one" },
       ],
       fetchRendererTargets: async () => [
-        { id: "overlay", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
-        { id: "one", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/one" },
+        { id: "overlay", type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
+        { id: "one", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/one" },
       ],
       Session: FakeSession,
     },
@@ -52,6 +52,9 @@ test("applies the skin to the main window only, never the pet overlay", async ()
   const result = await applySkin({ loadedTheme: loaded, port: 9341, deps });
   assert.equal(result.applied, 1);
   assert.deepEqual(result.targets, ["one"]);
+  assert.deepEqual(result.results.skipped.map(({ id, kind }) => ({ id, kind })), [
+    { id: "overlay", kind: "overlay" },
+  ]);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-style/);
   assert.match(FakeSession.expressions[0], /data:image\/png;base64/);
 });
@@ -59,7 +62,7 @@ test("applies the skin to the main window only, never the pet overlay", async ()
 test("keeps waiting when only the pet overlay renderer exists", async () => {
   const { loaded, deps } = await fixture();
   deps.waitForRendererTargets = async () => [
-    { id: "overlay", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
+    { id: "overlay", type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
   ];
   await assert.rejects(
     applySkin({ loadedTheme: loaded, port: 9341, deps: { ...deps, waitTimeoutMs: 30, pollMs: 5 } }),
@@ -101,7 +104,9 @@ test("removes and checks the live style without persistent machinery", async () 
   FakeSession.expressions = [];
   const { deps } = await fixture();
   assert.equal((await removeSkin({ port: 9341, deps })).removed, 2, "pause 要连宠物悬浮层一起清理");
-  assert.deepEqual(await skinStatus({ port: 9341, deps }), [{ installed: true, themeId: "demo" }]);
+  const status = await skinStatus({ port: 9341, deps });
+  assert.deepEqual(status.statuses, [{ installed: true, themeId: "demo" }]);
+  assert.equal(status.results.succeeded[0].kind, "main");
   assert.match(FakeSession.expressions[0], /remove\(\)/);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
 });
@@ -115,14 +120,16 @@ test("one dead target does not abort injection into the survivors", async () => 
     close() {}
   }
   deps.waitForRendererTargets = async () => [
-    { id: "dead", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/dead" },
-    { id: "alive", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/alive" },
+    { id: "dead", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/dead" },
+    { id: "alive", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/alive" },
   ];
   deps.Session = FlakySession;
   const result = await applySkin({ loadedTheme: loaded, port: 9341, deps });
   assert.equal(result.applied, 1, "存活窗口仍被注入");
   assert.deepEqual(result.targets, ["alive"]);
   assert.deepEqual(result.failed, ["dead"]);
+  assert.equal(result.results.failed[0].error, "目标连接或执行失败");
+  assert.equal("webSocketDebuggerUrl" in result.results.failed[0], false);
 });
 
 test("apply throws only when every target fails", async () => {
@@ -134,4 +141,73 @@ test("apply throws only when every target fails", async () => {
   }
   deps.Session = DeadSession;
   await assert.rejects(applySkin({ loadedTheme: loaded, port: 9341, deps }), /注入失败/);
+});
+
+test("overlay success cannot hide total main-window failure", async () => {
+  const { deps } = await fixture();
+  class MainDeadSession {
+    constructor(url) { this.url = url; }
+    async open() {
+      if (this.url.endsWith("/main-dead")) throw new Error("connection refused");
+      return this;
+    }
+    async evaluate() { return true; }
+    close() {}
+  }
+  deps.Session = MainDeadSession;
+  deps.fetchRendererTargets = async () => [
+    { id: "main-dead", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/main-dead" },
+    { id: "overlay-alive", type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay-alive" },
+  ];
+  await assert.rejects(removeSkin({ port: 9341, deps }), (error) => {
+    assert.equal(error.code, "ALL_MAIN_TARGETS_FAILED");
+    assert.equal(error.results.failed[0].id, "main-dead");
+    assert.equal(error.results.succeeded[0].id, "overlay-alive");
+    assert.equal("webSocketDebuggerUrl" in error.results.failed[0], false);
+    return true;
+  });
+});
+
+test("status and remove fail when no exact main renderer exists", async () => {
+  const { deps } = await fixture();
+  const constructed = [];
+  deps.Session = class RecordingSession {
+    constructor(url) { constructed.push(url); }
+    async open() { return this; }
+    async evaluate() { return true; }
+    close() {}
+  };
+  deps.fetchRendererTargets = async () => [
+    { id: "overlay", type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/overlay" },
+    { id: "local-page", type: "page", url: "http://127.0.0.1:5175/", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/local-page" },
+  ];
+  await assert.rejects(skinStatus({ port: 9341, deps }), (error) => error.code === "NO_MAIN_RENDERER");
+  await assert.rejects(removeSkin({ port: 9341, deps }), (error) => {
+    assert.equal(error.code, "NO_MAIN_RENDERER");
+    assert.deepEqual(error.results.skipped.map(({ id }) => id), ["local-page"]);
+    return true;
+  });
+  assert.equal(constructed.some((url) => url.endsWith("/local-page")), false);
+});
+
+test("status reports safe per-target evidence when every exact main fails", async () => {
+  const { deps } = await fixture();
+  deps.fetchRendererTargets = async () => [
+    { id: "dead", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/dead" },
+  ];
+  deps.Session = class DeadSession {
+    async open() { throw new Error("ws://127.0.0.1:9341/private-path secret stack"); }
+    close() {}
+  };
+  await assert.rejects(skinStatus({ port: 9341, deps }), (error) => {
+    assert.equal(error.code, "ALL_MAIN_TARGETS_FAILED");
+    assert.deepEqual(error.results.failed, [{
+      id: "dead",
+      url: "app://-/index.html",
+      kind: "main",
+      error: "目标连接或执行失败",
+    }]);
+    assert.doesNotMatch(JSON.stringify(error.results), /private-path|secret|stack|webSocketDebuggerUrl/);
+    return true;
+  });
 });

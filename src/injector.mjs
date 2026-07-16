@@ -4,47 +4,101 @@ import { extname } from "node:path";
 import { CdpSession, fetchRendererTargets, waitForRendererTargets } from "./cdp-client.mjs";
 import { buildSkinCss } from "./skin-css.mjs";
 import { buildSkinMenuScript, CSS_SENTINELS } from "./skin-menu.mjs";
+import { classifyCodexTargets } from "./target-classifier.mjs";
 
 const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
-const OVERLAY_MARKER = "avatar-overlay";
-
-// 宠物悬浮层也是 app:// renderer，皮肤只能进主窗口
-function isMainTarget(target) {
-  return typeof target.url === "string" && !target.url.includes(OVERLAY_MARKER);
-}
-
 async function waitForMainTargets(wait, port, { timeoutMs = 20_000, pollMs = 500 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const remainingMs = Math.max(1, deadline - Date.now());
-    const targets = (await wait(port, { timeoutMs: remainingMs })).filter(isMainTarget);
-    if (targets.length > 0) return targets;
+    const targets = classifyCodexTargets(await wait(port, { timeoutMs: remainingMs }));
+    if (targets.some(({ kind }) => kind === "main")) return targets;
     if (Date.now() + pollMs >= deadline) {
-      throw new Error("只发现宠物悬浮层，等不到 Codex 主窗口 renderer");
+      throw targetError(
+        "NO_MAIN_RENDERER",
+        "等不到经过严格识别的 Codex 主窗口 renderer",
+        resultsFor(targets, { succeeded: [], failed: [] }),
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
 
+function safeId(target) {
+  try {
+    return typeof target.id === "string" || typeof target.id === "number"
+      ? String(target.id)
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function safeUrl(target) {
+  try { return typeof target.url === "string" ? target.url : ""; } catch { return ""; }
+}
+
+function safeTarget(target, extra = {}) {
+  return {
+    id: safeId(target),
+    url: safeUrl(target),
+    kind: target.kind ?? "unknown",
+    ...extra,
+  };
+}
+
+function safeEvaluationError(error) {
+  let code;
+  try { code = error?.code; } catch { code = undefined; }
+  if (typeof code === "string" || Number.isSafeInteger(code)) {
+    return `目标连接或执行失败（${String(code).slice(0, 64)}）`;
+  }
+  return "目标连接或执行失败";
+}
+
 async function evaluateTargets(targets, expression, Session) {
-  const ok = [];
+  const succeeded = [];
   const failed = [];
   for (const target of targets) {
-    const session = new Session(target.webSocketDebuggerUrl);
+    let session;
     try {
+      session = new Session(target.webSocketDebuggerUrl);
       await session.open();
-      ok.push({ id: target.id, value: await session.evaluate(expression) });
+      succeeded.push(safeTarget(target, { value: await session.evaluate(expression) }));
     } catch (error) {
-      // 单个 target 失败（窗口在发现与连接之间关闭、悬浮层刚被关掉致 ws 被拒）
-      // 不该中断其余 target；收集起来，全部失败才向上抛
-      failed.push({ id: target.id, error: error?.message ?? String(error) });
+      failed.push(safeTarget(target, { error: safeEvaluationError(error) }));
     } finally {
-      session.close();
+      try { session?.close(); } catch {}
     }
   }
-  return { ok, failed };
+  return { succeeded, failed };
+}
+
+function skippedTarget(target) {
+  return safeTarget(target, {
+    reason: target.kind === "overlay"
+      ? "该操作不会把宠物悬浮层当作主窗口"
+      : "页面 URL 不属于已审核的 Codex renderer",
+  });
+}
+
+function resultsFor(classified, { succeeded, failed }, touchedKinds = new Set(["main"])) {
+  return {
+    succeeded,
+    failed,
+    skipped: classified
+      .filter(({ kind }) => !touchedKinds.has(kind))
+      .map(skippedTarget),
+  };
+}
+
+function targetError(code, message, results) {
+  const error = new Error(message);
+  error.code = code;
+  error.results = results;
+  return error;
 }
 
 async function assetDataUrl(path, field) {
@@ -98,20 +152,27 @@ export async function applySkin({ loadedTheme, themes, port, preferStored = fals
     preferStored,
     control,
   });
-  const targets = await waitForMainTargets(wait, port, {
+  const classified = await waitForMainTargets(wait, port, {
     timeoutMs: deps.waitTimeoutMs ?? 20_000,
     pollMs: deps.pollMs ?? 500,
   });
-  const { ok, failed } = await evaluateTargets(targets, expression, Session);
-  if (ok.length === 0 && targets.length > 0) {
-    throw new Error(`全部 ${targets.length} 个窗口注入失败：${failed.map((f) => f.error).join("；")}`);
+  const targets = classified.filter(({ kind }) => kind === "main");
+  const evaluated = await evaluateTargets(targets, expression, Session);
+  const results = resultsFor(classified, evaluated);
+  if (evaluated.succeeded.length === 0) {
+    throw targetError(
+      "ALL_MAIN_TARGETS_FAILED",
+      `全部 ${targets.length} 个 Codex 主窗口注入失败`,
+      results,
+    );
   }
   return {
-    applied: ok.length,
+    applied: evaluated.succeeded.length,
     themeId,
     menuThemes: entries.map(({ id }) => id),
-    targets: ok.map(({ id }) => id),
-    failed: failed.map(({ id }) => id),
+    targets: evaluated.succeeded.map(({ id }) => id),
+    failed: evaluated.failed.map(({ id }) => id),
+    results,
   };
 }
 
@@ -126,12 +187,37 @@ export async function removeSkin({ port, deps = {} }) {
     try { delete window.__heigeCodexSkin; } catch (error) { window.__heigeCodexSkin = undefined; }
     return true;
   })()`;
-  const targets = await fetchTargets(port);
-  const { ok, failed } = await evaluateTargets(targets, expression, Session);
-  if (ok.length === 0 && targets.length > 0) {
-    throw new Error(`全部 ${targets.length} 个窗口清理失败：${failed.map((f) => f.error).join("；")}`);
+  const classified = classifyCodexTargets(await fetchTargets(port));
+  const mainTargets = classified.filter(({ kind }) => kind === "main");
+  const touchedKinds = new Set(["main", "overlay"]);
+  const evaluated = await evaluateTargets(
+    classified.filter(({ kind }) => touchedKinds.has(kind)),
+    expression,
+    Session,
+  );
+  const results = resultsFor(classified, evaluated, touchedKinds);
+  if (mainTargets.length === 0) {
+    throw targetError(
+      "NO_MAIN_RENDERER",
+      "未发现经过严格识别的 Codex 主窗口 renderer",
+      results,
+    );
   }
-  return { removed: ok.length, failed: failed.map(({ id }) => id) };
+  const succeededMainIds = new Set(
+    evaluated.succeeded.filter(({ kind }) => kind === "main").map(({ id }) => id),
+  );
+  if (succeededMainIds.size === 0) {
+    throw targetError(
+      "ALL_MAIN_TARGETS_FAILED",
+      `全部 ${mainTargets.length} 个 Codex 主窗口清理失败`,
+      results,
+    );
+  }
+  return {
+    removed: evaluated.succeeded.length,
+    failed: evaluated.failed.map(({ id }) => id),
+    results,
+  };
 }
 
 export async function skinStatus({ port, deps = {} }) {
@@ -142,7 +228,27 @@ export async function skinStatus({ port, deps = {} }) {
     menu: Boolean(document.getElementById(${JSON.stringify(MENU_ID)})),
     themeId: document.documentElement.dataset.heigeCodexSkin ?? null
   }))()`;
-  const targets = (await fetchTargets(port)).filter(isMainTarget);
-  const { ok } = await evaluateTargets(targets, expression, Session);
-  return ok.map(({ value }) => value);
+  const classified = classifyCodexTargets(await fetchTargets(port));
+  const targets = classified.filter(({ kind }) => kind === "main");
+  if (targets.length === 0) {
+    throw targetError(
+      "NO_MAIN_RENDERER",
+      "未发现经过严格识别的 Codex 主窗口 renderer",
+      resultsFor(classified, { succeeded: [], failed: [] }),
+    );
+  }
+  const evaluated = await evaluateTargets(targets, expression, Session);
+  const results = resultsFor(classified, evaluated);
+  if (evaluated.succeeded.length === 0) {
+    throw targetError(
+      "ALL_MAIN_TARGETS_FAILED",
+      `全部 ${targets.length} 个 Codex 主窗口状态读取失败`,
+      results,
+    );
+  }
+  return {
+    statuses: evaluated.succeeded.map(({ value }) => value),
+    failed: evaluated.failed.map(({ id }) => id),
+    results,
+  };
 }

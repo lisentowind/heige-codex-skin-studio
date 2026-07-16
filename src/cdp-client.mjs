@@ -65,8 +65,7 @@ function isRendererTarget(target) {
     typeof target !== "object" ||
     Array.isArray(target) ||
     target.type !== "page" ||
-    typeof target.url !== "string" ||
-    !target.url.startsWith("app://")
+    typeof target.url !== "string"
   ) {
     return false;
   }

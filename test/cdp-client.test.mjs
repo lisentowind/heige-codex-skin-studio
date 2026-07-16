@@ -108,7 +108,7 @@ async function openFakeSession({ commandTimeoutMs = 100 } = {}) {
   return { session, socket };
 }
 
-test("filters and deterministically orders usable app page targets", () => {
+test("keeps all loopback-debuggable page candidates for strict product classification", () => {
   const targetB = rendererTarget({
     id: "target-b",
     webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/target-b",
@@ -131,8 +131,8 @@ test("filters and deterministically orders usable app page targets", () => {
   const forward = filterRendererTargets(inputs);
   const reversed = filterRendererTargets([...inputs].reverse());
 
-  assert.deepEqual(forward.map(({ id }) => id), ["target-a", "target-b"]);
-  assert.deepEqual(reversed.map(({ id }) => id), ["target-a", "target-b"]);
+  assert.deepEqual(forward.map(({ id }) => id), ["target-a", "target-b", "web"]);
+  assert.deepEqual(reversed.map(({ id }) => id), ["target-a", "target-b", "web"]);
   assert.deepEqual(inputs[0], targetB, "filtering should not mutate target objects");
 });
 
