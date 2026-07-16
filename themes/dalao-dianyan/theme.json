@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "dalao-dianyan",
+  "name": "大佬 · 点烟",
+  "hero": "hero.webp",
+  "colors": {
+    "accent": "#e09a52",
+    "secondary": "#9aa3b0",
+    "surface": "#111111",
+    "text": "#f2e8da"
+  }
+}

@@ -44,8 +44,8 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "主题
 
 ## 内置预设
 
-默认预设是高精度定制的 `miku-488137`，另有 8 个轻量预设（配色 + 背景底图）：
-`genshin-dawn`、`genshin-night`、`wuthering-tide`、`wuthering-echo`、`naruto-hokage`、`naruto-sasuke`、`deepspace-dawn`、`deepspace-star`。
+默认预设是高精度定制的 `miku-488137`，另有 9 个轻量预设（配色 + 背景底图）：
+`genshin-dawn`、`genshin-night`、`wuthering-tide`、`wuthering-echo`、`naruto-hokage`、`naruto-sasuke`、`deepspace-dawn`、`deepspace-star`、`dalao-dianyan`（大佬 · 点烟彩蛋）。
 
 ```bash
 open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-488137"

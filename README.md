@@ -25,7 +25,7 @@
 - **一键切换**：应用皮肤后 Codex 顶部中间出现 🎨 菜单，所有已装主题和原生界面即点即换，零等待。
 - **自定义上传**：菜单里选「＋ 自定义图片」直接上传本地图片，自动按图片风格取色（主色、辅色、面板底色、文字色），即点即换，重启后重新 apply 仍会保留；行尾 × 一键删除。
 - **一张图片就是一个主题**：任意 PNG、JPG、JPEG、WebP 直接生成皮肤（配色 + 背景底图）。
-- **9 个内置预设**：高精度定制的 `Miku 488137`，加上原神、鸣潮、火影忍者、恋与深空各两款轻量主题。
+- **10 个内置预设**：高精度定制的 `Miku 488137`，原神、鸣潮、火影忍者、恋与深空各两款轻量主题，外加彩蛋预设「大佬 · 点烟」。
 - **AI 生成主题**：把 Skill 交给 Codex，让它先用生图能力产出主图，再自动做成皮肤，无需额外 API Key。
 - **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
 - **随时还原**：暂停皮肤或切回原生界面，官方安装包始终原封不动。
@@ -36,7 +36,7 @@
 | 适用应用 | OpenAI Codex Desktop（ChatGPT 桌面端） |
 | 支持平台 | macOS 已实机验证；Windows 已适配待实机验收 |
 | 注入方式 | Chrome DevTools Protocol，仅监听本机回环 `127.0.0.1:9341` |
-| 内置主题 | 9 个（1 个高精度 Miku 488137 + 8 个游戏轻量主题） |
+| 内置主题 | 10 个（1 个高精度 Miku 488137 + 8 个游戏轻量主题 + 1 个彩蛋「大佬 · 点烟」） |
 | 第三方依赖 | 0 个，复用 Codex 自带 Node.js 运行时 |
 | 自动化测试 | 56 项全通过 |
 | 协议 | 代码 MIT，角色素材权利归各自权利人 |
@@ -195,7 +195,7 @@ npm run doctor
 
 ## English
 
-**HeiGe Codex Skin Studio** reskins the Codex Desktop app on macOS through loopback-only CDP injection. It never touches `app.asar` or the code signature. Any single image becomes a theme (palette + backdrop); after applying once, a 🎨 menu in the top center of Codex switches between every installed theme and the native look instantly. Nine presets ship built in: the fully customized `Miku 488137` showcase plus eight lightweight game-inspired themes. Hand the bundled `.skill` to Codex and it can even generate theme artwork with its own image tools, then install the result deterministically.
+**HeiGe Codex Skin Studio** reskins the Codex Desktop app on macOS through loopback-only CDP injection. It never touches `app.asar` or the code signature. Any single image becomes a theme (palette + backdrop); after applying once, a 🎨 menu in the top center of Codex switches between every installed theme and the native look instantly. Ten presets ship built in: the fully customized `Miku 488137` showcase, eight lightweight game-inspired themes, and a bonus meme preset. Hand the bundled `.skill` to Codex and it can even generate theme artwork with its own image tools, then install the result deterministically.
 
 Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\install.bat` on Windows (new, pending live acceptance), then switch themes from the in-app menu. The menu sits at the top center on both platforms, clear of the native window controls and Codex's own menus. Pause anytime with `scripts/pause.command`; a normal Codex restart always returns to stock.
 
