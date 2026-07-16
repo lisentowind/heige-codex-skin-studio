@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import {
   extname,
   isAbsolute,
@@ -10,10 +10,23 @@ import {
 } from "node:path";
 
 import { THEME_SCHEMA_VERSION } from "./constants.mjs";
+import { validateImageMetadata } from "./image-metadata.mjs";
+import {
+  parseBoundedJson,
+  readBoundedFile,
+  RESOURCE_LIMITS,
+  sumWithinLimit,
+} from "./resource-limits.mjs";
 
 const COLOR_KEYS = ["accent", "secondary", "surface", "text"];
 const COPY_KEYS = ["brand", "headline", "tagline"];
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+const IMAGE_MIME = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+]);
 const HEX_COLOR = /^#[0-9A-F]{6}$/i;
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const DEFAULT_COLORS = {
@@ -124,21 +137,75 @@ async function resolveAsset(root, realRoot, relative, field) {
   if (!isInside(realRoot, realAssetPath)) {
     throw new Error(`theme ${field} escapes the theme directory`);
   }
+  const { bytes, stat: openedInfo } = await readBoundedFile(assetPath, {
+    maxBytes: RESOURCE_LIMITS.assetBytes,
+    label: "theme " + field,
+  });
   const info = await lstat(assetPath);
   if (!info.isFile() || info.size < 1) {
     throw new Error(`theme ${field} must be a non-empty file`);
   }
-  return assetPath;
+  const finalRealAssetPath = await realpath(assetPath);
+  if (
+    info.dev !== openedInfo.dev
+    || info.ino !== openedInfo.ino
+    || !isInside(realRoot, finalRealAssetPath)
+  ) {
+    throw new Error("theme asset changed or escapes the theme directory");
+  }
+  const expectedMime = IMAGE_MIME.get(extname(relative).toLowerCase());
+  const metadata = validateImageMetadata(bytes, { expectedMime });
+  return { path: assetPath, bytes: bytes.byteLength, buffer: bytes, metadata };
 }
 
 export async function loadTheme(themeDir) {
   const root = resolve(themeDir);
-  const raw = JSON.parse(await readFile(join(root, "theme.json"), "utf8"));
-  const manifest = validateThemeManifest(raw);
   const realRoot = await realpath(root);
-  const heroPath = await resolveAsset(root, realRoot, manifest.hero, "hero");
-  const logoPath = manifest.logo ? await resolveAsset(root, realRoot, manifest.logo, "logo") : null;
-  const polaroidPath = manifest.polaroid ? await resolveAsset(root, realRoot, manifest.polaroid, "polaroid") : null;
+  const manifestPath = join(root, "theme.json");
+  const realManifestPath = await realpath(manifestPath);
+  if (!isInside(realRoot, realManifestPath)) {
+    throw new Error("theme.json escapes the theme directory");
+  }
+  const { bytes: manifestBytes, stat: openedManifestInfo } = await readBoundedFile(manifestPath, {
+    maxBytes: RESOURCE_LIMITS.manifestBytes,
+    label: "theme.json",
+  });
+  const manifestInfo = await lstat(manifestPath);
+  if (
+    !manifestInfo.isFile()
+    || manifestInfo.dev !== openedManifestInfo.dev
+    || manifestInfo.ino !== openedManifestInfo.ino
+  ) {
+    throw new Error("theme.json changed while loading");
+  }
+  const raw = parseBoundedJson(manifestBytes);
+  const manifest = validateThemeManifest(raw);
+  const hero = await resolveAsset(root, realRoot, manifest.hero, "hero");
+  const logo = manifest.logo ? await resolveAsset(root, realRoot, manifest.logo, "logo") : null;
+  const polaroid = manifest.polaroid ? await resolveAsset(root, realRoot, manifest.polaroid, "polaroid") : null;
+  const resourceBytes = sumWithinLimit(
+    [manifestBytes.byteLength, hero.bytes, logo?.bytes ?? 0, polaroid?.bytes ?? 0],
+    RESOURCE_LIMITS.themeBytes,
+    "theme",
+  );
 
-  return { manifest, heroPath, logoPath, polaroidPath, root };
+  return {
+    manifest,
+    heroPath: hero.path,
+    logoPath: logo?.path ?? null,
+    polaroidPath: polaroid?.path ?? null,
+    manifestBytes: manifestBytes.byteLength,
+    resourceBytes,
+    assetMetadata: {
+      hero: hero.metadata,
+      logo: logo?.metadata ?? null,
+      polaroid: polaroid?.metadata ?? null,
+    },
+    assetBuffers: {
+      hero: hero.buffer,
+      logo: logo?.buffer ?? null,
+      polaroid: polaroid?.buffer ?? null,
+    },
+    root,
+  };
 }

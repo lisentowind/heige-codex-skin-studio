@@ -1,10 +1,11 @@
-import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 
 import { CdpSession, fetchRendererTargets, waitForRendererTargets } from "./cdp-client.mjs";
 import { buildSkinCss } from "./skin-css.mjs";
 import { buildSkinMenuScript, CSS_SENTINELS } from "./skin-menu.mjs";
 import { classifyCodexTargets } from "./target-classifier.mjs";
+import { validateImageMetadata } from "./image-metadata.mjs";
+import { readBoundedFile, RESOURCE_LIMITS, sumWithinLimit } from "./resource-limits.mjs";
 
 const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
@@ -101,23 +102,53 @@ function targetError(code, message, results) {
   return error;
 }
 
-async function assetDataUrl(path, field) {
+async function readThemeAsset(path, field, snapshot = null) {
   if (!path) return null;
   const mime = MIME[extname(path).toLowerCase()];
+  if (snapshot instanceof Uint8Array && snapshot.byteLength > RESOURCE_LIMITS.assetBytes) {
+    throw new RangeError(field + " 图片超过 " + RESOURCE_LIMITS.assetBytes + " bytes（8 MiB）");
+  }
   if (!mime) throw new Error(`不支持的 ${field} 图片类型`);
-  const bytes = await readFile(path);
-  return `data:${mime};base64,${bytes.toString("base64")}`;
+  const bytes = snapshot instanceof Uint8Array
+    ? Buffer.from(snapshot)
+    : (await readBoundedFile(path, {
+      maxBytes: RESOURCE_LIMITS.assetBytes,
+      label: field + " 图片",
+    })).bytes;
+  validateImageMetadata(bytes, { expectedMime: mime });
+  return { bytes, mime };
 }
 
-async function themeEntry(loadedTheme) {
-  const heroDataUrl = await assetDataUrl(loadedTheme.heroPath, "hero");
-  const logoDataUrl = await assetDataUrl(loadedTheme.logoPath, "logo");
-  const polaroidDataUrl = await assetDataUrl(loadedTheme.polaroidPath, "polaroid");
+function dataUrl(asset) {
+  return asset === null ? null : `data:${asset.mime};base64,${asset.bytes.toString("base64")}`;
+}
+
+async function readThemeResources(loadedTheme) {
+  const hero = await readThemeAsset(loadedTheme.heroPath, "hero", loadedTheme.assetBuffers?.hero);
+  const logo = await readThemeAsset(loadedTheme.logoPath, "logo", loadedTheme.assetBuffers?.logo);
+  const polaroid = await readThemeAsset(loadedTheme.polaroidPath, "polaroid", loadedTheme.assetBuffers?.polaroid);
+  const manifestBytes = loadedTheme.manifestBytes
+    ?? Buffer.byteLength(JSON.stringify(loadedTheme.manifest), "utf8");
+  const resourceBytes = sumWithinLimit(
+    [manifestBytes, hero.bytes.byteLength, logo?.bytes.byteLength ?? 0, polaroid?.bytes.byteLength ?? 0],
+    RESOURCE_LIMITS.themeBytes,
+    `theme ${loadedTheme.manifest.id}`,
+  );
+  return { loadedTheme, hero, logo, polaroid, resourceBytes };
+}
+
+function themeEntry(resources) {
+  const { loadedTheme, hero, logo, polaroid } = resources;
   return {
     id: loadedTheme.manifest.id,
     name: loadedTheme.manifest.name,
     accent: loadedTheme.manifest.colors?.accent,
-    css: buildSkinCss({ theme: loadedTheme.manifest, heroDataUrl, logoDataUrl, polaroidDataUrl }),
+    css: buildSkinCss({
+      theme: loadedTheme.manifest,
+      heroDataUrl: dataUrl(hero),
+      logoDataUrl: dataUrl(logo),
+      polaroidDataUrl: dataUrl(polaroid),
+    }),
   };
 }
 
@@ -125,8 +156,14 @@ export async function applySkin({ loadedTheme, themes, port, preferStored = fals
   const wait = deps.waitForRendererTargets ?? waitForRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const menuThemes = themes?.length ? themes : [loadedTheme];
-  const entries = [];
-  for (const theme of menuThemes) entries.push(await themeEntry(theme));
+  const resourceSets = [];
+  let menuBytes = 0;
+  for (const theme of menuThemes) {
+    const resources = await readThemeResources(theme);
+    menuBytes = sumWithinLimit([menuBytes, resources.resourceBytes], RESOURCE_LIMITS.menuBytes, "menu");
+    resourceSets.push(resources);
+  }
+  const entries = resourceSets.map(themeEntry);
   const themeId = loadedTheme.manifest.id;
   // 自定义上传主题的客户端 CSS 模板：哨兵值占位，页面内替换，和内置主题同一套模板
   const cssTemplate = buildSkinCss({

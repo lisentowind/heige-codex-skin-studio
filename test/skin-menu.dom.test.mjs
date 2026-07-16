@@ -9,6 +9,107 @@ import {
   sequenceFetch,
 } from "./helpers/menu-window.mjs";
 
+function png(width, height, bytes = 24) {
+  const result = Buffer.alloc(Math.max(bytes, 24));
+  Buffer.from("89504e470d0a1a0a", "hex").copy(result, 0);
+  result.writeUInt32BE(13, 8);
+  result.write("IHDR", 12, "ascii");
+  result.writeUInt32BE(width, 16);
+  result.writeUInt32BE(height, 20);
+  return result;
+}
+
+function webpVp8x(width, height) {
+  const result = Buffer.alloc(30);
+  result.write("RIFF", 0, "ascii");
+  result.writeUInt32LE(22, 4);
+  result.write("WEBPVP8X", 8, "ascii");
+  result.writeUInt32LE(10, 16);
+  result.writeUIntLE(width - 1, 24, 3);
+  result.writeUIntLE(height - 1, 27, 3);
+  return result;
+}
+
+function jpeg(width, height) {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xc2, 0x00, 0x0b, 0x08,
+    (height >>> 8) & 0xff, height & 0xff,
+    (width >>> 8) & 0xff, width & 0xff,
+    0x03, 0x01, 0x11, 0x00,
+  ]);
+}
+
+function installSuccessfulImagePipeline(page, {
+  decodedWidth,
+  decodedHeight,
+  drawCalls = [],
+} = {}) {
+  const originalGetContext = page.window.HTMLCanvasElement.prototype.getContext;
+  const originalToDataURL = page.window.HTMLCanvasElement.prototype.toDataURL;
+  page.window.FileReader = class ImmediateReader {
+    readAsDataURL(file) {
+      Promise.resolve(file.bytes ?? file.arrayBuffer()).then((value) => {
+        this.result = "data:" + file.type + ";base64," + Buffer.from(value).toString("base64");
+        queueMicrotask(() => this.onload?.());
+      }, () => queueMicrotask(() => this.onerror?.()));
+    }
+    abort() { this.onabort?.(); }
+  };
+  page.window.Image = class ImmediateImage {
+    constructor() {
+      this.width = decodedWidth;
+      this.height = decodedHeight;
+      this.naturalWidth = decodedWidth;
+      this.naturalHeight = decodedHeight;
+    }
+    set src(value) {
+      this._src = value;
+      if (value) queueMicrotask(() => this.onload?.());
+    }
+    get src() { return this._src; }
+  };
+  page.window.HTMLCanvasElement.prototype.getContext = function getContext() {
+    return {
+      drawImage: (_image, _x, _y, width, height) => drawCalls.push({ width, height }),
+      getImageData: (_x, _y, width, height) => ({
+        data: new Uint8ClampedArray(width * height * 4),
+      }),
+    };
+  };
+  page.window.HTMLCanvasElement.prototype.toDataURL = () => {
+    const factor = Math.max(
+      1,
+      Math.ceil(decodedWidth / 2048),
+      Math.ceil(decodedHeight / 2048),
+      Math.ceil(Math.sqrt((decodedWidth / 4_000_000) * decodedHeight)),
+    );
+    return "data:image/webp;base64," + webpVp8x(
+      Math.max(1, Math.ceil(decodedWidth / factor)),
+      Math.max(1, Math.ceil(decodedHeight / factor)),
+    ).toString("base64");
+  };
+  return () => {
+    page.window.HTMLCanvasElement.prototype.getContext = originalGetContext;
+    page.window.HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+  };
+}
+
+async function upload(page, { bytes, name = "upload.png", type = "image/png", size = bytes.byteLength, arrayBuffer } = {}) {
+  const picker = page.document.querySelector('input[type="file"]');
+  const file = {
+    name,
+    type,
+    size,
+    arrayBuffer: arrayBuffer ?? (async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
+    bytes,
+  };
+  Object.defineProperty(picker, "files", { configurable: true, value: [file] });
+  picker.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  for (let index = 0; index < 24; index += 1) await page.flush();
+}
+
 test("switch exposes accessible state and permanent re-enable guidance", async (t) => {
   const page = await menuWindow({ persistenceEnabled: true, revision: 7 });
   t.after(() => page.close());
@@ -189,7 +290,7 @@ test("a stale Image callback rejects and cannot overwrite the new generation", a
     }
   };
   const oldApi = page.window.__heigeCodexSkin;
-  const imported = oldApi.importFromDataUrl("data:image/png;base64,old", "old");
+  const imported = oldApi.importFromDataUrl("data:image/png;base64," + png(80, 40).toString("base64"), "old");
   const rejected = assert.rejects(imported, (error) => error.name === "AbortError" && /disposed/i.test(error.message));
   const staleOnload = images[0].onload;
   await page.injectAgain();
@@ -215,14 +316,209 @@ test("dispose aborts an active FileReader and its stale callback becomes inert",
   const picker = page.document.querySelector('input[type="file"]');
   Object.defineProperty(picker, "files", {
     configurable: true,
-    value: [{ name: "old.png" }],
+    value: [{
+      name: "old.png",
+      type: "image/png",
+      size: png(80, 40).byteLength,
+      arrayBuffer: async () => {
+        const bytes = png(80, 40);
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      },
+    }],
   });
   picker.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  await page.flush();
   const staleOnload = reader.onload;
   await page.injectAgain();
   assert.equal(reader.abortCalls, 1);
   staleOnload();
   await page.flush();
   assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "miku-488137");
+  assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
+});
+
+test("browser upload rejects byte and dimension bombs before decode", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  let imageCalls = 0;
+  let readerCalls = 0;
+  page.window.Image = class CountingImage { constructor() { imageCalls += 1; } };
+  page.window.FileReader = class CountingReader { constructor() { readerCalls += 1; } };
+
+  await upload(page, {
+    bytes: png(10, 10),
+    size: (8 * 1024 * 1024) + 1,
+  });
+  const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+  assert.match(alert.textContent, /8 MiB|8388608/);
+  assert.equal(page.document.querySelector('[data-heige-role="menu-panel"]').style.display, "block");
+  assert.equal(imageCalls, 0);
+  assert.equal(readerCalls, 0);
+
+  await upload(page, { bytes: png(8000, 8000, 1024) });
+  assert.match(alert.textContent, /像素|pixel/i);
+  assert.equal(imageCalls, 0);
+  assert.equal(readerCalls, 0);
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "miku-488137");
+});
+
+test("browser upload rejects MIME mismatch before FileReader or Image", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  let imageCalls = 0;
+  let readerCalls = 0;
+  page.window.Image = class CountingImage { constructor() { imageCalls += 1; } };
+  page.window.FileReader = class CountingReader { constructor() { readerCalls += 1; } };
+  await upload(page, { bytes: png(100, 100), name: "wrong.jpg", type: "image/jpeg" });
+  const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+  assert.match(alert.textContent, /MIME|JPEG|PNG/i);
+  assert.equal(imageCalls, 0);
+  assert.equal(readerCalls, 0);
+});
+
+test("browser upload timeout settles visibly without decoding", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  let imageCalls = 0;
+  page.window.Image = class CountingImage { constructor() { imageCalls += 1; } };
+  const originalSetTimeout = page.window.setTimeout;
+  const originalClearTimeout = page.window.clearTimeout;
+  let timerId = 0;
+  page.window.setTimeout = (callback) => {
+    timerId += 1;
+    queueMicrotask(callback);
+    return timerId;
+  };
+  page.window.clearTimeout = () => {};
+  try {
+    await upload(page, {
+      bytes: png(100, 100),
+      arrayBuffer: () => new Promise(() => {}),
+    });
+    const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+    assert.match(alert.textContent, /超时|timeout/i);
+    assert.equal(alert.getAttribute("aria-busy"), "false");
+    assert.equal(imageCalls, 0);
+  } finally {
+    page.window.setTimeout = originalSetTimeout;
+    page.window.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("validated upload scales within both canvas budgets and persists", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const drawCalls = [];
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 4000,
+    decodedHeight: 1000,
+    drawCalls,
+  });
+  t.after(restore);
+  await upload(page, { bytes: png(4000, 1000), name: "wide.png" });
+  const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+  assert.equal(alert.getAttribute("aria-busy"), "false");
+  assert.match(alert.textContent, /已应用并保存/);
+  assert.deepEqual(drawCalls[0], { width: 2000, height: 500 });
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.match(page.window.localStorage.getItem("heigeCodexCustomTheme"), /data:image\/webp/);
+});
+
+test("vertical boundary images keep the palette canvas below 48 pixels per side", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const drawCalls = [];
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 81,
+    decodedHeight: 8100,
+    drawCalls,
+  });
+  t.after(restore);
+  await upload(page, { bytes: png(81, 8100), name: "vertical.png" });
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.ok(drawCalls[1].width <= 48);
+  assert.ok(drawCalls[1].height <= 48);
+});
+
+for (const fixture of [
+  { name: "photo.jpg", type: "image/jpeg", bytes: jpeg(320, 180), width: 320, height: 180 },
+  { name: "photo.webp", type: "image/webp", bytes: webpVp8x(320, 180), width: 320, height: 180 },
+]) {
+  test("browser upload validates " + fixture.type + " headers before decode", async (t) => {
+    const page = await menuWindow();
+    t.after(() => page.close());
+    const restore = installSuccessfulImagePipeline(page, {
+      decodedWidth: fixture.width,
+      decodedHeight: fixture.height,
+    });
+    t.after(restore);
+    await upload(page, fixture);
+    assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+    assert.match(
+      page.document.querySelector('[data-heige-role="upload-alert"]').textContent,
+      /已应用并保存/,
+    );
+  });
+}
+
+test("browser upload derives MIME from a valid extension when File.type is empty", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 100,
+    decodedHeight: 100,
+  });
+  t.after(restore);
+  await upload(page, { bytes: png(100, 100), name: "photo.png", type: "" });
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.match(
+    page.document.querySelector('[data-heige-role="upload-alert"]').textContent,
+    /已应用并保存/,
+  );
+});
+
+test("decoded dimensions must match the validated header before canvas allocation", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const drawCalls = [];
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 101,
+    decodedHeight: 100,
+    drawCalls,
+  });
+  t.after(restore);
+  await upload(page, { bytes: png(100, 100) });
+  const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+  assert.match(alert.textContent, /尺寸与 header 不一致/);
+  assert.equal(drawCalls.length, 0);
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "miku-488137");
+});
+
+test("storage quota failure keeps only the current generation and says restart will not retain it", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 100,
+    decodedHeight: 100,
+  });
+  t.after(restore);
+  const originalSetItem = page.window.localStorage.setItem.bind(page.window.localStorage);
+  Object.defineProperty(page.window.localStorage, "setItem", {
+    configurable: true,
+    value(key, value) {
+      if (key === "heigeCodexCustomTheme") throw new page.window.DOMException("quota", "QuotaExceededError");
+      return originalSetItem(key, value);
+    },
+  });
+  t.after(() => {
+    Object.defineProperty(page.window.localStorage, "setItem", {
+      configurable: true,
+      value: originalSetItem,
+    });
+  });
+  await upload(page, { bytes: png(100, 100) });
+  const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
+  assert.match(alert.textContent, /本次已应用.*重启后不会保留/);
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
   assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
 });

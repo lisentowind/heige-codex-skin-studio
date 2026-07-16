@@ -6,6 +6,16 @@ import test from "node:test";
 
 import { applySkin, removeSkin, skinStatus } from "../src/injector.mjs";
 
+function png(width, height, bytes = 24) {
+  const result = Buffer.alloc(Math.max(bytes, 24));
+  Buffer.from("89504e470d0a1a0a", "hex").copy(result, 0);
+  result.writeUInt32BE(13, 8);
+  result.write("IHDR", 12, "ascii");
+  result.writeUInt32BE(width, 16);
+  result.writeUInt32BE(height, 20);
+  return result;
+}
+
 class FakeSession {
   static expressions = [];
   constructor() { this.closed = false; }
@@ -20,7 +30,7 @@ class FakeSession {
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "heige-injector-"));
-  await writeFile(join(root, "hero.png"), Buffer.from([137, 80, 78, 71]));
+  await writeFile(join(root, "hero.png"), png(640, 360));
   return {
     loaded: {
       root,
@@ -211,4 +221,34 @@ test("status reports safe per-target evidence when every exact main fails", asyn
     assert.doesNotMatch(JSON.stringify(error.results), /private-path|secret|stack|webSocketDebuggerUrl/);
     return true;
   });
+});
+
+test("rejects compressed dimension bombs before CDP evaluation", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+  await writeFile(loaded.heroPath, png(8000, 8000, 1024));
+  await assert.rejects(applySkin({ loadedTheme: loaded, port: 9341, deps }), /像素|pixel/i);
+  assert.equal(FakeSession.expressions.length, 0);
+});
+
+test("uses the validated load snapshot if an asset path changes before injection", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+  loaded.assetBuffers = { hero: png(640, 360), logo: null, polaroid: null };
+  await writeFile(loaded.heroPath, png(8000, 8000, 1024));
+  const result = await applySkin({ loadedTheme: loaded, port: 9341, deps });
+  assert.equal(result.applied, 1);
+  assert.equal(FakeSession.expressions.length, 1);
+});
+
+test("rejects an oversized in-memory snapshot before encoding or CDP evaluation", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+  loaded.assetBuffers = {
+    hero: new Uint8Array((8 * 1024 * 1024) + 1),
+    logo: null,
+    polaroid: null,
+  };
+  await assert.rejects(applySkin({ loadedTheme: loaded, port: 9341, deps }), /8 MiB|8388608/);
+  assert.equal(FakeSession.expressions.length, 0);
 });

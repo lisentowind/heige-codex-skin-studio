@@ -1,4 +1,5 @@
 import { HEX_COLOR } from "./constants.mjs";
+import { RESOURCE_LIMITS } from "./resource-limits.mjs";
 
 const DEFAULT_ACCENT = "#24c9d7";
 const CONTROL_ENDPOINT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/v1\/persistence$/;
@@ -97,6 +98,7 @@ export function buildSkinMenuScript({
     nativeSel: "__heige_native__",
     preferStored,
     control: normalizeControl(control),
+    limits: RESOURCE_LIMITS,
   });
 
   return `(() => {
@@ -220,6 +222,7 @@ export function buildSkinMenuScript({
   button.style.cssText = "display:block;margin:0 auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
 
   const panel = document.createElement("div");
+  panel.dataset.heigeRole = "menu-panel";
   panel.style.cssText = "display:none;margin-top:8px;width:330px;max-width:calc(100vw - 24px);padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
 
   const rows = new Map();
@@ -274,6 +277,168 @@ export function buildSkinMenuScript({
   }
 
   // ---- 自定义图片：本地选图 -> 压缩 -> 取色 -> 生成 CSS -> 持久化 ----
+  const imageError = (message) => new Error(message);
+  const u16be = (bytes, offset) => {
+    if (offset + 2 > bytes.length) throw imageError("图片 header 已截断");
+    return bytes[offset] * 256 + bytes[offset + 1];
+  };
+  const u16le = (bytes, offset) => {
+    if (offset + 2 > bytes.length) throw imageError("图片 header 已截断");
+    return bytes[offset] + bytes[offset + 1] * 256;
+  };
+  const u24le = (bytes, offset) => {
+    if (offset + 3 > bytes.length) throw imageError("图片 header 已截断");
+    return bytes[offset] + bytes[offset + 1] * 256 + bytes[offset + 2] * 65536;
+  };
+  const u32be = (bytes, offset) => {
+    if (offset + 4 > bytes.length) throw imageError("图片 header 已截断");
+    return bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3];
+  };
+  const u32le = (bytes, offset) => {
+    if (offset + 4 > bytes.length) throw imageError("图片 header 已截断");
+    return (bytes[offset] + bytes[offset + 1] * 256 + bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216) >>> 0;
+  };
+  const ascii = (bytes, offset, length) => {
+    if (offset + length > bytes.length) throw imageError("图片 header 已截断");
+    let value = "";
+    for (let index = 0; index < length; index += 1) value += String.fromCharCode(bytes[offset + index]);
+    return value;
+  };
+  const checkedDimensions = (mime, width, height) => {
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) throw imageError("图片尺寸无效");
+    return { mime, width, height };
+  };
+  const parseBrowserImage = (input) => {
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+    if (bytes.length >= 8 && ascii(bytes, 0, 8) === "\\u0089PNG\\r\\n\\u001a\\n") {
+      if (bytes.length < 24 || u32be(bytes, 8) !== 13 || ascii(bytes, 12, 4) !== "IHDR") throw imageError("PNG header 无效或已截断");
+      return checkedDimensions("image/png", u32be(bytes, 16), u32be(bytes, 20));
+    }
+    if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 216) {
+      const sof = new Set([192, 193, 194, 195, 197, 198, 199, 201, 202, 203, 205, 206, 207]);
+      let offset = 2;
+      while (offset < bytes.length) {
+        if (bytes[offset] !== 255) throw imageError("JPEG marker header 无效");
+        while (offset < bytes.length && bytes[offset] === 255) offset += 1;
+        if (offset >= bytes.length) throw imageError("JPEG header 已截断");
+        const marker = bytes[offset++];
+        if (marker === 0 || marker === 217 || marker === 218) break;
+        if (marker === 1 || marker === 216 || (marker >= 208 && marker <= 215)) continue;
+        const length = u16be(bytes, offset);
+        if (length < 2 || offset + length > bytes.length) throw imageError("JPEG segment header 已截断");
+        if (sof.has(marker)) {
+          if (length < 7) throw imageError("JPEG SOF header 已截断");
+          return checkedDimensions("image/jpeg", u16be(bytes, offset + 5), u16be(bytes, offset + 3));
+        }
+        offset += length;
+      }
+      throw imageError("JPEG 缺少尺寸 header");
+    }
+    if (bytes.length >= 4 && ascii(bytes, 0, 4) === "RIFF") {
+      if (bytes.length < 20 || ascii(bytes, 8, 4) !== "WEBP") throw imageError("WebP RIFF header 无效");
+      const riffEnd = u32le(bytes, 4) + 8;
+      if (riffEnd < 20 || riffEnd > bytes.length) throw imageError("WebP RIFF header 已截断");
+      let offset = 12;
+      while (offset + 8 <= riffEnd) {
+        const type = ascii(bytes, offset, 4);
+        const length = u32le(bytes, offset + 4);
+        const start = offset + 8;
+        const end = start + length;
+        if (!Number.isSafeInteger(end) || end > riffEnd) throw imageError("WebP chunk header 已截断");
+        if (type === "VP8X") {
+          if (length < 10) throw imageError("WebP VP8X header 已截断");
+          return checkedDimensions("image/webp", u24le(bytes, start + 4) + 1, u24le(bytes, start + 7) + 1);
+        }
+        if (type === "VP8L") {
+          if (length < 5 || bytes[start] !== 47) throw imageError("WebP VP8L header 无效");
+          return checkedDimensions(
+            "image/webp",
+            1 + bytes[start + 1] + ((bytes[start + 2] & 63) << 8),
+            1 + ((bytes[start + 2] & 192) >>> 6) + (bytes[start + 3] << 2) + ((bytes[start + 4] & 15) << 10),
+          );
+        }
+        if (type === "VP8 ") {
+          if (length < 10 || bytes[start + 3] !== 157 || bytes[start + 4] !== 1 || bytes[start + 5] !== 42) throw imageError("WebP VP8 header 无效");
+          return checkedDimensions("image/webp", u16le(bytes, start + 6) & 16383, u16le(bytes, start + 8) & 16383);
+        }
+        offset = end + (length & 1);
+      }
+      throw imageError("WebP 缺少尺寸 header");
+    }
+    throw imageError("不支持或无法识别的图片 header");
+  };
+  const validateBrowserImage = (input, expectedMime) => {
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+    if (bytes.byteLength > data.limits.assetBytes) throw imageError("图片超过 8388608 bytes（8 MiB）");
+    const metadata = parseBrowserImage(bytes);
+    if (expectedMime && metadata.mime !== expectedMime) throw imageError("MIME 不匹配：期望 " + expectedMime + "，实际 " + metadata.mime);
+    if (metadata.width > data.limits.imageWidth) throw imageError("图片宽度 width 超过 " + data.limits.imageWidth);
+    if (metadata.height > data.limits.imageHeight) throw imageError("图片高度 height 超过 " + data.limits.imageHeight);
+    if (metadata.width > Math.floor(data.limits.imagePixels / metadata.height)) throw imageError("图片像素 pixel 总数超过 " + data.limits.imagePixels);
+    const shorter = Math.min(metadata.width, metadata.height);
+    const longer = Math.max(metadata.width, metadata.height);
+    if (longer > shorter * data.limits.aspectRatio) throw imageError("图片纵横比 aspect ratio 超过 " + data.limits.aspectRatio + ":1");
+    return metadata;
+  };
+  const parseDataUrlImage = (dataUrl) => {
+    if (typeof dataUrl !== "string" || dataUrl.length > 12_000_000 || !dataUrl.startsWith("data:image/")) throw imageError("图片 data URL 无效或过大");
+    const marker = ";base64,";
+    const split = dataUrl.indexOf(marker);
+    if (split < 0) throw imageError("图片 data URL 必须使用 base64");
+    const mime = dataUrl.slice(5, split).toLowerCase();
+    if (mime !== "image/png" && mime !== "image/jpeg" && mime !== "image/webp") throw imageError("图片 MIME 不受支持");
+    let binary;
+    try { binary = atob(dataUrl.slice(split + marker.length)); }
+    catch { throw imageError("图片 base64 无效"); }
+    if (binary.length > data.limits.assetBytes) throw imageError("图片超过 8388608 bytes（8 MiB）");
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return { bytes, metadata: validateBrowserImage(bytes, mime) };
+  };
+  const expectedUploadMime = (file) => {
+    const lower = String(file.name ?? "").toLowerCase();
+    const extensionMime = lower.endsWith(".png") ? "image/png"
+      : lower.endsWith(".jpg") || lower.endsWith(".jpeg") ? "image/jpeg"
+        : lower.endsWith(".webp") ? "image/webp" : null;
+    if (!extensionMime) throw imageError("文件扩展名必须是 PNG、JPEG 或 WebP");
+    const declared = typeof file.type === "string" ? file.type.toLowerCase() : "";
+    if (declared && declared !== extensionMime) throw imageError("MIME 与文件扩展名不匹配");
+    return extensionMime;
+  };
+  const fitCanvas = (width, height) => {
+    const sideFactor = Math.max(Math.ceil(width / data.limits.processedCanvasSide), Math.ceil(height / data.limits.processedCanvasSide));
+    const pixelFactor = Math.ceil(Math.sqrt((width / data.limits.processedCanvasPixels) * height));
+    let factor = Math.max(1, sideFactor, pixelFactor);
+    while (true) {
+      const fitted = {
+        width: Math.max(1, Math.ceil(width / factor)),
+        height: Math.max(1, Math.ceil(height / factor)),
+      };
+      if (
+        fitted.width <= data.limits.processedCanvasSide
+        && fitted.height <= data.limits.processedCanvasSide
+        && fitted.width <= Math.floor(data.limits.processedCanvasPixels / fitted.height)
+      ) return fitted;
+      factor += 1;
+    }
+  };
+  const boundedOperation = (operation, label) => new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearLater(timeoutId);
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => finish(reject, new DOMException("HeiGe menu generation disposed", "AbortError"));
+    const timeoutId = later(() => finish(reject, imageError(label + "超时，请重试")), data.limits.browserOperationMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(operation).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
   const buildCustomCss = (dataUrl, colors) => data.cssTemplate
     .split(data.sentinels.hero).join(dataUrl)
     .split(data.sentinels.accent).join(colors.accent)
@@ -287,6 +452,7 @@ export function buildSkinMenuScript({
 
   const extractPalette = (canvas) => {
     const ctx = canvas.getContext("2d");
+    if (!ctx || typeof ctx.getImageData !== "function") throw imageError("无法读取图片像素");
     const { data: px } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const buckets = new Map();
     let lumSum = 0, count = 0;
@@ -365,7 +531,16 @@ export function buildSkinMenuScript({
     assertCurrent();
     try {
       const saved = JSON.parse(localStorage.getItem(data.storageKey) ?? "null");
-      return saved && saved.dataUrl && saved.colors ? saved : null;
+      if (!saved || typeof saved !== "object" || typeof saved.dataUrl !== "string" || typeof saved.colors !== "object") return null;
+      for (const key of ["accent", "secondary", "surface", "text"]) {
+        if (typeof saved.colors[key] !== "string" || !/^#[0-9a-f]{6}$/i.test(saved.colors[key])) return null;
+      }
+      parseDataUrlImage(saved.dataUrl);
+      return {
+        name: typeof saved.name === "string" ? saved.name.slice(0, 120) : "我的图片",
+        dataUrl: saved.dataUrl,
+        colors: Object.fromEntries(["accent", "secondary", "surface", "text"].map((key) => [key, saved.colors[key]])),
+      };
     } catch { return null; }
   };
   const saveCustom = (theme) => {
@@ -374,62 +549,180 @@ export function buildSkinMenuScript({
     catch (error) { console.warn("HeiGe Codex Skin：自定义主题图片过大，本次生效但重启后会回退到上一张图", error); return false; }
   };
 
-  const importFromDataUrl = (dataUrl, name) => new Promise((resolve, reject) => {
+  let uploadPending = 0;
+  const uploadAlert = document.createElement("div");
+  uploadAlert.dataset.heigeRole = "upload-alert";
+  uploadAlert.setAttribute("role", "alert");
+  uploadAlert.setAttribute("aria-live", "polite");
+  uploadAlert.setAttribute("aria-busy", "false");
+  uploadAlert.hidden = true;
+  uploadAlert.style.cssText = "margin:6px 4px;padding:7px 8px;border-radius:7px;background:rgba(187,72,50,.10);font-size:11px;line-height:1.5;color:#713a31;white-space:pre-line;";
+  panel.appendChild(uploadAlert);
+  const showUploadAlert = (message, kind = "error") => {
     assertCurrent();
+    uploadAlert.textContent = String(message).replace(/[\\r\\n\\t]+/g, " ").slice(0, 180);
+    uploadAlert.style.background = kind === "success" ? "rgba(26,132,103,.10)" : kind === "warning" ? "rgba(191,128,24,.12)" : "rgba(187,72,50,.10)";
+    uploadAlert.style.color = kind === "success" ? "#175f4d" : kind === "warning" ? "#714d16" : "#713a31";
+    uploadAlert.hidden = false;
+  };
+  const hideUploadAlert = () => {
+    assertCurrent();
+    uploadAlert.hidden = true;
+    uploadAlert.textContent = "";
+  };
+  const setUploadPending = (value) => {
+    uploadPending = Math.max(0, uploadPending + value);
+    uploadAlert.setAttribute("aria-busy", String(uploadPending > 0));
+  };
+  const safeUploadError = (error) => {
+    if (error?.name === "AbortError") return "图片处理已取消";
+    const message = typeof error?.message === "string" ? error.message : "图片处理失败，请重试";
+    if (/data:image|base64/i.test(message)) return "图片处理失败，请换一张图片";
+    return message.replace(/[\\r\\n\\t]+/g, " ").slice(0, 160);
+  };
+
+  const importValidatedDataUrl = (dataUrl, name, metadata) => new Promise((resolve, reject) => {
+    assertCurrent();
+    let settled = false;
     const img = new Image();
-    trackedImages.set(img, reject);
     const finishImage = () => {
       trackedImages.delete(img);
+      clearLater(timeoutId);
+      signal.removeEventListener("abort", onAbort);
       img.onload = null;
       img.onerror = null;
     };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      finishImage();
+      callback(value);
+    };
+    const fail = (error) => finish(reject, error);
+    const onAbort = () => fail(new DOMException("HeiGe menu generation disposed", "AbortError"));
+    const timeoutId = later(() => {
+      fail(imageError("图片解码超时，请重试"));
+      try { img.src = ""; } catch {}
+    }, data.limits.browserOperationMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    trackedImages.set(img, fail);
     img.onload = () => {
       try {
         assertCurrent();
-        if (!img.width || !img.height) throw new Error("图片尺寸无效");
-        const scale = Math.min(1, 1600 / img.width);
+        const decodedWidth = Number(img.naturalWidth || img.width);
+        const decodedHeight = Number(img.naturalHeight || img.height);
+        if (decodedWidth !== metadata.width || decodedHeight !== metadata.height) throw imageError("图片解码尺寸与 header 不一致");
+        const fitted = fitCanvas(decodedWidth, decodedHeight);
+        if (
+          fitted.width > data.limits.processedCanvasSide
+          || fitted.height > data.limits.processedCanvasSide
+          || fitted.width > Math.floor(data.limits.processedCanvasPixels / fitted.height)
+        ) throw imageError("处理后画布超过安全预算");
         const full = document.createElement("canvas");
-        // 下限 1px：超宽图（如 4000×1）取整会得 0 高，toDataURL 产出空图坏主题
-        full.width = Math.max(1, Math.round(img.width * scale));
-        full.height = Math.max(1, Math.round(img.height * scale));
-        full.getContext("2d").drawImage(img, 0, 0, full.width, full.height);
+        full.width = fitted.width;
+        full.height = fitted.height;
+        const fullContext = full.getContext("2d");
+        if (!fullContext || typeof fullContext.drawImage !== "function") throw imageError("无法创建图片画布");
+        fullContext.drawImage(img, 0, 0, full.width, full.height);
         const sample = document.createElement("canvas");
-        sample.width = 48; sample.height = Math.max(1, Math.round(48 * img.height / img.width));
-        sample.getContext("2d").drawImage(img, 0, 0, sample.width, sample.height);
+        const sampleScale = Math.min(1, 48 / decodedWidth, 48 / decodedHeight);
+        sample.width = Math.max(1, Math.floor(decodedWidth * sampleScale));
+        sample.height = Math.max(1, Math.floor(decodedHeight * sampleScale));
+        const sampleContext = sample.getContext("2d");
+        if (!sampleContext || typeof sampleContext.drawImage !== "function") throw imageError("无法创建取色画布");
+        sampleContext.drawImage(img, 0, 0, sample.width, sample.height);
+        const encoded = full.toDataURL("image/webp", 0.8);
+        if (typeof encoded !== "string" || !encoded.startsWith("data:image/webp")) throw imageError("图片压缩失败");
+        const encodedMetadata = parseDataUrlImage(encoded).metadata;
+        if (encodedMetadata.width !== full.width || encodedMetadata.height !== full.height) throw imageError("图片压缩结果尺寸不一致");
         const theme = {
           name: name || "\\u6211\\u7684\\u56fe\\u7247",
-          dataUrl: full.toDataURL("image/webp", 0.8),
+          dataUrl: encoded,
           colors: extractPalette(sample),
         };
         assertCurrent();
-        saveCustom(theme);
+        const persisted = saveCustom(theme);
         applyCustomTheme(theme);
-        resolve(theme.colors);
+        showUploadAlert(
+          persisted ? "自定义图片已应用并保存。" : "自定义图片本次已应用，但存储空间不足，重启后不会保留。",
+          persisted ? "success" : "warning",
+        );
+        finish(resolve, theme.colors);
       } catch (error) {
-        reject(error);
-      } finally {
-        finishImage();
+        fail(error);
       }
     };
-    img.onerror = () => {
-      finishImage();
-      reject(isCurrent() ? new Error("图片读取失败") : new DOMException("HeiGe menu generation disposed", "AbortError"));
-    };
-    try {
-      img.src = dataUrl;
-    } catch (error) {
-      finishImage();
-      reject(error);
-    }
+    img.onerror = () => fail(isCurrent() ? imageError("图片解码失败") : new DOMException("HeiGe menu generation disposed", "AbortError"));
+    try { img.src = dataUrl; }
+    catch (error) { fail(error); }
   });
 
-  // 上传失败给用户一个可见反馈，不再静默吞掉 rejection
-  const flashButton = (msg) => {
+  const importFromDataUrl = async (dataUrl, name) => {
     assertCurrent();
-    const prevTitle = button.title;
-    button.title = msg;
-    later(() => { assertCurrent(); button.title = prevTitle; }, 2600);
-    console.warn("HeiGe Codex Skin：" + msg);
+    const validated = parseDataUrlImage(dataUrl);
+    return importValidatedDataUrl(dataUrl, name, validated.metadata);
+  };
+
+  const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+    assertCurrent();
+    let settled = false;
+    const reader = new FileReader();
+    const finishReader = () => {
+      trackedReaders.delete(reader);
+      clearLater(timeoutId);
+      signal.removeEventListener("abort", onAbort);
+      reader.onload = null;
+      reader.onerror = null;
+      reader.onabort = null;
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      finishReader();
+      callback(value);
+    };
+    const onAbort = () => {
+      try { reader.abort(); } catch {}
+      finish(reject, new DOMException("HeiGe menu generation disposed", "AbortError"));
+    };
+    const timeoutId = later(() => {
+      finish(reject, imageError("文件读取超时，请重试"));
+      try { reader.abort(); } catch {}
+    }, data.limits.browserOperationMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    trackedReaders.add(reader);
+    reader.onload = () => {
+      if (typeof reader.result !== "string") finish(reject, imageError("文件读取结果无效"));
+      else finish(resolve, reader.result);
+    };
+    reader.onerror = () => finish(reject, imageError("文件读取失败，请重试"));
+    reader.onabort = () => finish(reject, isCurrent() ? imageError("文件读取已取消") : new DOMException("HeiGe menu generation disposed", "AbortError"));
+    try { reader.readAsDataURL(file); }
+    catch (error) { finish(reject, error); }
+  });
+
+  const uploadFile = async (file) => {
+    assertCurrent();
+    if (!Number.isSafeInteger(file.size) || file.size < 1) throw imageError("图片文件大小无效");
+    if (file.size > data.limits.assetBytes) throw imageError("图片超过 8388608 bytes（8 MiB）");
+    if (typeof file.arrayBuffer !== "function") throw imageError("浏览器无法读取图片文件");
+    const expectedMime = expectedUploadMime(file);
+    const arrayBuffer = await boundedOperation(() => file.arrayBuffer(), "文件读取");
+    assertCurrent();
+    if (Object.prototype.toString.call(arrayBuffer) !== "[object ArrayBuffer]") throw imageError("文件读取结果无效");
+    const bytes = new Uint8Array(arrayBuffer);
+    if (bytes.byteLength !== file.size) throw imageError("图片文件大小在读取时发生变化");
+    const metadata = validateBrowserImage(bytes, expectedMime);
+    const verifiedBlob = new Blob([bytes], { type: expectedMime });
+    const dataUrl = await readFileAsDataUrl(verifiedBlob);
+    assertCurrent();
+    const reparsed = parseDataUrlImage(dataUrl);
+    if (
+      reparsed.metadata.mime !== metadata.mime
+      || reparsed.metadata.width !== metadata.width
+      || reparsed.metadata.height !== metadata.height
+    ) throw imageError("图片读取内容前后不一致");
+    return importValidatedDataUrl(dataUrl, file.name.replace(/\\.[a-z0-9]+$/i, ""), metadata);
   };
 
   const picker = document.createElement("input");
@@ -440,31 +733,13 @@ export function buildSkinMenuScript({
     assertCurrent();
     const file = picker.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    trackedReaders.add(reader);
-    const finishReader = () => {
-      trackedReaders.delete(reader);
-      reader.onload = null;
-      reader.onerror = null;
-      reader.onabort = null;
-    };
-    reader.onload = () => {
-      if (!isCurrent()) { finishReader(); return; }
-      const result = reader.result;
-      finishReader();
-      importFromDataUrl(result, file.name.replace(/\\.[a-z0-9]+$/i, ""))
-        .catch(() => { if (isCurrent()) flashButton("\\u56fe\\u7247\\u5904\\u7406\\u5931\\u8d25\\uff0c\\u8bf7\\u6362\\u4e00\\u5f20"); });
-    };
-    reader.onerror = () => { finishReader(); if (isCurrent()) flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5"); };
-    reader.onabort = () => { finishReader(); };
-    try {
-      reader.readAsDataURL(file);
-    } catch {
-      finishReader();
-      if (isCurrent()) flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5");
-    }
+    hideUploadAlert();
+    setUploadPending(1);
+    void uploadFile(file)
+      .catch((error) => { if (isCurrent()) showUploadAlert(safeUploadError(error)); })
+      .finally(() => { if (isCurrent()) setUploadPending(-1); });
     picker.value = "";
-    panel.style.display = "none";
+    panel.style.display = "block";
   });
 
   const uploadRow = row("\\uff0b \\u81ea\\u5b9a\\u4e49\\u56fe\\u7247", "rgba(36,201,215,.9)", () => picker.click());
@@ -671,7 +946,7 @@ export function buildSkinMenuScript({
   const readHidden = () => { assertCurrent(); try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
   const writeHidden = (value) => { assertCurrent(); try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
   const FULL_BUTTON_CSS = button.style.cssText;
-  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;transition:opacity .15s,transform .15s;-webkit-app-region:no-drag;";
+  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;-webkit-app-region:no-drag;";
   let hidden = false;
   const setHidden = (value, persist = true) => {
     assertCurrent();

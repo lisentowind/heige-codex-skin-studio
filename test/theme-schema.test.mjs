@@ -13,6 +13,26 @@ const minimalManifest = {
   hero: "hero.png",
 };
 
+function png(width, height, bytes = 24) {
+  const result = Buffer.alloc(Math.max(bytes, 24));
+  Buffer.from("89504e470d0a1a0a", "hex").copy(result, 0);
+  result.writeUInt32BE(13, 8);
+  result.write("IHDR", 12, "ascii");
+  result.writeUInt32BE(width, 16);
+  result.writeUInt32BE(height, 20);
+  return result;
+}
+
+function manifestBytes(targetBytes, overrides = {}) {
+  const input = { ...minimalManifest, ...overrides, padding: "" };
+  const empty = Buffer.byteLength(JSON.stringify(input));
+  assert.ok(empty <= targetBytes);
+  input.padding = "x".repeat(targetBytes - empty);
+  const encoded = Buffer.from(JSON.stringify(input));
+  assert.equal(encoded.byteLength, targetBytes);
+  return encoded;
+}
+
 async function withTheme(manifest, callback) {
   const root = await mkdtemp(join(tmpdir(), "heige-theme-"));
   try {
@@ -123,22 +143,74 @@ test("loads one existing non-empty hero", async () => {
     { ...minimalManifest, hero: "images/hero.webp" },
     async (root) => {
       await mkdir(join(root, "images"));
-      await writeFile(join(root, "images/hero.webp"), Buffer.from([1]));
+      const image = Buffer.alloc(30);
+      image.write("RIFF", 0, "ascii");
+      image.writeUInt32LE(22, 4);
+      image.write("WEBPVP8X", 8, "ascii");
+      image.writeUInt32LE(10, 16);
+      image.writeUIntLE(487, 24, 3);
+      image.writeUIntLE(136, 27, 3);
+      await writeFile(join(root, "images/hero.webp"), image);
 
       const theme = await loadTheme(root);
 
       assert.equal(theme.root, root);
       assert.equal(theme.heroPath, join(root, "images/hero.webp"));
       assert.equal(theme.manifest.hero, "images/hero.webp");
+      assert.equal(theme.assetBuffers.hero.byteLength, image.byteLength);
+      assert.deepEqual(theme.assetMetadata.hero, {
+        mime: "image/webp",
+        width: 488,
+        height: 137,
+      });
     },
   );
+});
+
+test("enforces manifest bytes and nesting before resolving assets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-theme-budget-"));
+  try {
+    await writeFile(join(root, "hero.png"), png(100, 100));
+    await writeFile(join(root, "theme.json"), manifestBytes(64 * 1024));
+    assert.equal((await loadTheme(root)).manifest.id, minimalManifest.id);
+
+    await writeFile(join(root, "theme.json"), manifestBytes((64 * 1024) + 1));
+    await assert.rejects(loadTheme(root), /65536|64 KiB/);
+
+    let nested = 1;
+    for (let index = 0; index < 12; index += 1) nested = { next: nested };
+    await writeFile(join(root, "theme.json"), JSON.stringify({ ...minimalManifest, nested }));
+    await assert.rejects(loadTheme(root), /depth|12/i);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("rejects MIME mismatch, image bombs, and aggregate theme bytes", async () => {
+  await withTheme(minimalManifest, async (root) => {
+    await writeFile(join(root, "hero.png"), png(8193, 100));
+    await assert.rejects(loadTheme(root), /宽度|width/i);
+    await writeFile(join(root, "hero.png"), Buffer.from("not-a-png"));
+    await assert.rejects(loadTheme(root), /PNG|图片|header/i);
+  });
+
+  await withTheme({
+    ...minimalManifest,
+    logo: "logo.png",
+    polaroid: "polaroid.png",
+  }, async (root) => {
+    for (const file of ["hero.png", "logo.png", "polaroid.png"]) {
+      await writeFile(join(root, file), png(100, 100, 6 * 1024 * 1024));
+    }
+    await assert.rejects(loadTheme(root), /theme.*16777216|16 MiB/i);
+  });
 });
 
 test("rejects a missing or empty hero file", async () => {
   await withTheme(minimalManifest, async (root) => {
     await assert.rejects(loadTheme(root), /hero\.png|ENOENT/);
     await writeFile(join(root, "hero.png"), "");
-    await assert.rejects(loadTheme(root), /hero must be a non-empty file/);
+    await assert.rejects(loadTheme(root), /hero must be a non-empty file|hero不能为空/);
   });
 });
 

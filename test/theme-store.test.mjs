@@ -6,10 +6,20 @@ import test from "node:test";
 
 import { createSingleImageTheme, listThemes } from "../src/theme-store.mjs";
 
+function png(width, height, bytes = 24) {
+  const result = Buffer.alloc(Math.max(bytes, 24));
+  Buffer.from("89504e470d0a1a0a", "hex").copy(result, 0);
+  result.writeUInt32BE(13, 8);
+  result.write("IHDR", 12, "ascii");
+  result.writeUInt32BE(width, 16);
+  result.writeUInt32BE(height, 20);
+  return result;
+}
+
 test("creates a theme from one local image without a build pipeline", async () => {
   const root = await mkdtemp(join(tmpdir(), "heige-theme-"));
   const image = join(root, "source.png");
-  await writeFile(image, Buffer.from([137, 80, 78, 71]));
+  await writeFile(image, png(640, 360));
 
   const created = await createSingleImageTheme({
     imagePath: image,
@@ -50,9 +60,27 @@ test("listThemes skips well-formed JSON with a bad shape instead of crashing", a
 test("createSingleImageTheme rejects oversized source images", async () => {
   const root = await mkdtemp(join(tmpdir(), "heige-bigimg-"));
   const big = join(root, "big.png");
-  await writeFile(big, Buffer.alloc(9 * 1024 * 1024, 1));
+  await writeFile(big, png(640, 360, 9 * 1024 * 1024));
   await assert.rejects(
     createSingleImageTheme({ imagePath: big, name: "Big", storeRoot: join(root, "store") }),
     /过大/,
+  );
+});
+
+test("createSingleImageTheme validates magic MIME and dimensions before publishing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-invalid-source-"));
+  const storeRoot = join(root, "store");
+  const mismatch = join(root, "mismatch.png");
+  await writeFile(mismatch, Buffer.from("not-a-png"));
+  await assert.rejects(
+    createSingleImageTheme({ imagePath: mismatch, name: "Mismatch", storeRoot }),
+    /PNG|图片|header/i,
+  );
+
+  const bomb = join(root, "bomb.png");
+  await writeFile(bomb, png(8000, 8000));
+  await assert.rejects(
+    createSingleImageTheme({ imagePath: bomb, name: "Bomb", storeRoot }),
+    /像素|pixel/i,
   );
 });

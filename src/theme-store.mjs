@@ -1,10 +1,19 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+
+import { validateImageMetadata } from "./image-metadata.mjs";
+import { parseBoundedJson, readBoundedFile, RESOURCE_LIMITS } from "./resource-limits.mjs";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
 // 单张源图上限：base64 后要内联进一条 CDP Runtime.evaluate，过大易触发 5 秒命令超时
-const MAX_SOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_SOURCE_IMAGE_BYTES = RESOURCE_LIMITS.assetBytes;
+const IMAGE_MIME = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+]);
 
 function slugify(value) {
   const slug = value
@@ -21,12 +30,20 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
   if (!IMAGE_EXTENSIONS.has(extension)) {
     throw new Error("素材必须是 PNG、JPG、JPEG 或 WebP 图片");
   }
-  const source = await stat(imagePath);
-  if (!source.isFile() || source.size === 0) throw new Error("素材图片不存在或为空");
-  if (source.size > MAX_SOURCE_IMAGE_BYTES) {
-    const mb = (source.size / 1024 / 1024).toFixed(1);
-    throw new Error(`素材图片 ${mb}MB 过大（上限 8MB），请先压缩后再做主题，否则注入会超时`);
+  let sourceBytes;
+  let source;
+  try {
+    ({ bytes: sourceBytes, stat: source } = await readBoundedFile(imagePath, {
+      maxBytes: MAX_SOURCE_IMAGE_BYTES,
+      label: "素材图片",
+    }));
+  } catch (error) {
+    if (/8388608|超过/.test(error?.message ?? "")) {
+      throw new Error("素材图片过大（上限 8MB），请先压缩后再做主题，否则注入会超时");
+    }
+    throw error;
   }
+  validateImageMetadata(sourceBytes, { expectedMime: IMAGE_MIME.get(extension) });
 
   const digest = createHash("sha256")
     .update(`${name}\0${basename(imagePath)}\0${source.size}\0${source.mtimeMs}`)
@@ -54,7 +71,7 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
   await rm(temporary, { recursive: true, force: true });
   await mkdir(temporary, { recursive: true });
   try {
-    await copyFile(imagePath, join(temporary, hero));
+    await writeFile(join(temporary, hero), sourceBytes);
     await writeFile(join(temporary, "theme.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     await rm(destination, { recursive: true, force: true });
     await rename(temporary, destination);
@@ -78,7 +95,11 @@ export async function listThemes({ roots }) {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const manifest = JSON.parse(await readFile(join(root, entry.name, "theme.json"), "utf8"));
+        const { bytes } = await readBoundedFile(join(root, entry.name, "theme.json"), {
+          maxBytes: RESOURCE_LIMITS.manifestBytes,
+          label: "theme.json",
+        });
+        const manifest = parseBoundedJson(bytes);
         // 形状守卫：合法 JSON 但缺 name/id 的坏主题不能进列表，
         // 否则后面 sort 的 a.name.localeCompare 会因 undefined 崩掉整个 list/apply
         if (typeof manifest?.id !== "string" || typeof manifest?.name !== "string") continue;
