@@ -54,16 +54,16 @@ test("ships the custom upload flow with the sentinel css template", () => {
   assert.match(script, /removeItem/, "delete must clear persisted storage");
 });
 
-test("clears the Windows caption area so the button stays clickable", () => {
+test("centers the menu at the top clear of window controls on every platform", () => {
   const script = buildSkinMenuScript({
     ...base,
     activeId: "a",
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
 
-  assert.match(script, /Windows/, "must detect Windows in the renderer");
-  assert.match(script, /158px/, "Windows layout must shift left of the caption controls");
-  assert.match(script, /14px/, "macOS layout must keep the original offset");
+  assert.match(script, /left:50%/, "menu must anchor to the horizontal center");
+  assert.match(script, /translateX\(-50%\)/, "menu must center on its own width");
+  assert.doesNotMatch(script, /right:1?\d+px/, "no corner offset may remain");
   assert.match(script, /-webkit-app-region:no-drag/, "controls must opt out of the titlebar drag region");
 });
 

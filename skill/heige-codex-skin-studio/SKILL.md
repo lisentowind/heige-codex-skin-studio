@@ -51,7 +51,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "主题
 open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-488137"
 ```
 
-应用任意一个后，其余预设都在右上角 🎨 菜单里一键切换。
+应用任意一个后，其余预设都在顶部中间的 🎨 菜单里一键切换。
 
 ## 给在 Codex 内运行的 Agent 的关键规则
 
@@ -63,7 +63,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-4
 
 ## 界面内切换菜单
 
-应用任意主题后，Codex 右上角会出现一个 🎨 按钮。点开可以在所有已装主题和原生界面之间即时切换，不需要再跑命令。新建主题后重新执行一次 `apply.command`，菜单列表会刷新。
+应用任意主题后，Codex 顶部中间会出现一个 🎨 按钮。点开可以在所有已装主题和原生界面之间即时切换，不需要再跑命令。新建主题后重新执行一次 `apply.command`，菜单列表会刷新。
 
 菜单里的「＋ 自定义图片」支持用户直接上传本地图片：页面内自动压缩、按图片风格提取配色并立即应用，结果存在 Codex 本地存储里，重启后重新 apply 会自动回到菜单；菜单里该行行尾的 × 可随时删除。自定义槽位只有一个，再次上传会覆盖上一张。用户只是想快速试一张图时优先推荐这个入口；要做成可分发的正式主题再走 `create` 命令。
 

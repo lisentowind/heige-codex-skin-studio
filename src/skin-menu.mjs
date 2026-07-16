@@ -51,16 +51,15 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   document.getElementById(data.menuId)?.remove();
   const root = document.createElement("div");
   root.id = data.menuId;
-  // Windows 的最小化/最大化/关闭按钮占据右上角原生 caption 区，点击到不了页面元素，
-  // 菜单须左移让位；no-drag 防止自定义标题栏的拖拽区吞掉点击（macOS 红绿灯在左上角，不受影响）
-  const captionOffset = /Windows/i.test(navigator.userAgent) ? "158px" : "14px";
-  root.style.cssText = "position:fixed;top:10px;right:" + captionOffset + ";z-index:2147483000;font:500 13px/1.4 system-ui;user-select:none;-webkit-app-region:no-drag;";
+  // 双平台统一放顶部中间：右上角会撞 Windows 的窗口控制按钮和 Codex 自身菜单；
+  // 顶部中间正是标题栏拖拽区，no-drag 必须保留，否则点击被拖拽吞掉
+  root.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:2147483000;font:500 13px/1.4 system-ui;user-select:none;-webkit-app-region:no-drag;";
 
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = "\\u{1F3A8}";
   button.title = "HeiGe Codex Skin Studio";
-  button.style.cssText = "display:block;margin-left:auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
+  button.style.cssText = "display:block;margin:0 auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
 
   const panel = document.createElement("div");
   panel.style.cssText = "display:none;margin-top:8px;min-width:200px;padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
