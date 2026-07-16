@@ -1,4 +1,5 @@
-const HEX_COLOR = /^#[0-9a-f]{3,8}$/i;
+import { HEX_COLOR } from "./constants.mjs";
+
 const DEFAULT_ACCENT = "#24c9d7";
 
 // 客户端 CSS 由 Node 端模板加哨兵生成，替换后与内置主题同源，避免两套模板漂移
@@ -11,7 +12,7 @@ export const CSS_SENTINELS = {
   text: "#0a0b0c",
 };
 
-export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTemplate = "" }) {
+export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTemplate = "", preferStored = false }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error("皮肤菜单至少需要一个主题");
   }
@@ -37,6 +38,9 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     customId: "custom-upload",
     storageKey: "heigeCodexCustomTheme",
     hiddenKey: "heigeCodexSkinMenuHidden",
+    selectedKey: "heigeCodexSkinSelected",
+    nativeSel: "__heige_native__",
+    preferStored,
   });
 
   return `(() => {
@@ -81,23 +85,35 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     text.textContent = label;
     item.append(dot, text);
     item.addEventListener("mouseenter", () => { if (item.style.fontWeight !== "700") item.style.background = "rgba(0,0,0,.05)"; });
-    item.addEventListener("mouseleave", () => paint(document.documentElement.dataset.heigeCodexSkin ?? null));
+    // 先无条件复位再 paint：上传行/隐藏行不在 rows 里，paint 遍历不到它们，
+    // 只靠 paint 会让这两行的 hover 灰底永久残留
+    item.addEventListener("mouseleave", () => { item.style.background = "transparent"; paint(document.documentElement.dataset.heigeCodexSkin ?? null); });
     item.addEventListener("click", () => onPick(item));
     if (before) panel.insertBefore(item, before); else panel.appendChild(item);
     return item;
   };
 
-  const setTheme = (id) => {
+  // 选中态持久化：重新注入（含看门狗补针）后恢复用户上次选的主题，而不是硬切回 activeId
+  const writeSelected = (id) => { try { localStorage.setItem(data.selectedKey, id); } catch {} };
+  const readSelected = () => { try { return localStorage.getItem(data.selectedKey); } catch { return null; } };
+  // 卸载皮肤后 style 已脱离 DOM，任何脚本化调用不得再改 dataset/写存储，否则污染 status
+  const alive = () => style.isConnected;
+
+  const setTheme = (id, persist = true) => {
+    if (!alive()) return;
     const theme = data.themes.find((candidate) => candidate.id === id);
     if (!theme) return;
     style.textContent = theme.css;
     document.documentElement.dataset.heigeCodexSkin = theme.id;
     paint(theme.id);
+    if (persist) writeSelected(theme.id);
   };
-  const clearTheme = () => {
+  const clearTheme = (persist = true) => {
+    if (!alive()) return;
     style.textContent = "";
     delete document.documentElement.dataset.heigeCodexSkin;
     paint(null);
+    if (persist) writeSelected(data.nativeSel);
   };
 
   for (const theme of data.themes) {
@@ -140,7 +156,9 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     const ranked = [...buckets.values()].sort((a, b2) => b2.w - a.w)
       .map((e) => ({ rgb: [e.r / e.w, e.g / e.w, e.b / e.w], h: e.h, w: e.w }));
     const accent = ranked[0]?.rgb ?? [36, 201, 215];
-    const second = ranked.find((e) => Math.abs(e.h - (ranked[0]?.h ?? 0)) > 50)?.rgb
+    // 色相是环形量：355° 与 10° 实际只差 15°，线性差会误判成对比色
+    const hueGap = (a, b) => { const d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); };
+    const second = ranked.find((e) => hueGap(e.h, ranked[0]?.h ?? 0) > 50)?.rgb
       ?? mix(accent, [255, 255, 255], 0.35);
     const light = avgLum > 128;
     const surface = light ? mix(accent, [252, 252, 255], 0.92) : mix(accent, [12, 12, 18], 0.86);
@@ -153,16 +171,21 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     };
   };
 
+  let currentCustom = null;   // 内存态：save 失败时仍以它为准，不被 localStorage 里的旧图覆盖
   const applyCustomTheme = (theme) => {
+    if (!alive()) return;
+    currentCustom = theme;
     style.textContent = buildCustomCss(theme.dataUrl, theme.colors);
     document.documentElement.dataset.heigeCodexSkin = data.customId;
     ensureCustomRow(theme);
     paint(data.customId);
+    writeSelected(data.customId);
   };
 
   let customRow = null;
   const deleteCustom = () => {
     try { localStorage.removeItem(data.storageKey); } catch {}
+    currentCustom = null;
     if (document.documentElement.dataset.heigeCodexSkin === data.customId) clearTheme();
     customRow?.remove();
     rows.delete(data.customId);
@@ -170,7 +193,7 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   };
   const ensureCustomRow = (theme) => {
     if (customRow) { customRow.querySelector("span + span").textContent = theme.name; customRow.firstChild.style.background = theme.colors.accent; return; }
-    customRow = row(theme.name, theme.colors.accent, () => { applyCustomTheme(loadCustom() ?? theme); panel.style.display = "none"; }, uploadRow);
+    customRow = row(theme.name, theme.colors.accent, () => { applyCustomTheme(currentCustom ?? loadCustom() ?? theme); panel.style.display = "none"; }, uploadRow);
     const text = customRow.querySelector("span + span");
     text.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     const del = document.createElement("span");
@@ -191,17 +214,19 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     } catch { return null; }
   };
   const saveCustom = (theme) => {
-    try { localStorage.setItem(data.storageKey, JSON.stringify(theme)); }
-    catch (error) { console.warn("HeiGe Codex Skin：自定义主题图片过大，本次生效但重启后不保留", error); }
+    try { localStorage.setItem(data.storageKey, JSON.stringify(theme)); return true; }
+    catch (error) { console.warn("HeiGe Codex Skin：自定义主题图片过大，本次生效但重启后会回退到上一张图", error); return false; }
   };
 
   const importFromDataUrl = (dataUrl, name) => new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
+      if (!img.width || !img.height) { reject(new Error("图片尺寸无效")); return; }
       const scale = Math.min(1, 1600 / img.width);
       const full = document.createElement("canvas");
-      full.width = Math.round(img.width * scale);
-      full.height = Math.round(img.height * scale);
+      // 下限 1px：超宽图（如 4000×1）取整会得 0 高，toDataURL 产出空图坏主题
+      full.width = Math.max(1, Math.round(img.width * scale));
+      full.height = Math.max(1, Math.round(img.height * scale));
       full.getContext("2d").drawImage(img, 0, 0, full.width, full.height);
       const sample = document.createElement("canvas");
       sample.width = 48; sample.height = Math.max(1, Math.round(48 * img.height / img.width));
@@ -219,6 +244,15 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     img.src = dataUrl;
   });
 
+  // 上传失败给用户一个可见反馈，不再静默吞掉 rejection
+  const flashButton = (msg) => {
+    const prevTitle = button.title;
+    button.title = msg;
+    button.animate?.([{ filter: "none" }, { filter: "brightness(1.6) saturate(0)" }, { filter: "none" }], { duration: 900 });
+    setTimeout(() => { button.title = prevTitle; }, 2600);
+    console.warn("HeiGe Codex Skin：" + msg);
+  };
+
   const picker = document.createElement("input");
   picker.type = "file";
   picker.accept = "image/png,image/jpeg,image/webp";
@@ -227,7 +261,11 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     const file = picker.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => importFromDataUrl(reader.result, file.name.replace(/\\.[a-z0-9]+$/i, ""));
+    reader.onload = () => {
+      importFromDataUrl(reader.result, file.name.replace(/\\.[a-z0-9]+$/i, ""))
+        .catch(() => flashButton("\\u56fe\\u7247\\u5904\\u7406\\u5931\\u8d25\\uff0c\\u8bf7\\u6362\\u4e00\\u5f20"));
+    };
+    reader.onerror = () => flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5");
     reader.readAsDataURL(file);
     picker.value = "";
     panel.style.display = "none";
@@ -268,8 +306,22 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
 
   root.append(button, panel, picker);
   document.body.appendChild(root);
-  if (data.activeId === null) clearTheme();
-  else setTheme(data.activeId);
+  // preferStored=true（看门狗自动补针/重开）：恢复用户上次的选择，不覆盖。persist=false 不反写。
+  // preferStored=false（用户显式 apply/customize）：activeId 当场生效并记为新选择（persist=true）。
+  const restore = () => {
+    if (data.preferStored) {
+      const sel = readSelected();
+      if (sel === data.nativeSel) { clearTheme(false); return; }
+      if (sel === data.customId) {
+        const custom = currentCustom ?? loadCustom();
+        if (custom) { applyCustomTheme(custom); return; }
+      }
+      if (sel && data.themes.some((t) => t.id === sel)) { setTheme(sel, false); return; }
+    }
+    if (data.activeId === null) clearTheme();
+    else setTheme(data.activeId);
+  };
+  restore();
   if (readHidden()) setHidden(true, false);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
