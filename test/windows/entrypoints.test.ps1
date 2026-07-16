@@ -119,6 +119,7 @@ try {
         $script:CliCalls = @()
         $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
             -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
             -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
             -CliProvider {
                 param($Context, $Arguments)
@@ -139,6 +140,7 @@ try {
         $script:CliCalls = @()
         $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
             -StartCdpProvider { param($Context, $Port) } `
             -CliProvider {
                 param($Context, $Arguments)
@@ -152,11 +154,88 @@ try {
         Assert-Equal "stored-or-default" $result.ThemeSelection
     }
 
+    Test-Case "Apply failure restores the exact native prestate and remains visible" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+                -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
+                -CdpStatusProvider {
+                    param($Context, $Port)
+                    $script:Events += "cdp-prestate"
+                    $false
+                } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "native-prestate"
+                    @(New-TestCodexProcess -Id 41)
+                } `
+                -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+                -CliProvider {
+                    param($Context, $Arguments)
+                    $script:Events += "apply"
+                    throw "apply failed visibly"
+                } `
+                -CompensateProvider {
+                    param($Context, $Port, $Mode)
+                    $script:Events += "compensate:$Mode"
+                    [pscustomobject]@{ Restored = $true; Mode = "native" }
+                }
+        } "apply failed visibly"
+        Assert-Equal @(
+            "preflight", "cdp-prestate", "native-prestate", "start-cdp", "apply", "compensate:native"
+        ) $script:Events
+    }
+
+    Test-Case "Apply failure restores the exact closed prestate and remains visible" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider {
+                    param($Context, $Port)
+                    $script:Events += "cdp-prestate"
+                    $false
+                } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "closed-prestate"
+                    @()
+                } `
+                -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+                -CliProvider {
+                    param($Context, $Arguments)
+                    $script:Events += "apply"
+                    throw "closed apply failed visibly"
+                } `
+                -CompensateProvider {
+                    param($Context, $Port, $Mode)
+                    $script:Events += "compensate:$Mode"
+                    [pscustomobject]@{ Restored = $true; Mode = "closed" }
+                }
+        } "closed apply failed visibly"
+        Assert-Equal @(
+            "cdp-prestate", "closed-prestate", "start-cdp", "apply", "compensate:closed"
+        ) $script:Events
+    }
+
+    Test-Case "Apply reports both the original and compensation errors" {
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $false } `
+                -ProcessProvider { param($Context) @() } `
+                -StartCdpProvider { param($Context, $Port) } `
+                -CliProvider { param($Context, $Arguments) throw "original apply failure" } `
+                -CompensateProvider { param($Context, $Port, $Mode) throw "closed restore failure" }
+        } "原始错误：original apply failure；补偿错误：closed restore failure"
+    }
+
     Test-Case "Enable applies this session then enables next-launch persistence" {
         $script:Events = @()
         $script:CliCalls = @()
         $result = Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
             -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
             -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
             -CliProvider {
                 param($Context, $Arguments)
@@ -180,6 +259,7 @@ try {
         $script:CliCalls = @()
         $result = Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
             -StartCdpProvider { param($Context, $Port) } `
             -CliProvider {
                 param($Context, $Arguments)
@@ -206,6 +286,7 @@ try {
         Assert-Throws {
             Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
                 -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $true } `
                 -StartCdpProvider { param($Context, $Port) } `
                 -CliProvider {
                     param($Context, $Arguments)
@@ -239,6 +320,7 @@ try {
         Assert-Throws {
             Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
                 -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $true } `
                 -StartCdpProvider { param($Context, $Port) } `
                 -CliProvider {
                     param($Context, $Arguments)

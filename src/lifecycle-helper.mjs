@@ -2,13 +2,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
-import { lstat, mkdir, open, stat, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, stat, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { execFile as execFileCallback } from "node:child_process";
 
-import { sameProcessIdentity } from "./codex-app.mjs";
+import { listCodexProcesses, sameProcessIdentity } from "./codex-app.mjs";
 
 const execFile = promisify(execFileCallback);
 const ACTION_BYTES = 16 * 1024;
@@ -31,9 +31,45 @@ const CONTINUATION_KEYS = Object.freeze(["cliPath", "command", "nodePath", "port
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const CONTINUATION_COMMANDS = new Set(["apply", "enable-after-restart"]);
+const LIFECYCLE_FAILURE = Symbol("heige.lifecycle.failure");
+const SAFE_FAILURES = Object.freeze({
+  CONTINUATION_FAILED_COMPENSATED: Object.freeze({
+    code: "CONTINUATION_FAILED_COMPENSATED",
+    message: "皮肤应用失败，已恢复启动前状态。",
+  }),
+  CONTINUATION_COMPENSATION_FAILED: Object.freeze({
+    code: "CONTINUATION_COMPENSATION_FAILED",
+    message: "皮肤应用失败，且未能确认已恢复启动前状态。",
+  }),
+  LIFECYCLE_FAILED: Object.freeze({
+    code: "LIFECYCLE_FAILED",
+    message: "皮肤启动流程失败。",
+  }),
+  RESULT_WRITE_FAILED: Object.freeze({
+    code: "RESULT_WRITE_FAILED",
+    message: "皮肤启动流程失败，且无法写入安全结果回执。",
+  }),
+});
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function markLifecycleFailure(error, code, compensated) {
+  const failure = SAFE_FAILURES[code] ?? SAFE_FAILURES.LIFECYCLE_FAILED;
+  const target = error instanceof Error ? error : new Error(failure.message, { cause: error });
+  Object.defineProperty(target, LIFECYCLE_FAILURE, {
+    configurable: true,
+    value: Object.freeze({ ...failure, compensated: compensated === true }),
+  });
+  return target;
+}
+
+function safeLifecycleFailure(error) {
+  return error?.[LIFECYCLE_FAILURE] ?? Object.freeze({
+    ...SAFE_FAILURES.LIFECYCLE_FAILED,
+    compensated: false,
+  });
 }
 
 function exactKeys(value, expected, label) {
@@ -179,6 +215,58 @@ async function syncDirectory(path) {
   }
 }
 
+async function assertPrivateResultDirectory(path) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("lifecycle 结果目录必须是真实目录");
+  }
+  if ((info.mode & 0o700) !== 0o700 || (info.mode & 0o077) !== 0) {
+    throw new Error("lifecycle 结果目录必须仅当前用户可访问");
+  }
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error("lifecycle 结果目录不属于当前用户");
+  }
+}
+
+async function writeLifecycleResult(actionPath, action, input, { now = () => new Date() } = {}) {
+  const parent = dirname(actionPath);
+  await assertPrivateResultDirectory(parent);
+  const resultPath = `${actionPath}.result.json`;
+  const temporaryPath = `${resultPath}.${randomUUID()}.tmp`;
+  const document = {
+    schemaVersion: 1,
+    action: {
+      createdAt: action.createdAt,
+      nonce: action.nonce,
+      operation: action.operation,
+    },
+    outcome: input.outcome,
+    compensated: input.compensated === true,
+    error: input.error,
+    completedAt: now().toISOString(),
+  };
+  const handle = await open(
+    temporaryPath,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    await handle.writeFile(`${JSON.stringify(document)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await link(temporaryPath, resultPath);
+  } finally {
+    await unlink(temporaryPath).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
+  await syncDirectory(parent);
+  return resultPath;
+}
+
 export async function writeLifecycleActionFile(actionPath, input, options = {}) {
   absolutePath(actionPath, "actionPath");
   const action = actionDocument(input, options);
@@ -310,6 +398,89 @@ async function defaultVerifyPortReleased(port) {
   }
 }
 
+async function defaultReadCdpProcess({ appPath, port }) {
+  const { stdout } = await execFile("/usr/sbin/lsof", [
+    "-nP",
+    `-iTCP:${port}`,
+    "-sTCP:LISTEN",
+    "-t",
+  ]);
+  const pids = [...new Set(stdout.split(/\s+/).filter(Boolean).map(Number))];
+  if (pids.length !== 1 || !Number.isSafeInteger(pids[0]) || pids[0] <= 0) {
+    throw new Error(`CDP 端口 ${port} 的监听进程不唯一`);
+  }
+  const expected = {
+    pid: pids[0],
+    executablePath: join(appPath, "Contents", "MacOS", "ChatGPT"),
+    startedAt: "pending",
+  };
+  const observed = await defaultReadProcessIdentity(pids[0], expected);
+  if (observed?.executablePath !== expected.executablePath) {
+    throw new Error(`CDP 端口 ${port} 不属于已解析的 Codex 应用`);
+  }
+  return observed;
+}
+
+async function defaultReadAppProcesses({ appPath }) {
+  return listCodexProcesses({
+    app: { executablePath: join(appPath, "Contents", "MacOS", "ChatGPT") },
+  });
+}
+
+async function restoreContinuationPrestate(action, {
+  readProcessIdentity,
+  requestQuit,
+  launchApp,
+  wait,
+  readCdpProcess,
+  readAppProcesses,
+  verifyPortReleased,
+  maxWaitAttempts,
+  waitIntervalMs,
+}) {
+  const launched = processIdentity(await readCdpProcess({
+    appPath: action.appPath,
+    port: action.port,
+  }));
+  const expectedExecutable = join(action.appPath, "Contents", "MacOS", "ChatGPT");
+  if (launched.executablePath !== expectedExecutable) {
+    throw new Error("新启动的 CDP 进程不属于已解析的 Codex 应用");
+  }
+  await requestQuit({ appPath: action.appPath, process: launched });
+  let disappeared = false;
+  for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
+    const current = await readProcessIdentity(launched.pid, launched);
+    if (!sameProcessIdentity(current, launched)) {
+      disappeared = true;
+      break;
+    }
+    await wait(waitIntervalMs);
+  }
+  if (!disappeared) throw new Error("补偿失败：Codex CDP 进程未正常退出");
+  if (!(await verifyPortReleased(action.port))) {
+    throw new Error(`补偿失败：CDP 端口 ${action.port} 仍被占用`);
+  }
+  if (action.process !== null) await launchApp({ appPath: action.appPath, args: [] });
+
+  let restored = false;
+  for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
+    const processes = await readAppProcesses({ appPath: action.appPath });
+    if (!Array.isArray(processes)) throw new Error("补偿进程查询结果无效");
+    restored = action.process === null
+      ? processes.length === 0
+      : processes.length === 1 &&
+        processes[0]?.executablePath === expectedExecutable &&
+        processes[0]?.hasCdp === false &&
+        processes[0]?.cdpPort === null;
+    if (restored) break;
+    await wait(waitIntervalMs);
+  }
+  if (!restored || !(await verifyPortReleased(action.port))) {
+    const mode = action.process === null ? "closed" : "native";
+    throw new Error(`补偿失败：未能确认恢复 ${mode} 前态`);
+  }
+}
+
 async function defaultRunAfterLaunch(input) {
   const localCli = join(dirname(fileURLToPath(import.meta.url)), "cli.mjs");
   const [realNode, currentNode, realCli, currentCli] = [
@@ -336,9 +507,7 @@ function defaultWait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export async function runLifecycleActionFile(actionPath, deps = {}) {
-  const now = deps.now ?? (() => new Date());
-  const action = await readActionFile(actionPath, { now });
+async function executeLifecycleAction(action, deps = {}) {
   const readProcessIdentity = deps.readProcessIdentity ?? defaultReadProcessIdentity;
   const requestQuit = deps.requestQuit ?? requestNormalQuit;
   const launchApp = deps.launchApp ?? defaultLaunchApp;
@@ -346,9 +515,12 @@ export async function runLifecycleActionFile(actionPath, deps = {}) {
   const waitForPort = deps.waitForPort ?? defaultWaitForPort;
   const runAfterLaunch = deps.runAfterLaunch ?? defaultRunAfterLaunch;
   const verifyPortReleased = deps.verifyPortReleased ?? defaultVerifyPortReleased;
+  const readCdpProcess = deps.readCdpProcess ?? defaultReadCdpProcess;
+  const readAppProcesses = deps.readAppProcesses ?? defaultReadAppProcesses;
   const maxWaitAttempts = deps.maxWaitAttempts ?? 120;
   const waitIntervalMs = deps.waitIntervalMs ?? 250;
-  if (![readProcessIdentity, requestQuit, launchApp, wait, waitForPort, runAfterLaunch, verifyPortReleased]
+  if (![readProcessIdentity, requestQuit, launchApp, wait, waitForPort, runAfterLaunch,
+    verifyPortReleased, readCdpProcess, readAppProcesses]
     .every((value) => typeof value === "function")) {
     throw new TypeError("lifecycle helper dependencies must be functions");
   }
@@ -387,7 +559,29 @@ export async function runLifecycleActionFile(actionPath, deps = {}) {
   };
   if (action.afterLaunch !== null) {
     await waitForPort(action.port);
-    await runAfterLaunch(action.afterLaunch);
+    try {
+      await runAfterLaunch(action.afterLaunch);
+    } catch (continuationError) {
+      try {
+        await restoreContinuationPrestate(action, {
+          readProcessIdentity,
+          requestQuit,
+          launchApp,
+          wait,
+          readCdpProcess,
+          readAppProcesses,
+          verifyPortReleased,
+          maxWaitAttempts,
+          waitIntervalMs,
+        });
+      } catch (compensationError) {
+        throw markLifecycleFailure(new AggregateError(
+          [continuationError, compensationError],
+          `afterLaunch 失败且未能恢复启动前状态：${continuationError.message}；补偿错误：${compensationError.message}`,
+        ), "CONTINUATION_COMPENSATION_FAILED", false);
+      }
+      throw markLifecycleFailure(continuationError, "CONTINUATION_FAILED_COMPENSATED", true);
+    }
     result.continuation = action.afterLaunch.command;
   }
   if (action.verifyPort !== null) {
@@ -397,6 +591,38 @@ export async function runLifecycleActionFile(actionPath, deps = {}) {
     result.verifiedPortReleased = action.verifyPort;
   }
   return result;
+}
+
+export async function runLifecycleActionFile(actionPath, deps = {}) {
+  const now = deps.now ?? (() => new Date());
+  const action = await readActionFile(actionPath, { now });
+  try {
+    const result = await executeLifecycleAction(action, deps);
+    await writeLifecycleResult(actionPath, action, {
+      outcome: "succeeded",
+      compensated: false,
+      error: null,
+    }, { now });
+    return result;
+  } catch (error) {
+    const lifecycleError = error?.[LIFECYCLE_FAILURE]
+      ? error
+      : markLifecycleFailure(error, "LIFECYCLE_FAILED", false);
+    const failure = safeLifecycleFailure(lifecycleError);
+    try {
+      await writeLifecycleResult(actionPath, action, {
+        outcome: "failed",
+        compensated: failure.compensated,
+        error: { code: failure.code, message: failure.message },
+      }, { now });
+    } catch (resultError) {
+      throw markLifecycleFailure(new AggregateError(
+        [lifecycleError, resultError],
+        "lifecycle 失败且无法写入安全结果回执",
+      ), "RESULT_WRITE_FAILED", failure.compensated);
+    }
+    throw lifecycleError;
+  }
 }
 
 export async function spawnDetachedLifecycle({
@@ -427,6 +653,44 @@ export async function spawnDetachedLifecycle({
   return { queued: true };
 }
 
+export async function showLifecycleFailureDialog(error, { execFile: run = execFile } = {}) {
+  if (typeof run !== "function") throw new TypeError("dialog execFile 必须是函数");
+  const failure = safeLifecycleFailure(error);
+  const source = `function run(argv) {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  app.displayDialog(argv[0], {
+    withTitle: argv[1],
+    buttons: ["好"],
+    defaultButton: "好"
+  });
+}`;
+  await run("/usr/bin/osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    source,
+    "--",
+    failure.message,
+    "HeiGe 皮肤启动器",
+  ]);
+}
+
+export async function runLifecycleMain(actionPath, {
+  runAction = runLifecycleActionFile,
+  showDialog = showLifecycleFailureDialog,
+} = {}) {
+  if (typeof runAction !== "function" || typeof showDialog !== "function") {
+    throw new TypeError("lifecycle main dependencies must be functions");
+  }
+  try {
+    return await runAction(actionPath);
+  } catch (error) {
+    await showDialog(error).catch(() => {});
+    throw error;
+  }
+}
+
 function isMainEntry() {
   return Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
 }
@@ -436,8 +700,9 @@ if (isMainEntry()) {
     process.stderr.write("用法：lifecycle-helper.mjs /absolute/path/to/action.json\n");
     process.exitCode = 64;
   } else {
-    runLifecycleActionFile(process.argv[2]).catch((error) => {
-      process.stderr.write(`HeiGe lifecycle helper：${error.message}\n`);
+    runLifecycleMain(process.argv[2]).catch((error) => {
+      const failure = safeLifecycleFailure(error);
+      process.stderr.write(`HeiGe lifecycle helper [${failure.code}]：${failure.message}\n`);
       process.exitCode = 1;
     });
   }

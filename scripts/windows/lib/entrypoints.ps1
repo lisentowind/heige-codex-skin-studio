@@ -283,14 +283,75 @@ function Get-HeiGeEntrypointProcessMode {
     return "native"
 }
 
+function Restore-HeiGeApplyPrestate {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][ValidateSet("native", "closed")][string]$Mode
+    )
+    if ($Mode -ceq "native") {
+        Restart-CodexWithoutCdp -AppInfo $Context.App -Port $Port | Out-Null
+    } else {
+        Get-CdpOwner -Port $Port -App $Context.App | Out-Null
+        Stop-CodexNormally -AppInfo $Context.App | Out-Null
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            if (-not (Test-CdpEndpoint -Port $Port)) { break }
+            if ($attempt -lt 19) { Start-Sleep -Milliseconds 250 }
+        }
+        if (Test-CdpEndpoint -Port $Port) {
+            throw "closed 补偿后 CDP 端口仍未释放：$Port"
+        }
+        if (@(Get-RunningCodex -AppInfo $Context.App).Count -ne 0) {
+            throw "closed 补偿后仍存在已归属的 Codex 进程。"
+        }
+    }
+    return [pscustomobject][ordered]@{ Restored = $true; Mode = $Mode }
+}
+
+function Invoke-HeiGeApplyCompensation {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][ValidateSet("native", "closed")][string]$Mode,
+        [scriptblock]$CompensateProvider
+    )
+    $values = if ($CompensateProvider) {
+        @(& $CompensateProvider $Context $Port $Mode)
+    } else {
+        @(Restore-HeiGeApplyPrestate -Context $Context -Port $Port -Mode $Mode)
+    }
+    if ($values.Count -ne 1 -or $null -eq $values[0] -or
+        $values[0].PSObject.Properties.Name -notcontains "Restored" -or
+        $values[0].Restored -isnot [System.Boolean] -or
+        -not [bool]$values[0].Restored -or
+        $values[0].PSObject.Properties.Name -notcontains "Mode" -or
+        [string]$values[0].Mode -cne $Mode) {
+        throw "apply 补偿未能验证已恢复 $Mode 前态。"
+    }
+    return $values[0]
+}
+
 function Invoke-HeiGeApplyWithContext {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [AllowNull()][string]$Theme,
         [Parameter(Mandatory = $true)][int]$Port,
         [scriptblock]$StartCdpProvider,
-        [scriptblock]$CliProvider
+        [scriptblock]$CliProvider,
+        [scriptblock]$CdpStatusProvider,
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$CompensateProvider
     )
+    $hasExactCdp = if ($CdpStatusProvider) {
+        [bool](& $CdpStatusProvider $Context $Port)
+    } else {
+        Test-Cdp -Port $Port -App $Context.App
+    }
+    $prestate = if ($hasExactCdp) {
+        "cdp"
+    } else {
+        Get-HeiGeEntrypointProcessMode -Context $Context -ProcessProvider $ProcessProvider
+    }
     Start-HeiGeEntrypointCdp -Context $Context -Port $Port -StartCdpProvider $StartCdpProvider
     $arguments = @("apply")
     if ([string]::IsNullOrWhiteSpace($Theme)) {
@@ -299,10 +360,22 @@ function Invoke-HeiGeApplyWithContext {
         $arguments += @("--theme", $Theme)
     }
     $arguments += @("--port", [string]$Port)
-    $result = Invoke-HeiGeContextCli -Context $Context `
-        -Arguments $arguments -CliProvider $CliProvider
-    Assert-HeiGeModeResult -Result $result -Expected "active"
-    return $result
+    try {
+        $result = Invoke-HeiGeContextCli -Context $Context `
+            -Arguments $arguments -CliProvider $CliProvider
+        Assert-HeiGeModeResult -Result $result -Expected "active"
+        return $result
+    } catch {
+        $applyError = $_.Exception
+        if ($prestate -ceq "cdp") { throw $applyError }
+        try {
+            Invoke-HeiGeApplyCompensation -Context $Context -Port $Port -Mode $prestate `
+                -CompensateProvider $CompensateProvider | Out-Null
+        } catch {
+            throw "皮肤应用失败且未能恢复启动前状态。原始错误：$($applyError.Message)；补偿错误：$($_.Exception.Message)"
+        }
+        throw $applyError
+    }
 }
 
 function Invoke-HeiGeApplyFlow {
@@ -312,14 +385,19 @@ function Invoke-HeiGeApplyFlow {
         [ValidateRange(1024, 65535)][int]$Port = 9341,
         [scriptblock]$ContextProvider,
         [scriptblock]$StartCdpProvider,
-        [scriptblock]$CliProvider
+        [scriptblock]$CliProvider,
+        [scriptblock]$CdpStatusProvider,
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$CompensateProvider
     )
     if ($PSBoundParameters.ContainsKey("Theme") -and [string]::IsNullOrWhiteSpace($Theme)) {
         throw "Theme 显式传入时不能为空。"
     }
     $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
     $applied = Invoke-HeiGeApplyWithContext -Context $context -Theme $Theme -Port $Port `
-        -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider
+        -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider `
+        -CdpStatusProvider $CdpStatusProvider -ProcessProvider $ProcessProvider `
+        -CompensateProvider $CompensateProvider
     if ($applied.PSObject.Properties.Name -notcontains "persistenceEnabled" -or
         $applied.persistenceEnabled -isnot [System.Boolean]) {
         throw "apply 未返回可验证的常驻状态。"
@@ -346,6 +424,9 @@ function Invoke-HeiGeEnableSkinFlow {
         [scriptblock]$ContextProvider,
         [scriptblock]$StartCdpProvider,
         [scriptblock]$CliProvider,
+        [scriptblock]$CdpStatusProvider,
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$CompensateProvider,
         [scriptblock]$UnregisterProvider
     )
     if ($PSBoundParameters.ContainsKey("Theme") -and [string]::IsNullOrWhiteSpace($Theme)) {
@@ -353,7 +434,9 @@ function Invoke-HeiGeEnableSkinFlow {
     }
     $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
     Invoke-HeiGeApplyWithContext -Context $context -Theme $Theme -Port $Port `
-        -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider | Out-Null
+        -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider `
+        -CdpStatusProvider $CdpStatusProvider -ProcessProvider $ProcessProvider `
+        -CompensateProvider $CompensateProvider | Out-Null
 
     try {
         $enabled = Invoke-HeiGeContextCli -Context $context `

@@ -265,7 +265,7 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
     startedAt: "Fri Jul 17 12:00:00 2026",
   };
-  await writeLifecycleActionFile(path, {
+  const { action } = await writeLifecycleActionFile(path, {
     process: processIdentity,
     appPath: "/Applications/ChatGPT.app",
     launchMode: "cdp",
@@ -304,6 +304,220 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
       themeId: "miku-488137",
     }],
   ]);
+  const sidecar = JSON.parse(await readFile(`${path}.result.json`, "utf8"));
+  assert.deepEqual(sidecar, {
+    schemaVersion: 1,
+    action: {
+      createdAt: action.createdAt,
+      nonce: action.nonce,
+      operation: "restart",
+    },
+    outcome: "succeeded",
+    compensated: false,
+    error: null,
+    completedAt: sidecar.completedAt,
+  });
+  assert.equal((await stat(`${path}.result.json`)).mode & 0o777, 0o600);
+});
+
+test("a failed detached continuation restores the exact native prestate and rethrows the original error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-lifecycle-native-compensation-"));
+  const path = join(root, "action.json");
+  const original = {
+    pid: 4242,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 12:00:00 2026",
+  };
+  const launched = {
+    pid: 5252,
+    executablePath: original.executablePath,
+    startedAt: "Fri Jul 17 12:01:00 2026",
+  };
+  const native = {
+    pid: 6262,
+    executablePath: original.executablePath,
+    startedAt: "Fri Jul 17 12:02:00 2026",
+    commandLine: original.executablePath,
+    hasCdp: false,
+    cdpPort: null,
+  };
+  const { action } = await writeLifecycleActionFile(path, {
+    process: original,
+    appPath: "/Applications/ChatGPT.app",
+    launchMode: "cdp",
+    port: 9341,
+    afterLaunch: {
+      command: "apply",
+      cliPath: "/trusted/src/cli.mjs",
+      nodePath: "/trusted/node",
+      port: 9341,
+      themeId: "miku-488137",
+    },
+  });
+  const continuationError = new Error("apply failed with secret token and /private/input");
+  const calls = [];
+  let originalProbes = 0;
+  await assert.rejects(runLifecycleActionFile(path, {
+    readProcessIdentity: async (pid) => {
+      calls.push(["process", pid]);
+      if (pid === original.pid) return ++originalProbes === 1 ? original : null;
+      if (pid === launched.pid) return null;
+      throw new Error(`unexpected pid ${pid}`);
+    },
+    requestQuit: async ({ process }) => calls.push(["quit", process.pid]),
+    launchApp: async ({ args }) => calls.push(["launch", args]),
+    wait: async () => {},
+    waitForPort: async (port) => calls.push(["port", port]),
+    runAfterLaunch: async () => { throw continuationError; },
+    readCdpProcess: async ({ port }) => {
+      calls.push(["cdp-process", port]);
+      return launched;
+    },
+    verifyPortReleased: async (port) => {
+      calls.push(["port-released", port]);
+      return true;
+    },
+    readAppProcesses: async () => {
+      calls.push(["app-processes"]);
+      return [native];
+    },
+  }), (error) => error === continuationError);
+  assert.deepEqual(calls, [
+    ["process", 4242],
+    ["quit", 4242],
+    ["process", 4242],
+    ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
+    ["port", 9341],
+    ["cdp-process", 9341],
+    ["quit", 5252],
+    ["process", 5252],
+    ["port-released", 9341],
+    ["launch", []],
+    ["app-processes"],
+    ["port-released", 9341],
+  ]);
+  const sidecarText = await readFile(`${path}.result.json`, "utf8");
+  assert.doesNotMatch(sidecarText, /secret token|\/private\/input/);
+  const sidecar = JSON.parse(sidecarText);
+  assert.deepEqual(sidecar, {
+    schemaVersion: 1,
+    action: {
+      createdAt: action.createdAt,
+      nonce: action.nonce,
+      operation: "restart",
+    },
+    outcome: "failed",
+    compensated: true,
+    error: {
+      code: "CONTINUATION_FAILED_COMPENSATED",
+      message: "皮肤应用失败，已恢复启动前状态。",
+    },
+    completedAt: sidecar.completedAt,
+  });
+  assert.equal((await stat(`${path}.result.json`)).mode & 0o777, 0o600);
+});
+
+test("a failed detached continuation restores the exact closed prestate and rethrows the original error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-lifecycle-closed-compensation-"));
+  const path = join(root, "action.json");
+  const launched = {
+    pid: 5252,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 12:01:00 2026",
+  };
+  await writeLifecycleActionFile(path, {
+    process: null,
+    appPath: "/Applications/ChatGPT.app",
+    launchMode: "cdp",
+    port: 9341,
+    afterLaunch: {
+      command: "apply",
+      cliPath: "/trusted/src/cli.mjs",
+      nodePath: "/trusted/node",
+      port: 9341,
+      themeId: "miku-488137",
+    },
+  });
+  const continuationError = new Error("closed apply failed");
+  const calls = [];
+  await assert.rejects(runLifecycleActionFile(path, {
+    readProcessIdentity: async (pid) => {
+      calls.push(["process", pid]);
+      return null;
+    },
+    requestQuit: async ({ process }) => calls.push(["quit", process.pid]),
+    launchApp: async ({ args }) => calls.push(["launch", args]),
+    wait: async () => {},
+    waitForPort: async (port) => calls.push(["port", port]),
+    runAfterLaunch: async () => { throw continuationError; },
+    readCdpProcess: async ({ port }) => {
+      calls.push(["cdp-process", port]);
+      return launched;
+    },
+    verifyPortReleased: async (port) => {
+      calls.push(["port-released", port]);
+      return true;
+    },
+    readAppProcesses: async () => {
+      calls.push(["app-processes"]);
+      return [];
+    },
+  }), (error) => error === continuationError);
+  assert.deepEqual(calls, [
+    ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
+    ["port", 9341],
+    ["cdp-process", 9341],
+    ["quit", 5252],
+    ["process", 5252],
+    ["port-released", 9341],
+    ["app-processes"],
+    ["port-released", 9341],
+  ]);
+});
+
+test("a detached compensation failure preserves both errors and writes only a safe failure sidecar", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-lifecycle-compensation-failed-"));
+  const path = join(root, "action.json");
+  const launched = {
+    pid: 5252,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 12:01:00 2026",
+  };
+  await writeLifecycleActionFile(path, {
+    process: null,
+    appPath: "/Applications/ChatGPT.app",
+    launchMode: "cdp",
+    port: 9341,
+    afterLaunch: {
+      command: "apply",
+      cliPath: "/trusted/src/cli.mjs",
+      nodePath: "/trusted/node",
+      port: 9341,
+      themeId: "miku-488137",
+    },
+  });
+  const continuationError = new Error("original token=private-value");
+  const compensationError = new Error("compensation path=/private/user/input");
+  await assert.rejects(runLifecycleActionFile(path, {
+    launchApp: async () => {},
+    waitForPort: async () => {},
+    runAfterLaunch: async () => { throw continuationError; },
+    readCdpProcess: async () => launched,
+    requestQuit: async () => { throw compensationError; },
+  }), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [continuationError, compensationError]);
+    return true;
+  });
+  const sidecarText = await readFile(`${path}.result.json`, "utf8");
+  assert.doesNotMatch(sidecarText, /private-value|\/private\/user\/input/);
+  const sidecar = JSON.parse(sidecarText);
+  assert.equal(sidecar.outcome, "failed");
+  assert.equal(sidecar.compensated, false);
+  assert.deepEqual(sidecar.error, {
+    code: "CONTINUATION_COMPENSATION_FAILED",
+    message: "皮肤应用失败，且未能确认已恢复启动前状态。",
+  });
 });
 
 test("a launch-only action starts a closed Codex without issuing a quit request", async () => {
@@ -406,6 +620,29 @@ test("detached lifecycle propagates an asynchronous spawn error", async () => {
     },
   });
   await assert.rejects(queued, /ENOENT/);
+});
+
+test("detached lifecycle main shows only a bounded safe dialog and rethrows the original error", async () => {
+  const module = await import("../src/lifecycle-helper.mjs");
+  assert.equal(typeof module.runLifecycleMain, "function");
+  assert.equal(typeof module.showLifecycleFailureDialog, "function");
+  const original = new Error("token=top-secret path=/private/user/input");
+  const dialogs = [];
+  await assert.rejects(module.runLifecycleMain("/trusted/action.json", {
+    runAction: async () => { throw original; },
+    showDialog: async (error) => dialogs.push(error),
+  }), (error) => error === original);
+  assert.deepEqual(dialogs, [original]);
+
+  const calls = [];
+  await module.showLifecycleFailureDialog(original, {
+    execFile: async (file, args) => calls.push([file, args]),
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/usr/bin/osascript");
+  assert.match(calls[0][1].join(" "), /皮肤启动流程失败/);
+  assert.match(calls[0][1].join(" "), /displayDialog/);
+  assert.doesNotMatch(calls[0][1].join(" "), /top-secret|\/private\/user\/input/);
 });
 
 test("macOS launcher defaults to the stored theme and uses an explicit theme only when supplied", async (t) => {
