@@ -784,7 +784,12 @@ export function createSkinController(input) {
     );
   };
 
-  setPersistencePublic = async ({ expectedRevision, enabled, signal } = {}) => {
+  setPersistencePublic = async ({
+    expectedRevision,
+    enabled,
+    includeProcessIdentity = false,
+    signal,
+  } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw new Error("expectedRevision must be a non-negative safe integer");
     }
@@ -865,18 +870,30 @@ export function createSkinController(input) {
         revision: changed.state.revision,
         transitionNonce: enableAttempt.nonce,
       });
-      if (await deps.verifyBackgroundHandshake({
+      const acknowledgedIdentity = await deps.verifyBackgroundHandshake({
         revision: changed.state.revision,
         transitionNonce: enableAttempt.nonce,
         handshakeRequest,
-      }) !== true) {
+      });
+      if (
+        !Number.isSafeInteger(acknowledgedIdentity?.pid) ||
+        acknowledgedIdentity.pid <= 0 ||
+        typeof acknowledgedIdentity?.startedAt !== "string" ||
+        acknowledgedIdentity.startedAt.length === 0
+      ) {
         throw new Error("后台控制器启动握手失败");
       }
       const inspected = await deps.inspectBackground({
         revision: changed.state.revision,
         transitionNonce: enableAttempt.nonce,
       });
-      if (!isRecord(inspected) || inspected.registered !== true) {
+      if (
+        !isRecord(inspected) ||
+        inspected.registered !== true ||
+        inspected.loaded !== true ||
+        inspected.processIdentity?.pid !== acknowledgedIdentity.pid ||
+        inspected.processIdentity?.startedAt !== acknowledgedIdentity.startedAt
+      ) {
         throw new Error("后台控制器未保持注册状态");
       }
       const finalized = await deps.withLease("controller:finalize-enable", async (lease) => {
@@ -900,7 +917,9 @@ export function createSkinController(input) {
         desiredPersistenceEnabled: true,
         expectedRevision: changed.state.revision,
       });
-      return publicState(finalized);
+      return includeProcessIdentity
+        ? { ...publicState(finalized), processIdentity: { ...acknowledgedIdentity } }
+        : publicState(finalized);
     } catch (error) {
       if (enabled && enableAttempt !== null) {
         const authoritative = await deps.readState().catch(() => null);

@@ -39,7 +39,11 @@ function fixture() {
       launcherParticipant: {},
       stateParticipant: {},
       freezeParticipant,
-      ack: { persistenceEnabled: true, revision: 1 },
+      ack: {
+        persistenceEnabled: true,
+        revision: 1,
+        processIdentity: { pid: 8201, startedAt: "Fri Jul 17 16:40:00 2026" },
+      },
     },
   };
 }

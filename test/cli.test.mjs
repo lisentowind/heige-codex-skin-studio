@@ -1173,11 +1173,26 @@ test("production readiness verifier preserves the real handshake through wait th
     transitionNonce: "migration-ready-7",
     handshakeRequest: { notBefore: Date.parse(published.createdAt) },
   };
-  assert.equal(await verifier.verify(expected), true);
+  assert.deepEqual(await verifier.verify(expected), { pid: 73001, startedAt });
   assert.notEqual(await readBackgroundHandshake({ stateRoot }), null);
-  assert.equal(await verifier.consume(expected), true);
+  assert.deepEqual(await verifier.consume(expected), { pid: 73001, startedAt });
   assert.equal(await readBackgroundHandshake({ stateRoot }), null);
-  assert.equal(await verifier.consume(expected), false);
+  assert.equal(await verifier.consume(expected), null);
+});
+
+test("production readiness verifier rejects a process replacement between wait and consume", async () => {
+  const first = { pid: 73001, startedAt: "Fri Jul 17 16:00:00 2026" };
+  const replacement = { pid: 73002, startedAt: "Fri Jul 17 16:00:01 2026" };
+  const verifier = createBackgroundReadinessVerifier({
+    stateRoot: "/private/state",
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    wait: async () => ({ outcome: "ready", ...first }),
+    consume: async () => ({ outcome: "ready", ...replacement }),
+  });
+  const expected = { revision: 7, transitionNonce: "migration-ready-7" };
+  assert.deepEqual(await verifier.verify(expected), first);
+  assert.equal(await verifier.consume(expected), null);
 });
 
 test("offline disable commits authority and a non-retained native session before unregister verification", async () => {
@@ -1663,6 +1678,10 @@ function createEphemeralHandoffHarness({ persistenceEnabled, revision }) {
   let backgroundAck = null;
   let nonce = 0;
   let backgroundController;
+  const backgroundProcessIdentity = {
+    pid: 9102,
+    startedAt: "Fri Jul 17 16:30:00 2026",
+  };
 
   const exactAck = (expected) => (
     backgroundAck !== null &&
@@ -1767,12 +1786,15 @@ function createEphemeralHandoffHarness({ persistenceEnabled, revision }) {
       assert.deepEqual(input.handshakeRequest, pendingHandshake);
       const verified = exactAck(input);
       if (verified) events.push("foreground:verified-exact-ack");
-      return verified;
+      return verified ? structuredClone(backgroundProcessIdentity) : null;
     },
     inspectBackground: async (expected) => ({
       registered: backgroundRegistered,
       running: backgroundRegistered,
       loaded: backgroundRegistered && exactAck(expected),
+      processIdentity: backgroundRegistered && exactAck(expected)
+        ? structuredClone(backgroundProcessIdentity)
+        : null,
     }),
     unregisterBackground: async () => {
       backgroundRegistered = false;

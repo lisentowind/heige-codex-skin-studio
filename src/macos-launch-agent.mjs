@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:p
 import { promisify } from "node:util";
 
 import { validateKnownOuterTransactionDocument } from "./outer-transaction-validator.mjs";
+import { readProcessIdentity, sameProcessIdentity } from "./process-identity.mjs";
 
 const execFileAsync = promisify(execFileCallback);
 
@@ -51,6 +52,7 @@ const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
   "hardCrashAt",
   "rollbackFaultAt",
   "processExists",
+  "readProcessIdentity",
   "wait",
   "journalPath",
   "freezeJournalPath",
@@ -481,6 +483,9 @@ function normalizedOptions(options = {}) {
     fs: testMode ? (options.fs ?? nodeFs) : nodeFs,
     readPlist: testMode ? options.readPlist : undefined,
     processExists: testMode ? (options.processExists ?? defaultProcessExists) : defaultProcessExists,
+    readProcessIdentity: testMode
+      ? (options.readProcessIdentity ?? ((pid) => readProcessIdentity(pid, { platform: "darwin" })))
+      : ((pid) => readProcessIdentity(pid, { platform: "darwin" })),
     wait: testMode
       ? (options.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))
       : ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
@@ -1785,6 +1790,26 @@ export async function inspectLaunchAgent(input = {}) {
     plistLabel: plist?.Label ?? null,
     loaded: await isLoaded(options),
   };
+}
+
+export async function inspectLaunchAgentProcessIdentity(input = {}) {
+  const options = normalizedOptions(input);
+  assertLabel(options.label);
+  launchDomain(options);
+  const firstJob = await inspectLoadedJob(options, options.label);
+  if (!firstJob.loaded || firstJob.pid === null) return null;
+  const firstIdentity = await options.readProcessIdentity(firstJob.pid);
+  if (
+    firstIdentity?.pid !== firstJob.pid ||
+    typeof firstIdentity.startedAt !== "string" ||
+    firstIdentity.startedAt.length === 0
+  ) {
+    return null;
+  }
+  const secondJob = await inspectLoadedJob(options, options.label);
+  if (!secondJob.loaded || secondJob.pid !== firstJob.pid) return null;
+  const secondIdentity = await options.readProcessIdentity(secondJob.pid);
+  return sameProcessIdentity(firstIdentity, secondIdentity) ? { ...secondIdentity } : null;
 }
 
 export async function wakeControllerAgent(input = {}) {

@@ -44,6 +44,10 @@ function fixture({
     },
   };
   const freeze = { transactionId, operation: "freeze-stable-services" };
+  const readyProcessIdentity = {
+    pid: 8201,
+    startedAt: "Fri Jul 17 16:40:00 2026",
+  };
   const mark = (name, value) => {
     events.push(value === undefined ? name : [name, value]);
   };
@@ -171,11 +175,20 @@ function fixture({
       crashAfter("freeze-rollback-finalize");
     },
     finalizeFreeze: async (_descriptor, options) => mark("freeze-finalize", options),
+    verifyAckIdentity: async (identity) => {
+      mark("ack-identity-verify", identity);
+      return identity?.pid === readyProcessIdentity.pid &&
+        identity?.startedAt === readyProcessIdentity.startedAt;
+    },
     awaitExactReady: async (input) => {
       mark("ready", input.outerTransaction);
       crashAfter("ready");
       if (ready) return ready(input);
-      return { persistenceEnabled: true, revision: state.afterState.revision };
+      return {
+        persistenceEnabled: true,
+        revision: state.afterState.revision,
+        processIdentity: { ...readyProcessIdentity },
+      };
     },
     checkpoint: async (phase) => {
       mark("checkpoint", phase);
@@ -360,6 +373,38 @@ test("a crash after the global commit decision only rolls participants forward",
     fx.events.filter((entry) => ["state-finalize", "launcher-finalize", "tree-finalize"].includes(entry)).slice(-3),
     ["state-finalize", "launcher-finalize", "tree-finalize"],
   );
+});
+
+test("persistent commit durably binds the exact background PID and start time before commit", async () => {
+  const fx = fixture({ persistenceEnabled: true, crashAt: "after-commit-decision" });
+  await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /after-commit-decision/);
+  assert.deepEqual(fx.journal.ack, {
+    persistenceEnabled: true,
+    revision: 4,
+    processIdentity: {
+      pid: 8201,
+      startedAt: "Fri Jul 17 16:40:00 2026",
+    },
+  });
+  const verifyIndex = fx.events.findIndex((entry) =>
+    Array.isArray(entry) && entry[0] === "ack-identity-verify");
+  const commitIndex = fx.events.findIndex((entry) =>
+    Array.isArray(entry) && entry[0] === "journal-update" && entry[1] === "commit-decided");
+  assert.equal(verifyIndex >= 0 && verifyIndex < commitIndex, true);
+});
+
+test("postcommit recovery tolerates launchd PID replacement without reacquiring readiness", async () => {
+  const fx = fixture({ persistenceEnabled: true, crashAt: "after-commit-decision" });
+  await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /after-commit-decision/);
+  fx.deps.verifyAckIdentity = async () => false;
+  fx.deps.awaitExactReady = async () => {
+    throw new Error("postcommit recovery must not reacquire a PID-bound readiness ACK");
+  };
+
+  await recoverMacosInstallTransaction(fx.deps);
+
+  assert.equal(fx.journal, null);
+  assert.equal(fx.events.includes("state-finalize"), true);
 });
 
 for (const phase of [

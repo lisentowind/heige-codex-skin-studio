@@ -14,6 +14,7 @@ import {
   finalizeStableServiceFreeze,
   finalizeLegacyWatchdogMigration,
   inspectLaunchAgent,
+  inspectLaunchAgentProcessIdentity,
   migrateLegacyWatchdog,
   prepareStableServiceFreeze,
   registerControllerAgent,
@@ -534,6 +535,32 @@ test("test mode refuses both production labels", async (t) => {
     inspectLaunchAgent({ ...deps, label: CONTROLLER_LABEL, testMode: true }),
     /production label/i,
   );
+});
+
+test("launch-agent process ACK binds both launchd PID and process start time", async (t) => {
+  const deps = await fixture(t, { printPid: () => 8201 });
+  deps.loaded.add(deps.label);
+  const observed = await inspectLaunchAgentProcessIdentity({
+    ...deps,
+    readProcessIdentity: async (pid) => ({
+      pid,
+      startedAt: "Fri Jul 17 16:40:00 2026",
+    }),
+  });
+  assert.deepEqual(observed, {
+    pid: 8201,
+    startedAt: "Fri Jul 17 16:40:00 2026",
+  });
+});
+
+test("launch-agent process ACK fails closed when launchd replaces the PID during inspection", async (t) => {
+  let calls = 0;
+  const deps = await fixture(t, { printPid: () => (++calls < 2 ? 8201 : 8202) });
+  deps.loaded.add(deps.label);
+  assert.equal(await inspectLaunchAgentProcessIdentity({
+    ...deps,
+    readProcessIdentity: async (pid) => ({ pid, startedAt: `start-${pid}` }),
+  }), null);
 });
 
 test("test mode accepts only a random isolated controller label", async (t) => {

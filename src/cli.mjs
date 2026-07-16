@@ -963,6 +963,12 @@ export function createBackgroundReadinessVerifier({
   consume = consumeBackgroundHandshake,
 }) {
   let verified = null;
+  const processIdentity = (value) => (
+    Number.isSafeInteger(value?.pid) &&
+    value.pid > 0 &&
+    typeof value?.startedAt === "string" &&
+    value.startedAt.length > 0
+  ) ? { pid: value.pid, startedAt: value.startedAt } : null;
   const expected = ({ revision, transitionNonce }) => ({
     revision,
     transitionNonce,
@@ -981,8 +987,10 @@ export function createBackgroundReadinessVerifier({
         notBefore,
         readProcessIdentity: readIdentity,
       });
-      verified = { revision, transitionNonce, notBefore };
-      return observed.outcome === "ready";
+      const identity = observed.outcome === "ready" ? processIdentity(observed) : null;
+      if (identity === null) return null;
+      verified = { revision, transitionNonce, notBefore, identity };
+      return { ...identity };
     },
     async consume({ revision, transitionNonce } = {}) {
       if (
@@ -990,7 +998,7 @@ export function createBackgroundReadinessVerifier({
         verified.revision !== revision ||
         verified.transitionNonce !== transitionNonce
       ) {
-        return false;
+        return null;
       }
       const claim = verified;
       verified = null;
@@ -1002,9 +1010,14 @@ export function createBackgroundReadinessVerifier({
           notBefore: claim.notBefore,
           readProcessIdentity: readIdentity,
         });
-        return observed.outcome === "ready";
+        const identity = observed.outcome === "ready" ? processIdentity(observed) : null;
+        return identity !== null &&
+          identity.pid === claim.identity.pid &&
+          identity.startedAt === claim.identity.startedAt
+          ? { ...identity }
+          : null;
       } catch {
-        return false;
+        return null;
       }
     },
     discard() {
@@ -1191,10 +1204,14 @@ export async function productionController({
         });
         status = { ...value, ...normalizeWindowsBackgroundStatus(value) };
       }
-      const loaded = status.registered === true &&
-        status.running === true &&
-        await readiness.consume(expected);
-      return { ...status, loaded };
+      const processIdentity = status.registered === true && status.running === true
+        ? await readiness.consume(expected)
+        : null;
+      return {
+        ...status,
+        loaded: processIdentity !== null,
+        processIdentity,
+      };
     },
     wakeBackground: (request) => platform === "darwin"
       ? wakeControllerAgent()
@@ -1775,6 +1792,7 @@ async function productionMigrateLegacy({ deps, paths, roots, port }) {
       return withStoppedController(controller, () => controller.setPersistence({
         expectedRevision: expectedState.revision,
         enabled: true,
+        includeProcessIdentity: true,
       }));
     },
   };
@@ -2260,6 +2278,7 @@ export async function runCli(argv, overrides = {}) {
     return withStoppedController(controller, () => controller.setPersistence({
       expectedRevision,
       enabled,
+      includeProcessIdentity: installAuthorization !== null,
     }));
   }
   if (command === "restore") {

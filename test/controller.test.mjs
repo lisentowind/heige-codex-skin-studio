@@ -89,6 +89,11 @@ function fixture(overrides = {}) {
     : clone(CURRENT_PROCESS);
   let serverClosed = false;
   let backgroundRegistered = overrides.backgroundRegistered ?? state.persistenceEnabled;
+  let backgroundIdentityVerified = false;
+  const backgroundProcessIdentity = overrides.backgroundProcessIdentity ?? {
+    pid: 8101,
+    startedAt: "Fri Jul 17 16:00:00 2026",
+  };
   let health = overrides.health ?? { healthy: true };
   const calls = {
     lease: [],
@@ -244,10 +249,15 @@ function fixture(overrides = {}) {
     },
     inspectBackground: async (expected) => {
       calls.inspectBackground.push(clone(expected));
+      const ready = backgroundRegistered &&
+        (backgroundIdentityVerified || overrides.backgroundReady !== false);
       return {
         registered: backgroundRegistered,
         running: backgroundRegistered,
-        loaded: backgroundRegistered && overrides.backgroundReady !== false,
+        loaded: ready,
+        processIdentity: ready
+          ? clone(backgroundProcessIdentity)
+          : null,
       };
     },
     wakeBackground: async () => {
@@ -259,7 +269,8 @@ function fixture(overrides = {}) {
       calls.backgroundSequence.push("verify");
       calls.handshake.push(clone(input));
       if (overrides.handshakeFailure) throw new Error("后台控制器启动失败");
-      return true;
+      backgroundIdentityVerified = true;
+      return clone(backgroundProcessIdentity);
     },
     newTransitionNonce: () => `controller-transition-${++nonceIndex}`,
     fault: async (point) => {
@@ -836,6 +847,22 @@ test("enable ACK follows registration wake handshake and clears current-session 
   assert.equal(fx.transition, null);
 });
 
+test("authorized persistence enable returns the exact acknowledged background identity", async () => {
+  const fx = fixture({ state: { persistenceEnabled: false } });
+  assert.deepEqual(await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 1,
+    enabled: true,
+    includeProcessIdentity: true,
+  }), {
+    persistenceEnabled: true,
+    revision: 2,
+    processIdentity: {
+      pid: 8101,
+      startedAt: "Fri Jul 17 16:00:00 2026",
+    },
+  });
+});
+
 test("enable releases the operation lease before wake and exact background handshake", async () => {
   const fx = fixture({
     state: { persistenceEnabled: false },
@@ -882,7 +909,7 @@ test("enable releases the operation lease before wake and exact background hands
     ]);
     assert.equal(revision, 2);
     assert.equal(transitionNonce, "controller-transition-1");
-    return true;
+    return { pid: 8101, startedAt: "Fri Jul 17 16:00:00 2026" };
   };
 
   const result = await createSkinController(fx.deps).setPersistence({

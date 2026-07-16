@@ -138,12 +138,17 @@ function validateFreezeParticipant(value, document, expectedPath) {
 function validateAck(value) {
   if (value === null) return null;
   if (
-    !exactKeys(value, ["persistenceEnabled", "revision"]) ||
+    !exactKeys(value, ["persistenceEnabled", "processIdentity", "revision"]) ||
     value.persistenceEnabled !== true ||
     !Number.isSafeInteger(value.revision) ||
-    value.revision < 0
+    value.revision < 0 ||
+    !exactKeys(value.processIdentity, ["pid", "startedAt"]) ||
+    !Number.isSafeInteger(value.processIdentity.pid) ||
+    value.processIdentity.pid <= 0 ||
+    typeof value.processIdentity.startedAt !== "string" ||
+    value.processIdentity.startedAt.length === 0
   ) throw new Error("macOS install exact ACK schema is invalid");
-  return value;
+  return { ...value, processIdentity: { ...value.processIdentity } };
 }
 
 function phaseAtLeast(phase, expected) {

@@ -79,6 +79,7 @@ function assertDependencies(dependencies) {
     "rollbackTree",
     "stopFreezeForRollback",
     "updateJournal",
+    "verifyAckIdentity",
     "withCoordinatorLock",
   ];
   for (const name of names) {
@@ -91,6 +92,22 @@ function assertDependencies(dependencies) {
 
 async function update(deps, journal, changes) {
   return deps.updateJournal(journal, changes);
+}
+
+function exactReadyAck(ready, expectedState) {
+  if (
+    ready?.persistenceEnabled !== true ||
+    ready?.revision !== expectedState.revision ||
+    !Number.isSafeInteger(ready?.processIdentity?.pid) ||
+    ready.processIdentity.pid <= 0 ||
+    typeof ready.processIdentity.startedAt !== "string" ||
+    ready.processIdentity.startedAt.length === 0
+  ) throw new Error("macOS install did not receive the exact controller readiness ACK");
+  return {
+    persistenceEnabled: true,
+    revision: ready.revision,
+    processIdentity: { ...ready.processIdentity },
+  };
 }
 
 async function finishCommittedInstall(deps, journal) {
@@ -252,20 +269,17 @@ async function createFreshInstall(input, deps, launcherLock) {
         outerTransaction,
         port: input.port,
       });
-      if (
-        ready?.persistenceEnabled !== true ||
-        ready?.revision !== state.afterState.revision
-      ) throw new Error("macOS install did not receive the exact controller readiness ACK");
+      const ack = exactReadyAck(ready, state.afterState);
       journal = await update(deps, journal, { phase: "service-prepared" });
       await deps.checkpoint("service-prepared", journal);
       journal = await update(deps, journal, {
-        ack: {
-          persistenceEnabled: true,
-          revision: ready.revision,
-        },
+        ack,
         phase: "ready-acked",
       });
       await deps.checkpoint("ready-acked", journal);
+      if (!await deps.verifyAckIdentity(ack.processIdentity)) {
+        throw new Error("macOS install controller ACK changed before commit");
+      }
     }
 
     journal = await update(deps, journal, {
@@ -458,6 +472,10 @@ export async function productionMacosInstallDependencies({
       descriptor,
       options,
     ),
+    verifyAckIdentity: async (expected) => {
+      const observed = await launchAgent.inspectLaunchAgentProcessIdentity();
+      return observed?.pid === expected?.pid && observed?.startedAt === expected?.startedAt;
+    },
     awaitExactReady: async ({ expectedState, outerTransaction, port }) => {
       const { stdout } = await execFile(process.execPath, [
         join(targetRoot, "src", "cli.mjs"),
