@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -406,6 +406,50 @@ test("detached lifecycle propagates an asynchronous spawn error", async () => {
     },
   });
   await assert.rejects(queued, /ENOENT/);
+});
+
+test("macOS launcher defaults to the stored theme and uses an explicit theme only when supplied", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "heige-apply-launcher-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scriptsRoot = join(root, "scripts");
+  const launcher = join(scriptsRoot, "apply.command");
+  const runner = join(scriptsRoot, "lib/run-cli.zsh");
+  const capture = join(root, "arguments.txt");
+  await mkdir(dirname(runner), { recursive: true });
+  await writeFile(
+    launcher,
+    await readFile(join(repositoryRoot, "scripts/apply.command"), "utf8"),
+  );
+  await writeFile(runner, '#!/bin/zsh\nprint -rl -- "$@" > "$HEIGE_CAPTURE"\n');
+  await chmod(launcher, 0o755);
+  await chmod(runner, 0o755);
+
+  await run("/bin/zsh", [launcher], {
+    env: { PATH: "/usr/bin:/bin", HEIGE_CAPTURE: capture },
+  });
+  assert.deepEqual((await readFile(capture, "utf8")).trim().split("\n"), [
+    "apply",
+    "--prefer-stored",
+    "--port",
+    "9341",
+  ]);
+
+  await run("/bin/zsh", [launcher, "genshin-night"], {
+    env: { PATH: "/usr/bin:/bin", HEIGE_CAPTURE: capture },
+  });
+  assert.deepEqual((await readFile(capture, "utf8")).trim().split("\n"), [
+    "apply",
+    "--theme",
+    "genshin-night",
+    "--port",
+    "9341",
+  ]);
+  await assert.rejects(
+    run("/bin/zsh", [launcher, "one", "two"], {
+      env: { PATH: "/usr/bin:/bin", HEIGE_CAPTURE: capture },
+    }),
+    (error) => error.code === 64,
+  );
 });
 
 test("lifecycle shell entrypoints contain no independent process or service mutation", async () => {

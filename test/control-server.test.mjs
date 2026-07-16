@@ -119,6 +119,7 @@ async function startFixture(t, overrides = {}) {
     allowedOrigins: new Set([APP_ORIGIN]),
     readState,
     setPersistence,
+    onPersistenceResponseFinished: overrides.onPersistenceResponseFinished,
     host: "127.0.0.1",
     port: 0,
     maxBodyBytes: overrides.maxBodyBytes ?? 1024,
@@ -129,6 +130,20 @@ async function startFixture(t, overrides = {}) {
   t.after(() => server.close());
   return { server, calls, getState: () => structuredClone(state) };
 }
+
+test("successful persistence callback runs only after the complete HTTP response finishes", async (t) => {
+  const finished = [];
+  const fx = await startFixture(t, {
+    state: { persistenceEnabled: false, revision: 3 },
+    onPersistenceResponseFinished: async (state) => finished.push(state),
+  });
+  const response = await request(fx.server, {
+    body: { revision: 3, persistenceEnabled: true },
+  });
+  assert.equal(response.status, 200);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(finished, [{ persistenceEnabled: true, revision: 4 }]);
+});
 
 function backendError({ code, persistenceEnabled, revision }) {
   const error = new Error(

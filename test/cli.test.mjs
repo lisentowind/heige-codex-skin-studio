@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 
 import {
+  acquireEphemeralControllerLease,
   controllerInjectionPreference,
   createBackgroundReadinessVerifier,
   createWindowsRuntimeProbe,
   enforceLegacyMigrationFence,
+  enforceMacosInstallFence,
   migrateLegacyLifecycle,
   normalizeWindowsBackgroundStatus,
   offlineDisablePersistence,
+  parseMacosInstallAuthorization,
   probeWindowsCdpProcess,
   productionPreflight,
   runCli,
@@ -17,6 +21,8 @@ import {
   waitForAppliedSkin,
 } from "../src/cli.mjs";
 
+import { CODEX_RENDERER_ORIGIN, DEFAULT_THEME_ID } from "../src/constants.mjs";
+import { createSkinController } from "../src/controller.mjs";
 import { validateWindowsRuntimeSnapshot } from "../src/windows-runtime.mjs";
 
 function deps(overrides = {}) {
@@ -397,6 +403,76 @@ test("apply prefer-stored uses authoritative lastNonNative only when Theme is om
   assert.equal(explicit.calls.registerEphemeral[0].themeId, "miku-488137");
 });
 
+test("launcher restores the last theme after a native restart without enabling persistence", async () => {
+  let runtime = "cdp";
+  const lastThemeId = "genshin-night";
+  const fx = lifecycleDeps({
+    initialState: {
+      schemaVersion: 2,
+      persistenceEnabled: true,
+      selectedThemeId: lastThemeId,
+      lastNonNativeThemeId: lastThemeId,
+      controlToken: Buffer.alloc(32, 30).toString("base64url"),
+      lastTransitionNonce: null,
+      revision: 5,
+    },
+    listThemes: async () => [
+      { id: "miku-488137", name: "Miku", path: "/bundle/themes/miku-488137" },
+      { id: lastThemeId, name: "Genshin", path: `/bundle/themes/${lastThemeId}` },
+    ],
+    preflightLifecycle: async ({ requirePort }) => {
+      if (requirePort && runtime === "native") {
+        const error = new Error("当前 Codex 是原生启动");
+        error.code = "CDP_NOT_OWNED";
+        throw error;
+      }
+      return {
+        appPath: "/Applications/Codex.app",
+        nodePath: "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+        process: {
+          pid: runtime === "native" ? 5252 : 4242,
+          executablePath: "/Applications/Codex.app/Contents/MacOS/Codex",
+          startedAt: runtime === "native"
+            ? "Fri Jul 17 09:00:00 2026"
+            : "Fri Jul 17 08:00:00 2026",
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(await runCli(["set-persistence", "false"], fx.deps), {
+    persistenceEnabled: false,
+    revision: 6,
+  });
+  assert.equal(fx.state.lastNonNativeThemeId, lastThemeId);
+
+  runtime = "native";
+  assert.deepEqual(await runCli(["apply", "--prefer-stored"], fx.deps), {
+    mode: "restarting",
+    persistenceEnabled: false,
+    queued: true,
+  });
+  assert.deepEqual(fx.calls.detached.at(-1).afterLaunch, {
+    command: "apply",
+    themeId: lastThemeId,
+  });
+  assert.equal(fx.state.persistenceEnabled, false);
+
+  runtime = "cdp";
+  assert.deepEqual(await runCli(["apply", "--theme", lastThemeId], fx.deps), {
+    mode: "active",
+    persistenceEnabled: false,
+  });
+  assert.equal(fx.calls.registerEphemeral.at(-1).themeId, lastThemeId);
+  assert.equal(fx.state.persistenceEnabled, false, "launcher apply must remain current-session only");
+
+  assert.deepEqual(await runCli(["set-persistence", "true"], fx.deps), {
+    persistenceEnabled: true,
+    revision: 7,
+  });
+  assert.equal(fx.state.persistenceEnabled, true, "only the user's later switch enables persistence");
+});
+
 test("apply confirmation rejects a partial multi-window status result", async () => {
   const partial = {
     statuses: [{ installed: true, themeId: "miku-488137" }],
@@ -721,6 +797,146 @@ test("legacy migration fence rejects every unrelated mutation and admits only it
     }),
     (error) => error.code === "LEGACY_MIGRATION_IN_PROGRESS",
   );
+});
+
+test("macOS install fence admits only exact foreground readiness and its one-shot production background", async () => {
+  const state = {
+    schemaVersion: 2,
+    persistenceEnabled: true,
+    selectedThemeId: "miku-488137",
+    lastNonNativeThemeId: "miku-488137",
+    controlToken: Buffer.alloc(32, 31).toString("base64url"),
+    lastTransitionNonce: null,
+    revision: 4,
+  };
+  const journalPath = "/private/state/macos-install.json";
+  const journal = {
+    transactionId: "123e4567-e89b-42d3-a456-426614174000",
+    decision: "undecided",
+    phase: "activation-planned",
+    activation: "controller",
+    createdAt: "2026-07-17T08:00:00.000Z",
+    stateParticipant: { afterState: state },
+  };
+  let transition = null;
+  const dependencies = {
+    readJournal: async () => structuredClone(journal),
+    readState: async () => structuredClone(state),
+    readTransition: async () => structuredClone(transition),
+  };
+  const authorization = parseMacosInstallAuthorization(JSON.stringify({
+    role: "macos-install-ready-foreground",
+    transactionId: journal.transactionId,
+    journalPath,
+    expectedRevision: state.revision,
+    expectedControlToken: state.controlToken,
+  }));
+  const base = {
+    journalPath,
+    statePath: "/private/state/state.json",
+    transitionPath: "/private/state/transition.json",
+    lease: { genuine: true },
+    dependencies,
+  };
+
+  for (const operation of [
+    "cli:prepare-state",
+    "cli:disable-persistence-offline",
+    "controller:restore",
+    "controller:tick",
+    "controller:pause",
+    "controller:compensate-unacked-enable",
+  ]) {
+    await assert.rejects(
+      enforceMacosInstallFence({ ...base, operation }),
+      (error) => error.code === "MACOS_INSTALL_IN_PROGRESS",
+      operation,
+    );
+  }
+  assert.equal((await enforceMacosInstallFence({
+    ...base,
+    operation: "controller:start",
+    authorization,
+  })).role, "macos-install-ready-foreground");
+  assert.equal((await enforceMacosInstallFence({
+    ...base,
+    operation: "controller:set-persistence",
+    authorization,
+    requestContext: { desiredPersistenceEnabled: true, expectedRevision: state.revision },
+  })).role, "macos-install-ready-foreground");
+  assert.equal((await enforceMacosInstallFence({
+    ...base,
+    operation: "controller:finalize-enable",
+    authorization,
+    requestContext: { desiredPersistenceEnabled: true, expectedRevision: state.revision },
+  })).role, "macos-install-ready-foreground");
+  await assert.rejects(enforceMacosInstallFence({
+    ...base,
+    operation: "controller:set-persistence",
+    authorization,
+    requestContext: { desiredPersistenceEnabled: false, expectedRevision: state.revision },
+  }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+
+  const startupHandshake = {
+    revision: state.revision,
+    transitionNonce: "outer-ready",
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    createdAt: "2026-07-17T08:00:01.000Z",
+  };
+  assert.equal((await enforceMacosInstallFence({
+    ...base,
+    operation: "controller:start",
+    startupHandshake,
+    backgroundIdentity: "com.heige.codex-skin-controller",
+  })).role, "macos-install-ready-background");
+  await assert.rejects(enforceMacosInstallFence({
+    ...base,
+    operation: "controller:start",
+    startupHandshake: { ...startupHandshake, backgroundIdentity: "foreign" },
+    backgroundIdentity: "com.heige.codex-skin-controller",
+  }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+
+  for (const [decision, phase] of [
+    ["commit", "commit-decided"],
+    ["rollback", "rollback-decided"],
+  ]) {
+    journal.decision = decision;
+    journal.phase = phase;
+    await assert.rejects(enforceMacosInstallFence({
+      ...base,
+      operation: "controller:start",
+      authorization,
+    }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+  }
+  journal.decision = "undecided";
+  journal.phase = "activation-planned";
+
+  transition = { operation: "foreign-transition" };
+  await assert.rejects(enforceMacosInstallFence({
+    ...base,
+    operation: "controller:finalize-enable",
+    authorization,
+    requestContext: { desiredPersistenceEnabled: true, expectedRevision: state.revision },
+  }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+});
+
+test("macOS install authorization parser rejects unknown fields and noncanonical secrets", () => {
+  const valid = {
+    role: "macos-install-ready-foreground",
+    transactionId: "123e4567-e89b-42d3-a456-426614174000",
+    journalPath: "/private/state/macos-install.json",
+    expectedRevision: 4,
+    expectedControlToken: Buffer.alloc(32, 32).toString("base64url"),
+  };
+  assert.deepEqual(parseMacosInstallAuthorization(JSON.stringify(valid)), valid);
+  for (const value of [
+    { ...valid, extra: true },
+    { ...valid, expectedControlToken: `${valid.expectedControlToken}=` },
+    { ...valid, journalPath: "/private/state/../state/macos-install.json" },
+  ]) {
+    assert.throws(() => parseMacosInstallAuthorization(JSON.stringify(value)), /schema|authorization/i);
+  }
 });
 
 test("production readiness verifier preserves the real handshake through wait then consumes it exactly once", async (t) => {
@@ -1109,6 +1325,403 @@ test("background login with no one-shot request follows the latest revision with
   });
   assert.equal(result.revision, 19, "a later theme CAS revision must not break login startup");
   assert.deepEqual(events, ["claim", "start", "stop"]);
+});
+
+function postControl(control, input) {
+  const endpoint = new URL(control.endpoint);
+  const payload = JSON.stringify(input);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: endpoint.hostname,
+      port: Number(endpoint.port),
+      path: endpoint.pathname,
+      method: "POST",
+      agent: false,
+      headers: {
+        Host: endpoint.host,
+        Origin: CODEX_RENDERER_ORIGIN,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+        "X-HeiGe-Control-Token": control.token,
+        Connection: "close",
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+      }));
+    });
+    request.once("error", reject);
+    request.end(payload);
+  });
+}
+
+function createEphemeralHandoffHarness({ persistenceEnabled, revision }) {
+  const processIdentity = {
+    pid: 4242,
+    executablePath: "/Applications/Codex.app/Contents/MacOS/Codex",
+    startedAt: "Fri Jul 17 08:00:00 2026",
+  };
+  const controlToken = Buffer.alloc(32, 23).toString("base64url");
+  const backgroundIdentity = "com.heige.codex-skin-controller";
+  const events = [];
+  const endpoints = {};
+  let state = {
+    schemaVersion: 2,
+    persistenceEnabled,
+    selectedThemeId: DEFAULT_THEME_ID,
+    lastNonNativeThemeId: DEFAULT_THEME_ID,
+    controlToken,
+    lastTransitionNonce: null,
+    revision,
+  };
+  let session = {
+    schemaVersion: 1,
+    mode: "active",
+    process: structuredClone(processIdentity),
+    activeThemeId: DEFAULT_THEME_ID,
+    keepUntilProcessExit: !persistenceEnabled,
+  };
+  let transition = null;
+  let renderer = null;
+  let backgroundRegistered = persistenceEnabled;
+  let pendingHandshake = null;
+  let backgroundAck = null;
+  let nonce = 0;
+  let backgroundController;
+
+  const exactAck = (expected) => (
+    backgroundAck !== null &&
+    expected !== null &&
+    backgroundAck.revision === expected.revision &&
+    backgroundAck.transitionNonce === expected.transitionNonce &&
+    backgroundAck.backgroundIdentity === backgroundIdentity &&
+    backgroundAck.endpoint === endpoints.background &&
+    renderer?.owner === "background" &&
+    renderer.control.endpoint === endpoints.background
+  );
+
+  const dependencies = (owner, backgroundProcess) => ({
+    backgroundProcess,
+    withLease: async (operation, action, context = {}) => {
+      if (owner === "background" && operation === "controller:start") {
+        assert.deepEqual(context.startupHandshake, pendingHandshake);
+        events.push("background:claimed-exact-start");
+      }
+      return action(Object.freeze({ operation, owner }));
+    },
+    readState: async () => structuredClone(state),
+    readSession: async () => structuredClone(session),
+    readTransition: async () => structuredClone(transition),
+    writeJournal: async (value) => {
+      transition = structuredClone(value);
+    },
+    compareAndUpdate: async ({ expectedRevision, mutate }) => {
+      assert.equal(state.revision, expectedRevision);
+      state = {
+        ...structuredClone(mutate(structuredClone(state))),
+        revision: state.revision + 1,
+      };
+      return structuredClone(state);
+    },
+    writeSession: async (value) => {
+      session = structuredClone(value);
+    },
+    clearJournal: async (expectedNonce) => {
+      assert.equal(transition?.nonce, expectedNonce);
+      transition = null;
+      return true;
+    },
+    recoverTransition: async () => ({
+      state: structuredClone(state),
+      session: structuredClone(session),
+      recovered: false,
+    }),
+    probeCurrentProcess: async () => structuredClone(processIdentity),
+    validatePortOwner: async (candidate) => candidate?.pid === processIdentity.pid,
+    inspectSkin: async () => ({ healthy: true }),
+    injectSkin: async (input) => {
+      endpoints[owner] = input.control.endpoint;
+      renderer = { owner, control: structuredClone(input.control) };
+      events.push(`${owner}:injected:${input.control.endpoint}`);
+      return { applied: 1, targets: ["main"], failed: [] };
+    },
+    removeSkin: async () => ({ removed: 1 }),
+    preflightEnable: async () => true,
+    registerBackground: async () => {
+      backgroundRegistered = true;
+      events.push("foreground:registered-background");
+      return { registered: true };
+    },
+    prepareBackgroundHandshake: async ({ revision: expectedRevision, transitionNonce }) => {
+      pendingHandshake = {
+        schemaVersion: 1,
+        revision: expectedRevision,
+        transitionNonce,
+        platform: "darwin",
+        backgroundIdentity,
+        createdAt: "2026-07-17T08:00:00.000Z",
+      };
+      events.push("foreground:prepared-exact-start");
+      return structuredClone(pendingHandshake);
+    },
+    wakeBackground: async ({ revision: expectedRevision, transitionNonce }) => {
+      assert.equal(expectedRevision, pendingHandshake?.revision);
+      assert.equal(transitionNonce, pendingHandshake?.transitionNonce);
+      const started = await backgroundController.start({
+        startupHandshake: structuredClone(pendingHandshake),
+      });
+      assert.equal(started.persistenceEnabled, true);
+      assert.equal(started.revision, pendingHandshake.revision);
+      assert.equal(renderer?.owner, "background");
+      const endpointReady = await postControl(renderer.control, {
+        revision: state.revision,
+        persistenceEnabled: true,
+      });
+      assert.equal(endpointReady.status, 200);
+      assert.equal(endpointReady.body.ok, true);
+      events.push("background:endpoint-ready");
+      backgroundAck = {
+        revision: started.revision,
+        transitionNonce: pendingHandshake.transitionNonce,
+        backgroundIdentity,
+        endpoint: renderer.control.endpoint,
+      };
+      events.push("background:published-exact-ack");
+    },
+    verifyBackgroundHandshake: async (input) => {
+      assert.deepEqual(input.handshakeRequest, pendingHandshake);
+      const verified = exactAck(input);
+      if (verified) events.push("foreground:verified-exact-ack");
+      return verified;
+    },
+    inspectBackground: async (expected) => ({
+      registered: backgroundRegistered,
+      running: backgroundRegistered,
+      loaded: backgroundRegistered && exactAck(expected),
+    }),
+    unregisterBackground: async () => {
+      backgroundRegistered = false;
+      return { registered: false, loaded: false };
+    },
+    newTransitionNonce: () => `handoff-${++nonce}`,
+    fault: async () => {},
+    logger: {
+      error: async () => true,
+      info: async () => true,
+      warn: async () => true,
+    },
+    launcherName: "HeiGe 皮肤启动器",
+    controlPort: 0,
+  });
+
+  const ephemeralController = createSkinController(dependencies("ephemeral", false));
+  backgroundController = createSkinController(dependencies("background", true));
+  const observedEphemeral = {
+    start: (...args) => ephemeralController.start(...args),
+    setPersistence: (...args) => ephemeralController.setPersistence(...args),
+    tick: async (...args) => {
+      events.push("ephemeral:next-tick");
+      const result = await ephemeralController.tick(...args);
+      events.push(`ephemeral:tick:${result.action}`);
+      return result;
+    },
+    stop: async () => {
+      events.push("ephemeral:stop");
+      return ephemeralController.stop();
+    },
+  };
+
+  return {
+    backgroundController,
+    ephemeralController: observedEphemeral,
+    events,
+    endpoints,
+    get renderer() { return structuredClone(renderer); },
+    get state() { return structuredClone(state); },
+    close: async () => {
+      await ephemeralController.stop();
+      await backgroundController.stop();
+    },
+  };
+}
+
+test("ephemeral startup on an already-enabled state repairs background once and exits", async () => {
+  const events = [];
+  const result = await runControllerProcess({
+    start: async () => {
+      events.push("start");
+      return {
+        action: "inject",
+        mode: "active",
+        persistenceEnabled: true,
+        revision: 9,
+      };
+    },
+    setPersistence: async (input) => {
+      events.push(["set", input]);
+      return { persistenceEnabled: true, revision: 9 };
+    },
+    stop: async () => events.push("stop"),
+  }, {
+    ephemeralRuntime: true,
+    paths: { stateRoot: "/private/state" },
+  });
+  assert.equal(result.action, "handoff");
+  assert.deepEqual(events, [
+    "start",
+    ["set", { expectedRevision: 9, enabled: true }],
+    "stop",
+  ]);
+});
+
+test("ephemeral controller observes an externally enabled state, repairs background, and exits", async () => {
+  const events = [];
+  const result = await runControllerProcess({
+    start: async () => ({
+      action: "idle",
+      mode: "active",
+      persistenceEnabled: false,
+      revision: 8,
+    }),
+    tick: async () => ({
+      action: "repair",
+      mode: "active",
+      persistenceEnabled: true,
+      revision: 9,
+    }),
+    setPersistence: async (input) => {
+      events.push(["set", input]);
+      return { persistenceEnabled: true, revision: 9 };
+    },
+    stop: async () => events.push("stop"),
+  }, {
+    ephemeralRuntime: true,
+    paths: { stateRoot: "/private/state" },
+    wait: async () => {},
+  });
+  assert.equal(result.action, "handoff");
+  assert.deepEqual(events, [
+    ["set", { expectedRevision: 9, enabled: true }],
+    "stop",
+  ]);
+});
+
+test("HTTP enable hands the live renderer endpoint to the exact background before the next ephemeral tick", async (t) => {
+  const fx = createEphemeralHandoffHarness({ persistenceEnabled: false, revision: 1 });
+  t.after(() => fx.close());
+  let waitCount = 0;
+  let ephemeralControl;
+  const result = await runControllerProcess(fx.ephemeralController, {
+    ephemeralRuntime: true,
+    paths: { stateRoot: "/private/state" },
+    wait: async () => {
+      waitCount += 1;
+      assert.equal(waitCount, 1, "handoff must occur on the first tick after the HTTP response");
+      assert.equal(fx.renderer?.owner, "ephemeral");
+      ephemeralControl = fx.renderer.control;
+      const response = await postControl(ephemeralControl, {
+        revision: 1,
+        persistenceEnabled: true,
+      });
+      assert.deepEqual(response, {
+        status: 200,
+        body: { ok: true, persistenceEnabled: true, revision: 2 },
+      });
+      fx.events.push("client:response-complete");
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  });
+
+  assert.equal(result.action, "handoff");
+  assert.equal(result.persistenceEnabled, true);
+  assert.equal(result.revision, 2);
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.renderer.owner, "background");
+  assert.equal(fx.renderer.control.endpoint, fx.endpoints.background);
+  assert.notEqual(fx.endpoints.background, fx.endpoints.ephemeral);
+
+  const order = (event) => fx.events.indexOf(event);
+  assert.ok(order("background:endpoint-ready") < order("background:published-exact-ack"));
+  assert.ok(order("background:published-exact-ack") < order("foreground:verified-exact-ack"));
+  assert.ok(order("foreground:verified-exact-ack") < order("client:response-complete"));
+  assert.ok(order("client:response-complete") < order("ephemeral:next-tick"));
+  assert.ok(order("ephemeral:tick:handoff") < order("ephemeral:stop"));
+
+  const finalResponse = await postControl(fx.renderer.control, {
+    revision: 2,
+    persistenceEnabled: true,
+  });
+  assert.equal(finalResponse.status, 200);
+  assert.equal(finalResponse.body.ok, true);
+  await assert.rejects(
+    postControl(ephemeralControl, { revision: 2, persistenceEnabled: true }),
+    /ECONNREFUSED|ECONNRESET|socket hang up/,
+  );
+});
+
+test("already-enabled apply exits only after the background owns a reachable renderer endpoint", async (t) => {
+  const fx = createEphemeralHandoffHarness({ persistenceEnabled: true, revision: 9 });
+  t.after(() => fx.close());
+  const result = await runControllerProcess(fx.ephemeralController, {
+    ephemeralRuntime: true,
+    paths: { stateRoot: "/private/state" },
+  });
+
+  assert.deepEqual(result, {
+    action: "handoff",
+    mode: "active",
+    persistenceEnabled: true,
+    revision: 9,
+  });
+  assert.equal(fx.renderer.owner, "background");
+  assert.equal(fx.renderer.control.endpoint, fx.endpoints.background);
+  assert.notEqual(fx.endpoints.background, fx.endpoints.ephemeral);
+  const backgroundInjected = fx.events.findIndex((event) =>
+    event.startsWith("background:injected:"));
+  assert.ok(backgroundInjected >= 0);
+  assert.ok(backgroundInjected < fx.events.indexOf("background:published-exact-ack"));
+  assert.ok(
+    fx.events.indexOf("foreground:verified-exact-ack") <
+      fx.events.indexOf("ephemeral:stop"),
+  );
+
+  const finalResponse = await postControl(fx.renderer.control, {
+    revision: 9,
+    persistenceEnabled: true,
+  });
+  assert.deepEqual(finalResponse, {
+    status: 200,
+    body: { ok: true, persistenceEnabled: true, revision: 9 },
+  });
+  await assert.rejects(
+    postControl({ ...fx.renderer.control, endpoint: fx.endpoints.ephemeral }, {
+      revision: 9,
+      persistenceEnabled: true,
+    }),
+    /ECONNREFUSED|ECONNRESET|socket hang up/,
+  );
+});
+
+test("ephemeral controller lease reuses one exact live singleton and recovers after release", async (t) => {
+  const { mkdtemp, realpath, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const stateRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "heige-ephemeral-singleton-")),
+  );
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const paths = { stateRoot };
+  const first = await acquireEphemeralControllerLease(paths);
+  assert.notEqual(first, null);
+  const duplicate = await acquireEphemeralControllerLease(paths);
+  assert.equal(duplicate, null);
+  assert.equal(await first.release(), true);
+  const replacement = await acquireEphemeralControllerLease(paths);
+  assert.notEqual(replacement, null);
+  assert.equal(await replacement.release(), true);
 });
 
 test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {

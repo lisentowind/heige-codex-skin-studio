@@ -138,6 +138,17 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   assert.equal(JSON.stringify(runtimePackage).includes("happy-dom"), false);
   assert.equal(JSON.stringify(runtimePackage).includes("yazl"), false);
   assert.deepEqual(Object.keys(runtimePackage), ["name", "version", "type", "engines", "bin", "scripts"]);
+  const packagedLauncher = await readZipText(
+    archive,
+    "heige-codex-skin-studio/payload/scripts/apply.command",
+  );
+  assert.equal(
+    packagedLauncher,
+    await readFile(join(repoRoot, "scripts/apply.command"), "utf8"),
+    "the reusable skill must carry the audited launcher byte-for-byte",
+  );
+  assert.match(packagedLauncher, /apply --prefer-stored --port/);
+  assert.doesNotMatch(packagedLauncher, /\$\{1:-miku-488137\}/);
 });
 
 test("CLI requires exact explicit absolute output and epoch arguments", async (t) => {

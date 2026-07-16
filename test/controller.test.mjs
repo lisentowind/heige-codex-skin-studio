@@ -401,6 +401,29 @@ test("turning persistence off keeps only the verified current process", async ()
   assert.deepEqual(fx.session, nativeSession());
 });
 
+test("foreground controller hands off only on the tick after the successful HTTP response finishes", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false, revision: 1 },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const changed = await controller.setPersistence({ expectedRevision: 1, enabled: true });
+  assert.deepEqual(changed, { persistenceEnabled: true, revision: 2 });
+  assert.notEqual((await controller.tick()).action, "handoff");
+
+  await fx.calls.server[0].onPersistenceResponseFinished(changed);
+  const handedOff = await controller.tick();
+  assert.equal(handedOff.action, "handoff");
+  assert.equal(handedOff.persistenceEnabled, true);
+  assert.deepEqual(
+    fx.calls.leaseContext.find((_entry, index) =>
+      fx.calls.lease[index] === "controller:set-persistence"),
+    { desiredPersistenceEnabled: true, expectedRevision: 1 },
+  );
+});
+
 test("same-value persistence request is idempotent even when its request revision is old", async () => {
   const fx = fixture();
   const result = await createSkinController(fx.deps).setPersistence({
@@ -473,6 +496,32 @@ test("failed same-value repair compensates the stale enabled claim to false", as
   });
   assert.equal(fx.state.persistenceEnabled, false);
   assert.equal(fx.backgroundRegistered, false);
+});
+
+test("outer install fence blocks idempotent repair compensation so installer rollback retains authority", async () => {
+  const fx = fixture({ backgroundRegistered: false, handshakeFailure: true });
+  const withLease = fx.deps.withLease;
+  fx.deps.withLease = (operation, action, context) => {
+    if (operation === "controller:compensate-unacked-enable") {
+      const error = new Error("outer install owns rollback");
+      error.code = "MACOS_INSTALL_IN_PROGRESS";
+      throw error;
+    }
+    return withLease(operation, action, context);
+  };
+  await assert.rejects(createSkinController(fx.deps).setPersistence({
+    expectedRevision: 1,
+    enabled: true,
+  }), (error) => {
+    assert.equal(error.code, "BACKGROUND_START_FAILED");
+    assert.equal(error.state, undefined);
+    assert.ok(error.cause instanceof AggregateError);
+    assert.equal(error.cause.errors[1].code, "MACOS_INSTALL_IN_PROGRESS");
+    return true;
+  });
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.transition, null);
 });
 
 test("a different-value stale revision fails before writing a transition", async () => {

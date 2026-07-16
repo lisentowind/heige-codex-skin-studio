@@ -47,13 +47,17 @@ import {
   wakeControllerAgent,
 } from "./macos-launch-agent.mjs";
 import {
+  macosInstallJournalPath,
+  readMacosInstallJournal,
+} from "./macos-install-journal.mjs";
+import {
   clearLegacyMigrationCoordinator,
   createLegacyMigrationCoordinator,
   legacyMigrationJournalPath,
   readLegacyMigrationCoordinator,
   updateLegacyMigrationCoordinator,
 } from "./legacy-migration-coordinator.mjs";
-import { withOperationLock } from "./operation-lock.mjs";
+import { acquireOperationLock, withOperationLock } from "./operation-lock.mjs";
 import { installPet } from "./pet-installer.mjs";
 import {
   compareAndUpdateStudioState,
@@ -354,6 +358,24 @@ async function lockOptions(paths, platform = process.platform) {
   };
 }
 
+export async function acquireEphemeralControllerLease(paths, platform = process.platform) {
+  const stateRoot = join(paths.stateRoot, "ephemeral-controller");
+  const options = await lockOptions({
+    stateRoot,
+    lockPath: join(stateRoot, "operation.lock"),
+  }, platform);
+  try {
+    return await acquireOperationLock({
+      ...options,
+      operation: "controller:ephemeral-singleton",
+      platform,
+    });
+  } catch (error) {
+    if (error?.code === "LOCK_HELD") return null;
+    throw error;
+  }
+}
+
 const WINDOWS_PROCESS_STARTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,7}Z$/;
 const WINDOWS_CODEX_PROCESS_NAMES = new Set(["chatgpt", "codex"]);
 
@@ -578,6 +600,122 @@ function migrationFenceError(operation) {
   return error;
 }
 
+function macosInstallFenceError(operation) {
+  const error = new Error(
+    `macOS install is in progress; ${operation} must wait for recovery or completion`,
+  );
+  error.code = "MACOS_INSTALL_IN_PROGRESS";
+  return error;
+}
+
+export function parseMacosInstallAuthorization(value) {
+  if (value === undefined) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (cause) {
+    throw new Error("HEIGE_MACOS_INSTALL_AUTHORIZATION is not valid JSON", { cause });
+  }
+  const keys = [
+    "expectedControlToken",
+    "expectedRevision",
+    "journalPath",
+    "role",
+    "transactionId",
+  ];
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).sort().join("\0") !== keys.sort().join("\0") ||
+    parsed.role !== "macos-install-ready-foreground" ||
+    typeof parsed.transactionId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.transactionId) ||
+    typeof parsed.journalPath !== "string" ||
+    !isAbsolute(parsed.journalPath) ||
+    normalize(parsed.journalPath) !== parsed.journalPath ||
+    parsed.journalPath.includes("\0") ||
+    !Number.isSafeInteger(parsed.expectedRevision) ||
+    parsed.expectedRevision < 0 ||
+    typeof parsed.expectedControlToken !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(parsed.expectedControlToken) ||
+    Buffer.from(parsed.expectedControlToken, "base64url").length !== 32 ||
+    Buffer.from(parsed.expectedControlToken, "base64url").toString("base64url") !==
+      parsed.expectedControlToken
+  ) {
+    throw new Error("HEIGE_MACOS_INSTALL_AUTHORIZATION schema is invalid");
+  }
+  return Object.freeze({ ...parsed });
+}
+
+export async function enforceMacosInstallFence({
+  journalPath,
+  statePath,
+  transitionPath,
+  lease,
+  operation,
+  authorization = null,
+  startupHandshake = null,
+  backgroundIdentity = null,
+  requestContext = {},
+  dependencies = {},
+}) {
+  const readJournal = dependencies.readJournal ?? readMacosInstallJournal;
+  const readState = dependencies.readState ?? readStudioState;
+  const readTransition = dependencies.readTransition ?? readTransitionJournal;
+  const journal = await readJournal(journalPath, { lease });
+  if (journal === null) return { allowed: true, transactionId: null };
+  const expectedState = journal.stateParticipant?.afterState;
+  if (
+    journal.decision !== "undecided" ||
+    journal.phase !== "activation-planned" ||
+    journal.activation !== "controller" ||
+    expectedState?.persistenceEnabled !== true ||
+    !sameStudioState(await readState(statePath), expectedState) ||
+    await readTransition(transitionPath) !== null
+  ) {
+    throw macosInstallFenceError(operation);
+  }
+  const authorizationMatches =
+    authorization !== null &&
+    typeof authorization === "object" &&
+    !Array.isArray(authorization) &&
+    authorization.role === "macos-install-ready-foreground" &&
+    authorization.transactionId === journal.transactionId &&
+    authorization.journalPath === journalPath &&
+    authorization.expectedRevision === expectedState.revision &&
+    authorization.expectedControlToken === expectedState.controlToken;
+  const foregroundOperationAllowed =
+    operation === "controller:start" ||
+    (
+      ["controller:set-persistence", "controller:finalize-enable"].includes(operation) &&
+      requestContext?.desiredPersistenceEnabled === true &&
+      requestContext?.expectedRevision === expectedState.revision
+    );
+  if (authorizationMatches && foregroundOperationAllowed) {
+    return { allowed: true, transactionId: journal.transactionId, role: authorization.role };
+  }
+  const requestCreatedAt = Date.parse(startupHandshake?.createdAt);
+  const backgroundAllowed =
+    operation === "controller:start" &&
+    startupHandshake !== null &&
+    typeof startupHandshake === "object" &&
+    startupHandshake.revision === expectedState.revision &&
+    startupHandshake.platform === "darwin" &&
+    startupHandshake.backgroundIdentity === CONTROLLER_LAUNCH_AGENT_LABEL &&
+    backgroundIdentity === CONTROLLER_LAUNCH_AGENT_LABEL &&
+    Number.isFinite(requestCreatedAt) &&
+    requestCreatedAt >= Date.parse(journal.createdAt);
+  if (backgroundAllowed) {
+    return {
+      allowed: true,
+      transactionId: journal.transactionId,
+      role: "macos-install-ready-background",
+    };
+  }
+  throw macosInstallFenceError(operation);
+}
+
 export async function enforceLegacyMigrationFence({
   journalPath,
   statePath,
@@ -647,7 +785,10 @@ async function withProductionStateLease({
   options,
   operation,
   authorization = null,
+  installAuthorization = null,
   startupHandshake = null,
+  backgroundIdentity = null,
+  requestContext = {},
 }, action) {
   return withOperationLock({ ...options, operation }, async (lease) => {
     await enforceLegacyMigrationFence({
@@ -658,6 +799,17 @@ async function withProductionStateLease({
       operation,
       authorization,
       startupHandshake,
+    });
+    await enforceMacosInstallFence({
+      journalPath: macosInstallJournalPath(paths.stateRoot),
+      statePath: paths.statePath,
+      transitionPath: paths.transitionPath,
+      lease,
+      operation,
+      authorization: installAuthorization,
+      startupHandshake,
+      backgroundIdentity,
+      requestContext,
     });
     return action(lease);
   });
@@ -857,6 +1009,7 @@ export async function productionController({
   startupHandshake = null,
   background = false,
   migrationAuthorization = null,
+  installAuthorization = null,
   preflight = null,
 }) {
   const injectionPreferStored = controllerInjectionPreference({ ephemeral, preferStored });
@@ -909,7 +1062,10 @@ export async function productionController({
       options: lock,
       operation,
       authorization: migrationAuthorization,
+      installAuthorization,
       startupHandshake: context.startupHandshake ?? null,
+      backgroundIdentity,
+      requestContext: context,
     }, action),
     probeCurrentProcess: probe,
     validatePortOwner: async (candidate) => {
@@ -1035,12 +1191,14 @@ export async function productionController({
 
 export async function runControllerProcess(controller, {
   once = false,
+  ephemeralRuntime = false,
   startupHandshake = null,
   backgroundRuntime = null,
   paths,
   claimStartRequest = claimBackgroundStartRequest,
   publishHandshake = publishBackgroundHandshake,
   readCurrentIdentity,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 } = {}) {
   if (startupHandshake !== null && backgroundRuntime !== null) {
     throw new Error("background controller cannot combine inline and one-shot handshake requests");
@@ -1103,16 +1261,40 @@ export async function runControllerProcess(controller, {
       throw error;
     }
   }
+  const handoffEphemeral = async (current) => {
+    let handedOff;
+    try {
+      handedOff = await controller.setPersistence({
+        expectedRevision: current.revision,
+        enabled: true,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      await controller.stop();
+    }
+    return {
+      action: "handoff",
+      mode: current.mode,
+      persistenceEnabled: handedOff.persistenceEnabled,
+      revision: handedOff.revision,
+    };
+  };
+  if (ephemeralRuntime && result?.persistenceEnabled === true) {
+    return handoffEphemeral(result);
+  }
   if (once || result.action === "unregister" || result.action === "error") {
     await controller.stop();
     return result;
   }
   while (true) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await wait(1000);
     result = await controller.tick();
-    if (result.action === "unregister") {
+    if (result.action === "unregister" || result.action === "handoff") {
       await controller.stop();
       return result;
+    }
+    if (ephemeralRuntime && result.persistenceEnabled === true) {
+      return handoffEphemeral(result);
     }
   }
 }
@@ -1710,6 +1892,7 @@ function defaults(overrides, {
   paths: selectedPaths,
   platform = process.platform,
   taskName,
+  installAuthorization = null,
 } = {}) {
   const paths = overrides.paths ?? selectedPaths ?? resolveStudioPaths({ platform });
   const bundledThemesRoot = join(repositoryRoot, "themes");
@@ -1762,6 +1945,7 @@ function defaults(overrides, {
       paths: merged.paths,
       roots: merged.roots,
       taskName: input.taskName ?? taskName,
+      installAuthorization: input.installAuthorization ?? installAuthorization,
     }));
   merged.runController = overrides.runController ?? (overrides.createController
     ? (controller) => controller.start()
@@ -1853,6 +2037,19 @@ export async function runCli(argv, overrides = {}) {
   const selectedControllerPlatform = command === "controller"
     ? controllerPlatform(args.platform)
     : process.platform;
+  const installAuthorization = command === "controller"
+    ? null
+    : parseMacosInstallAuthorization(process.env.HEIGE_MACOS_INSTALL_AUTHORIZATION);
+  if (
+    installAuthorization !== null &&
+    (
+      selectedControllerPlatform !== "darwin" ||
+      command !== "set-persistence" ||
+      positionals[0] !== "true"
+    )
+  ) {
+    throw new Error("macOS install authorization is restricted to set-persistence true");
+  }
   const testContext = command === "controller"
     ? null
     : windowsCliTestContext(selectedControllerPlatform);
@@ -1873,6 +2070,7 @@ export async function runCli(argv, overrides = {}) {
     paths: selectedPaths,
     platform: selectedControllerPlatform,
     taskName: selectedTaskName,
+    installAuthorization,
   });
   if (command === "help") {
     return {
@@ -2029,30 +2227,44 @@ export async function runCli(argv, overrides = {}) {
     return result;
   }
   if (command === "controller") {
+    if (args.background && args.ephemeral) {
+      throw new Error("controller cannot be both background and ephemeral");
+    }
     const port = portFrom(args.port);
     const startupHandshake = null;
-    const controller = await lifecycleController(deps, {
-      background: Boolean(args.background),
-      ephemeral: Boolean(args.ephemeral),
-      platform: selectedControllerPlatform,
-      port,
-      taskName: selectedTaskName,
-      startupHandshake,
-    });
-    const result = await deps.runController(controller, {
-      backgroundRuntime: args.background
-        ? {
-          platform: selectedControllerPlatform,
-          backgroundIdentity: selectedBackgroundIdentity,
-        }
-        : null,
-      once: Boolean(args.once),
-      startupHandshake,
-    });
-    if (result?.action === "error" || result?.mode === "error") {
-      throw new Error("控制器启动或巡检失败");
+    const ephemeralLease = args.ephemeral
+      ? await acquireEphemeralControllerLease(deps.paths, selectedControllerPlatform)
+      : undefined;
+    if (args.ephemeral && ephemeralLease === null) {
+      return { action: "already-running", mode: "active" };
     }
-    return result;
+    try {
+      const controller = await lifecycleController(deps, {
+        background: Boolean(args.background),
+        ephemeral: Boolean(args.ephemeral),
+        platform: selectedControllerPlatform,
+        port,
+        taskName: selectedTaskName,
+        startupHandshake,
+      });
+      const result = await deps.runController(controller, {
+        backgroundRuntime: args.background
+          ? {
+            platform: selectedControllerPlatform,
+            backgroundIdentity: selectedBackgroundIdentity,
+          }
+          : null,
+        ephemeralRuntime: Boolean(args.ephemeral),
+        once: Boolean(args.once),
+        startupHandshake,
+      });
+      if (result?.action === "error" || result?.mode === "error") {
+        throw new Error("控制器启动或巡检失败");
+      }
+      return result;
+    } finally {
+      await ephemeralLease?.release();
+    }
   }
   if (command === "migrate-legacy") {
     return deps.migrateLegacy({ port: portFrom(args.port) });

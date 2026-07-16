@@ -571,7 +571,10 @@ async function applyPersistenceRequest(input, context, transaction) {
   ) {
     throw protocolError("PERSISTENCE_UPDATE_FAILED");
   }
-  return okBody(updated);
+  return {
+    ...okBody(updated),
+    persistenceUpdate: updated,
+  };
 }
 
 async function routePersistenceRequest(request, context, signal, markCommitStarted) {
@@ -629,7 +632,7 @@ async function routePersistenceRequest(request, context, signal, markCommitStart
   );
 }
 
-function sendResponse(response, descriptor, corsOrigin, request) {
+function sendResponse(response, descriptor, corsOrigin, request, onFinished = undefined) {
   if (response.destroyed || response.writableEnded) return;
   const headers = {
     "Cache-Control": "no-store",
@@ -652,6 +655,11 @@ function sendResponse(response, descriptor, corsOrigin, request) {
   headers["Content-Length"] = Buffer.byteLength(payload);
   if (descriptor.closeConnection) headers.Connection = "close";
   response.writeHead(descriptor.status, headers);
+  if (onFinished !== undefined) {
+    response.once("finish", () => {
+      void Promise.resolve().then(onFinished).catch(() => {});
+    });
+  }
   response.end(payload);
   if (descriptor.closeConnection) {
     response.once("finish", () => request.destroy());
@@ -702,7 +710,11 @@ function requestHandler(context) {
         ),
         timeout,
       ]);
-      sendResponse(response, descriptor, corsOrigin, request);
+      const onFinished = descriptor.persistenceUpdate === undefined ||
+        context.onPersistenceResponseFinished === null
+        ? undefined
+        : () => context.onPersistenceResponseFinished(descriptor.persistenceUpdate);
+      sendResponse(response, descriptor, corsOrigin, request, onFinished);
     } catch (error) {
       if (error instanceof RequestTimeoutError) {
         sendResponse(
@@ -884,6 +896,7 @@ export async function startControlServer({
   allowedOrigins,
   readState,
   setPersistence,
+  onPersistenceResponseFinished,
   host = "127.0.0.1",
   port = 0,
   maxBodyBytes = 1024,
@@ -896,6 +909,9 @@ export async function startControlServer({
   const origins = normalizeAllowedOrigins(allowedOrigins);
   const safeReadState = requireFunction(readState, "readState");
   const safeSetPersistence = requireFunction(setPersistence, "setPersistence");
+  const safeResponseFinished = onPersistenceResponseFinished === undefined
+    ? null
+    : requireFunction(onPersistenceResponseFinished, "onPersistenceResponseFinished");
   const safePort = requirePort(port);
   const bodyLimit = requirePositiveInteger(maxBodyBytes, "maxBodyBytes");
   const timeoutMs = requirePositiveInteger(requestTimeoutMs, "requestTimeoutMs");
@@ -907,6 +923,7 @@ export async function startControlServer({
     allowedOrigins: origins,
     readState: safeReadState,
     setPersistence: safeSetPersistence,
+    onPersistenceResponseFinished: safeResponseFinished,
     maxBodyBytes: bodyLimit,
     requestTimeoutMs: timeoutMs,
     expectedHost: undefined,

@@ -24,6 +24,7 @@ const ACTIONS = new Set([
   "wait-for-app",
   "unregister",
   "paused",
+  "handoff",
   "error",
 ]);
 
@@ -394,6 +395,7 @@ export function createSkinController(input) {
   let stopped = false;
   let lastKnownState = null;
   let consecutiveFailures = 0;
+  let handoffRequested = false;
 
   const probeProcess = async () => normalizeProcessProbe(await deps.probeCurrentProcess());
 
@@ -419,6 +421,11 @@ export function createSkinController(input) {
         allowedOrigins: new Set([CODEX_RENDERER_ORIGIN]),
         readState: deps.readState,
         setPersistence: (request) => setPersistencePublic(request),
+        onPersistenceResponseFinished: (state) => {
+          if (!deps.backgroundProcess && state?.persistenceEnabled === true) {
+            handoffRequested = true;
+          }
+        },
         host: "127.0.0.1",
         port: deps.controlPort,
       });
@@ -765,11 +772,17 @@ export function createSkinController(input) {
     return reconcile({ lease, recovered: recovered?.recovered === true });
   }, { startupHandshake });
 
-  const tick = () => runSafe(
-    "controller:tick",
-    (lease) => reconcile({ lease, includeHealthCount: true }),
-    { includeHealthCount: true },
-  );
+  const tick = () => {
+    if (handoffRequested && !deps.backgroundProcess) {
+      const mode = lastKnownState?.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
+      return Promise.resolve(result("handoff", mode, lastKnownState));
+    }
+    return runSafe(
+      "controller:tick",
+      (lease) => reconcile({ lease, includeHealthCount: true }),
+      { includeHealthCount: true },
+    );
+  };
 
   setPersistencePublic = async ({ expectedRevision, enabled, signal } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
@@ -819,6 +832,9 @@ export function createSkinController(input) {
           });
         }
         return disableTransition({ lease, state, processIdentity });
+      }, {
+        desiredPersistenceEnabled: enabled,
+        expectedRevision,
       });
 
       if (!enabled) return publicState(changed.state);
@@ -880,6 +896,9 @@ export function createSkinController(input) {
           nonce: enableAttempt.nonce,
           journal: changed.journal,
         });
+      }, {
+        desiredPersistenceEnabled: true,
+        expectedRevision: changed.state.revision,
       });
       return publicState(finalized);
     } catch (error) {
