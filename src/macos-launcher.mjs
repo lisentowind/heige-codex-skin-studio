@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   chmod,
@@ -24,6 +24,24 @@ const MAX_GENERATED_FILE_BYTES = 64 * 1024;
 const TRANSACTION_FILE = ".heige-codex-skin-launcher-transaction.json";
 const LOCK_DIRECTORY = ".heige-codex-skin-launcher-install.lock";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PARTICIPANT_KEYS = [
+  "afterExecutableSha256",
+  "afterPlistSha256",
+  "appPath",
+  "applications",
+  "backupPath",
+  "beforeExecutableSha256",
+  "beforeExisted",
+  "beforeInstallRoot",
+  "beforePlistSha256",
+  "home",
+  "installRoot",
+  "product",
+  "schemaVersion",
+  "stagePath",
+  "transactionId",
+  "unchanged",
+];
 const PLIST_KEYS = [
   "CFBundleDevelopmentRegion",
   "CFBundleDisplayName",
@@ -45,6 +63,10 @@ function exactKeys(value, keys) {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function assertTextCharacters(value, label) {
@@ -297,7 +319,15 @@ async function validateAttributedBundle(appPath, expected = null) {
     if (expected !== null && (executable !== expected.executable || plist !== expected.plist)) {
       throw new Error("staged generated bundle 与期望字节不一致");
     }
-    return { ...attribution, executablePath, plistPath };
+    return {
+      ...attribution,
+      executable,
+      executablePath,
+      executableSha256: sha256(executable),
+      plist,
+      plistPath,
+      plistSha256: sha256(plist),
+    };
   } catch (cause) {
     throw new Error(
       `launcher 目标归属校验失败，不是完整的 generated bundle：${cause?.message ?? "unknown"}`,
@@ -325,6 +355,14 @@ async function stageBundle(stagePath, expected) {
   });
   await chmod(join(contents, "Info.plist"), 0o644);
   await chmod(join(macos, EXECUTABLE_NAME), 0o755);
+  for (const path of [join(contents, "Info.plist"), join(macos, EXECUTABLE_NAME)]) {
+    const handle = await open(path, "r+");
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
+  await syncDirectory(macos);
+  await syncDirectory(contents);
+  await syncDirectory(stagePath);
+  await syncDirectory(dirname(stagePath));
   await validateAttributedBundle(stagePath, expected);
 }
 
@@ -531,6 +569,304 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
     }
   }
   throw new Error("无法取得 launcher install lock");
+}
+
+export async function acquireMacosLauncherInstallLock({ home, isProcessAlive } = {}) {
+  home = assertAbsolutePath(home, "home");
+  const canonicalHome = await requireRealDirectory(home, "home");
+  const applications = join(home, "Applications");
+  await mkdir(applications, { recursive: true, mode: 0o755 });
+  const canonicalApplications = await requireRealDirectory(applications, "Applications");
+  if (canonicalApplications !== join(canonicalHome, "Applications")) {
+    throw new Error("Applications 必须位于用户 home 内");
+  }
+  const release = await acquireInstallLock(applications, isProcessAlive);
+  try {
+    await recoverTransaction({
+      appPath: join(applications, `${MACOS_LAUNCHER_NAME}.app`),
+      journalPath: join(applications, TRANSACTION_FILE),
+    });
+  } catch (error) {
+    try {
+      await release();
+    } catch (releaseError) {
+      throw new AggregateError(
+        [error, releaseError],
+        "launcher standalone recovery 与 participant lock 释放同时失败",
+      );
+    }
+    throw error;
+  }
+  return { applications, home, release };
+}
+
+function assertSha256(value, label) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error(`${label} 不是有效 SHA-256`);
+  }
+}
+
+function expectedLauncher(installRoot) {
+  const executable = renderMacosLauncherExecutable(join(
+    installRoot,
+    "scripts",
+    "enable-skin.command",
+  ));
+  const plist = renderMacosLauncherPlist(installRoot);
+  return {
+    executable,
+    executableSha256: sha256(executable),
+    plist,
+    plistSha256: sha256(plist),
+  };
+}
+
+function assertLauncherParticipant(value) {
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !exactKeys(value, PARTICIPANT_KEYS)
+    || value.schemaVersion !== 1
+    || value.product !== GENERATOR_ID
+  ) throw new Error("launcher participant schema 无效");
+  const home = assertAbsolutePath(value.home, "participant home");
+  const installRoot = assertAbsolutePath(value.installRoot, "participant installRoot");
+  if (typeof value.transactionId !== "string" || !UUID_PATTERN.test(value.transactionId)) {
+    throw new Error("launcher participant transactionId 无效");
+  }
+  const applications = join(home, "Applications");
+  const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
+  const { backupPath, stagePath } = transactionPaths(appPath, value.transactionId);
+  if (
+    value.applications !== applications
+    || value.appPath !== appPath
+    || value.backupPath !== backupPath
+    || value.stagePath !== stagePath
+  ) throw new Error("launcher participant 路径未由 home 和 transactionId 严格派生");
+  if (typeof value.beforeExisted !== "boolean" || typeof value.unchanged !== "boolean") {
+    throw new Error("launcher participant flags 无效");
+  }
+  const expected = expectedLauncher(installRoot);
+  assertSha256(value.afterExecutableSha256, "after executable");
+  assertSha256(value.afterPlistSha256, "after plist");
+  if (
+    value.afterExecutableSha256 !== expected.executableSha256
+    || value.afterPlistSha256 !== expected.plistSha256
+  ) throw new Error("launcher participant after bytes 与 installRoot 不匹配");
+  if (value.beforeExisted) {
+    assertAbsolutePath(value.beforeInstallRoot, "participant beforeInstallRoot");
+    assertSha256(value.beforeExecutableSha256, "before executable");
+    assertSha256(value.beforePlistSha256, "before plist");
+  } else if (
+    value.beforeInstallRoot !== null
+    || value.beforeExecutableSha256 !== null
+    || value.beforePlistSha256 !== null
+    || value.unchanged
+  ) throw new Error("不存在的 launcher prestate 含有无效归属字段");
+  return value;
+}
+
+async function validateParticipantContext(participant) {
+  const canonicalHome = await requireRealDirectory(participant.home, "participant home");
+  const canonicalApplications = await requireRealDirectory(
+    participant.applications,
+    "participant Applications",
+  );
+  if (canonicalApplications !== join(canonicalHome, "Applications")) {
+    throw new Error("participant Applications 必须位于用户 home 内");
+  }
+}
+
+async function validateParticipantBeforeBundle(participant, path) {
+  if (!participant.beforeExisted) throw new Error("不存在 launcher prestate");
+  const actual = await validateAttributedBundle(path);
+  if (
+    actual.installRoot !== participant.beforeInstallRoot
+    || actual.executableSha256 !== participant.beforeExecutableSha256
+    || actual.plistSha256 !== participant.beforePlistSha256
+  ) throw new Error("launcher before bundle 与 participant 归属不匹配");
+  return actual;
+}
+
+async function validateParticipantAfterBundle(participant, path) {
+  const expected = expectedLauncher(participant.installRoot);
+  const actual = await validateAttributedBundle(path, expected);
+  if (
+    actual.executableSha256 !== participant.afterExecutableSha256
+    || actual.plistSha256 !== participant.afterPlistSha256
+  ) throw new Error("launcher after bundle 与 participant 归属不匹配");
+  return actual;
+}
+
+async function removeParticipantAfterBundle(participant, path) {
+  await validateParticipantAfterBundle(participant, path);
+  await rm(path, { recursive: true, force: false });
+  await syncDirectory(dirname(path));
+}
+
+async function removeParticipantBeforeBundle(participant, path) {
+  await validateParticipantBeforeBundle(participant, path);
+  await rm(path, { recursive: true, force: false });
+  await syncDirectory(dirname(path));
+}
+
+export async function prepareMacosLauncher({
+  home,
+  installRoot,
+  validationRoot = installRoot,
+  transactionId = randomUUID(),
+} = {}) {
+  home = assertAbsolutePath(home, "home");
+  installRoot = assertAbsolutePath(installRoot, "installRoot");
+  validationRoot = assertAbsolutePath(validationRoot, "validationRoot");
+  if (!UUID_PATTERN.test(transactionId)) throw new Error("launcher transaction id 无效");
+  const canonicalHome = await requireRealDirectory(home, "home");
+  await requireStableEntrypoint(validationRoot);
+  const applications = join(home, "Applications");
+  await mkdir(applications, { recursive: true, mode: 0o755 });
+  const canonicalApplications = await requireRealDirectory(applications, "Applications");
+  if (canonicalApplications !== join(canonicalHome, "Applications")) {
+    throw new Error("Applications 必须位于用户 home 内");
+  }
+  if (await pathInfo(join(applications, TRANSACTION_FILE))) {
+    throw new Error("存在未完成的 standalone launcher transaction journal");
+  }
+  const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
+  const { backupPath, stagePath } = transactionPaths(appPath, transactionId);
+  if (await pathInfo(stagePath) || await pathInfo(backupPath)) {
+    throw new Error("launcher participant stage 或 backup 已存在");
+  }
+  const existingInfo = await pathInfo(appPath);
+  const before = existingInfo === null ? null : await validateAttributedBundle(appPath);
+  const expected = expectedLauncher(installRoot);
+  try {
+    await stageBundle(stagePath, expected);
+    const unchanged = before !== null
+      && before.executableSha256 === expected.executableSha256
+      && before.plistSha256 === expected.plistSha256;
+    if (unchanged) await removeParticipantAfterBundle(assertLauncherParticipant({
+      schemaVersion: 1,
+      product: GENERATOR_ID,
+      transactionId,
+      home,
+      applications,
+      appPath,
+      stagePath,
+      backupPath,
+      installRoot,
+      beforeExisted: true,
+      beforeInstallRoot: before.installRoot,
+      beforeExecutableSha256: before.executableSha256,
+      beforePlistSha256: before.plistSha256,
+      afterExecutableSha256: expected.executableSha256,
+      afterPlistSha256: expected.plistSha256,
+      unchanged,
+    }), stagePath);
+    return assertLauncherParticipant({
+      schemaVersion: 1,
+      product: GENERATOR_ID,
+      transactionId,
+      home,
+      applications,
+      appPath,
+      stagePath,
+      backupPath,
+      installRoot,
+      beforeExisted: before !== null,
+      beforeInstallRoot: before?.installRoot ?? null,
+      beforeExecutableSha256: before?.executableSha256 ?? null,
+      beforePlistSha256: before?.plistSha256 ?? null,
+      afterExecutableSha256: expected.executableSha256,
+      afterPlistSha256: expected.plistSha256,
+      unchanged,
+    });
+  } catch (error) {
+    if (await pathInfo(stagePath)) await rm(stagePath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function publishMacosLauncher(value, { hooks = {} } = {}) {
+  const participant = assertLauncherParticipant(value);
+  await validateParticipantContext(participant);
+  if (participant.unchanged) {
+    const paths = await validateParticipantAfterBundle(participant, participant.appPath);
+    return { ...participant, published: false, executablePath: paths.executablePath, plistPath: paths.plistPath };
+  }
+  await validateParticipantAfterBundle(participant, participant.stagePath);
+  if (await pathInfo(participant.backupPath)) throw new Error("launcher participant backup 已存在");
+  const app = await pathInfo(participant.appPath);
+  if (participant.beforeExisted) {
+    if (app === null) throw new Error("launcher target 在 publish 前消失");
+    await validateParticipantBeforeBundle(participant, participant.appPath);
+    await rename(participant.appPath, participant.backupPath);
+    await syncDirectory(participant.applications);
+    await hooks.afterBackup?.({ participant });
+  } else if (app !== null) {
+    throw new Error("launcher target 在首次 publish 前出现");
+  }
+  await rename(participant.stagePath, participant.appPath);
+  await syncDirectory(participant.applications);
+  const paths = await validateParticipantAfterBundle(participant, participant.appPath);
+  await hooks.afterPublish?.({ participant, ...paths });
+  return {
+    ...participant,
+    published: true,
+    executablePath: paths.executablePath,
+    plistPath: paths.plistPath,
+  };
+}
+
+export async function rollbackMacosLauncher(value) {
+  const participant = assertLauncherParticipant(value);
+  await validateParticipantContext(participant);
+  if (participant.unchanged) {
+    await validateParticipantAfterBundle(participant, participant.appPath);
+    return { ...participant, rolledBack: false };
+  }
+  const backup = await pathInfo(participant.backupPath);
+  const app = await pathInfo(participant.appPath);
+  if (backup !== null) {
+    if (!participant.beforeExisted) throw new Error("无 prestate 的 launcher participant 出现 backup");
+    await validateParticipantBeforeBundle(participant, participant.backupPath);
+    if (app !== null) await removeParticipantAfterBundle(participant, participant.appPath);
+    await rename(participant.backupPath, participant.appPath);
+    await syncDirectory(participant.applications);
+  } else if (participant.beforeExisted) {
+    if (app === null) throw new Error("launcher rollback 缺少 app 与 backup");
+    await validateParticipantBeforeBundle(participant, participant.appPath);
+  } else if (app !== null) {
+    await removeParticipantAfterBundle(participant, participant.appPath);
+  }
+  if (await pathInfo(participant.stagePath)) {
+    await removeParticipantAfterBundle(participant, participant.stagePath);
+  }
+  if (participant.beforeExisted) {
+    await validateParticipantBeforeBundle(participant, participant.appPath);
+  } else if (await pathInfo(participant.appPath)) {
+    throw new Error("launcher rollback 遗留了原本不存在的 app");
+  }
+  return { ...participant, rolledBack: true };
+}
+
+export async function finalizeMacosLauncher(value) {
+  const participant = assertLauncherParticipant(value);
+  await validateParticipantContext(participant);
+  const paths = await validateParticipantAfterBundle(participant, participant.appPath);
+  if (await pathInfo(participant.stagePath)) {
+    await removeParticipantAfterBundle(participant, participant.stagePath);
+  }
+  if (await pathInfo(participant.backupPath)) {
+    if (!participant.beforeExisted) throw new Error("无 prestate 的 launcher participant 出现 backup");
+    await removeParticipantBeforeBundle(participant, participant.backupPath);
+  }
+  return {
+    ...participant,
+    finalized: true,
+    executablePath: paths.executablePath,
+    plistPath: paths.plistPath,
+  };
 }
 
 export async function installMacosLauncher({ home, installRoot, hooks = {}, isProcessAlive } = {}) {

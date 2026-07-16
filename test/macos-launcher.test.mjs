@@ -9,9 +9,13 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
+  finalizeMacosLauncher,
   installMacosLauncher,
+  prepareMacosLauncher,
+  publishMacosLauncher,
   renderMacosLauncherExecutable,
   renderMacosLauncherPlist,
+  rollbackMacosLauncher,
 } from "../src/macos-launcher.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +47,107 @@ test("creates a Finder-visible local app that calls only the stable enable entry
   assert.match(plist, /HeiGe 皮肤启动器/);
   assert.equal((await stat(result.executablePath)).mode & 0o777, 0o755);
   assert.equal((await stat(join(result.appPath, "Contents", "Info.plist"))).mode & 0o777, 0o644);
+});
+
+test("serializable launcher participant retains the old bundle until outer finalize", async (t) => {
+  const { home, installRoot } = await fixture(t);
+  const original = await installMacosLauncher({ home, installRoot });
+  const originalExecutable = await readFile(original.executablePath);
+  const nextInstallRoot = join(home, ".codex", "heige-codex-skin-studio-next");
+  const nextEntrypoint = join(nextInstallRoot, "scripts", "enable-skin.command");
+  await mkdir(join(nextInstallRoot, "scripts"), { recursive: true });
+  await writeFile(nextEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
+  await chmod(nextEntrypoint, 0o755);
+
+  const participant = JSON.parse(JSON.stringify(await prepareMacosLauncher({
+    home,
+    installRoot: nextInstallRoot,
+  })));
+  await publishMacosLauncher(participant);
+
+  assert.equal((await lstat(participant.backupPath)).isDirectory(), true);
+  assert.match(await readFile(join(participant.appPath, "Contents", "MacOS", "HeiGe Skin Launcher"), "utf8"), /studio-next/);
+  await rollbackMacosLauncher(participant);
+  assert.deepEqual(await readFile(original.executablePath), originalExecutable);
+  await assert.rejects(lstat(participant.stagePath), /ENOENT/);
+  await assert.rejects(lstat(participant.backupPath), /ENOENT/);
+
+  const committed = JSON.parse(JSON.stringify(await prepareMacosLauncher({
+    home,
+    installRoot: nextInstallRoot,
+  })));
+  await publishMacosLauncher(committed);
+  await finalizeMacosLauncher(committed);
+  assert.match(await readFile(original.executablePath, "utf8"), /studio-next/);
+  await assert.rejects(lstat(committed.backupPath), /ENOENT/);
+});
+
+test("launcher participant rollback removes a newly published app when no app existed before", async (t) => {
+  const { home, installRoot } = await fixture(t);
+  const participant = JSON.parse(JSON.stringify(await prepareMacosLauncher({ home, installRoot })));
+
+  await publishMacosLauncher(participant);
+  assert.equal((await lstat(participant.appPath)).isDirectory(), true);
+  await rollbackMacosLauncher(participant);
+
+  await assert.rejects(lstat(participant.appPath), /ENOENT/);
+  await assert.rejects(lstat(participant.stagePath), /ENOENT/);
+});
+
+test("launcher participant can be reconstructed after a publisher process is SIGKILLed", async (t) => {
+  const { root, home, installRoot } = await fixture(t);
+  const original = await installMacosLauncher({ home, installRoot });
+  const originalExecutable = await readFile(original.executablePath);
+  const nextInstallRoot = join(home, ".codex", "cross-process-next");
+  const nextEntrypoint = join(nextInstallRoot, "scripts", "enable-skin.command");
+  await mkdir(join(nextInstallRoot, "scripts"), { recursive: true });
+  await writeFile(nextEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
+  await chmod(nextEntrypoint, 0o755);
+  const participant = await prepareMacosLauncher({ home, installRoot: nextInstallRoot });
+  const descriptorPath = join(root, "launcher-participant.json");
+  const markerPath = join(root, "launcher-published.marker");
+  const childScript = join(root, "publish-launcher-participant.mjs");
+  await writeFile(descriptorPath, `${JSON.stringify(participant)}\n`);
+  await writeFile(childScript, `
+import { readFile, writeFile } from "node:fs/promises";
+const { publishMacosLauncher } = await import(${JSON.stringify(launcherModuleUrl)});
+const participant = JSON.parse(await readFile(process.argv[2], "utf8"));
+await publishMacosLauncher(participant, {
+  hooks: { afterPublish: async () => {
+    await writeFile(process.argv[3], "ready\\n");
+    setInterval(() => {}, 1_000);
+    await new Promise(() => {});
+  } },
+});
+`);
+  const child = spawn(process.execPath, [childScript, descriptorPath, markerPath], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  let ready = false;
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      await access(markerPath);
+      ready = true;
+      break;
+    } catch {
+      if (child.exitCode !== null) break;
+      await delay(10);
+    }
+  }
+  assert.equal(ready, true, stderr);
+  const exited = once(child, "exit");
+  assert.equal(child.kill("SIGKILL"), true);
+  const [, signal] = await exited;
+  assert.equal(signal, "SIGKILL");
+
+  const reconstructed = JSON.parse(await readFile(descriptorPath, "utf8"));
+  await rollbackMacosLauncher(reconstructed);
+  assert.deepEqual(await readFile(original.executablePath), originalExecutable);
+  await assert.rejects(lstat(reconstructed.backupPath), /ENOENT/);
+  await assert.rejects(lstat(reconstructed.stagePath), /ENOENT/);
 });
 
 test("escapes plist XML and shell-quotes a stable path with punctuation", async (t) => {
