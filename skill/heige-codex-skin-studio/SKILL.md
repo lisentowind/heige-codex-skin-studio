@@ -39,9 +39,11 @@ Windows 用户也可双击 `scripts\install.bat`。Windows 入口只转发到包
 ## 应用与常驻语义
 
 - `apply`：仅应用当前会话，不改变下次启动的常驻选择。
-- 顶部菜单「皮肤常驻」开关：打开后下次启动继续使用；关闭后本次继续使用，下次启动恢复原生界面。
+- 顶部菜单「皮肤常驻」开关是唯一受支持的开启常驻入口。打开后下次启动继续使用；关闭后本次继续使用，下次启动恢复原生界面。
 - 「启用皮肤」与「开启常驻」是两个意图。关闭后，macOS 打开 `$HOME/Applications/HeiGe 皮肤启动器.app` 只会调用 `apply.command`，恢复当前会话的最近非原生主题，并保持 `persistenceEnabled=false`。
-- 只有用户打开顶部「皮肤常驻」开关，或明确要求开启常驻时，才运行 `enable-skin.command`。不得用本地启动器代替这个用户决定。
+- `enable-skin` 和 `enable-skin.command` 都是 session-only `apply` 的兼容名，只恢复当前会话，常驻选择保持不变。
+- 用户明确要求常驻时，先用启动器或 `apply` 恢复当前会话，再提醒用户在顶部菜单显式打开常驻开关。Agent 不得代替用户改成 `true`。
+- `enable-persist.command` 是弃用的非零退出入口，不得将它当作上述步骤的替代方案。
 - 启动器未显式指定主题时，优先恢复上次非原生主题，只有没有历史选择时才使用 `miku-488137`。
 
 macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 生命周期操作必须使用 `scripts\windows` 下的同名 `.ps1` 或 `.bat`，不得直接运行 Node CLI 代替 Windows Store/MSIX 激活或进程重启。
@@ -56,7 +58,7 @@ macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、
 
 默认回退主题是 `miku-488137`。另有 `genshin-dawn`、`genshin-night`、`wuthering-tide`、`wuthering-echo`、`naruto-hokage`、`naruto-sasuke`、`deepspace-dawn`、`deepspace-star` 和 `dalao-dianyan`，合计 10 个内置预设。
 
-顶部菜单的「＋ 自定义图片」可选择本地图片、自动压缩取色并立即应用。它只有一个本地槽位，再次上传会覆盖，行尾 × 可删除。快速试图优先用这个入口；需要分发或长期管理时，用 `create` 生成正式主题。
+顶部菜单的「＋ 自定义图片」可选择本地图片、自动压缩取色并立即应用。「自定义图片」只是单个本地快捷槽，再次上传会覆盖，行尾 × 可删除；它不是正式主题，启动器不会将它当作恢复目标。快速试用优先用这个入口；需要分发或长期管理时，用 `create` 生成正式主题。
 
 ## 状态与诊断
 

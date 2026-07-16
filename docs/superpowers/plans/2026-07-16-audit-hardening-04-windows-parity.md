@@ -1,5 +1,7 @@
 # Windows Runtime, Persistence, and Entrypoint Parity Implementation Plan
 
+> **状态：历史实施计划。** 常驻开启入口已被[严格方案 1](../specs/2026-07-16-option-1-menu-only-persistence-addendum.md)覆盖。本文中任何让 Windows `enable-skin`、开始菜单快捷方式、PowerShell 或 Scheduled Task 把常驻从 `false` 改为 `true` 的步骤均已失效，不得当作当前产品契约或执行步骤。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the Windows files from best-effort wrappers into a tested current-user implementation of deterministic app discovery, Node runtime selection, controller persistence, re-enable, pause, resume, and full restore.

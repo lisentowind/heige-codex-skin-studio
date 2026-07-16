@@ -2,7 +2,7 @@
 
 日期：2026-07-16
 
-状态：待用户复核
+状态：基础设计；常驻开启入口已被[方案 1 补充决策](2026-07-16-option-1-menu-only-persistence-addendum.md)覆盖
 
 目标分支：`codex/audit-hardening`
 
@@ -11,6 +11,8 @@
 ## 一、文档地位
 
 本设计用于完成第二轮全面审计后的发布加固，并加入用户确认的「皮肤常驻」开关。
+
+凡本文把 `enable-skin`、兼容脚本、启动器或自然语言入口描述为可开启常驻的内容，均已失效。当前唯一公开开启入口是顶部「皮肤常驻」开关；完整覆盖关系见方案 1 补充决策。
 
 它取代旧设计中以下已经失效的决策：
 
@@ -57,7 +59,7 @@
 ```text
 皮肤常驻                                      开／关
 关闭后本次继续使用；下次启动恢复原生界面。
-重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。
+恢复步骤：先打开「HeiGe 皮肤启动器」或在 Codex 中说「启用 HeiGe 皮肤」，只恢复当前会话；再手动打开顶部常驻开关。
 ```
 
 交互要求：
@@ -77,7 +79,7 @@
 下次启动将恢复原生界面
 
 本次皮肤会继续使用。退出后，皮肤、顶部菜单和后台控制器都会停止。
-以后可打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。
+以后可打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」，只恢复当前会话。需要下次仍常驻时，再打开顶部常驻开关。
 
 [取消]  [确认关闭]
 ```
@@ -86,22 +88,22 @@
 
 ```text
 常驻已关闭。本次继续使用，下次启动恢复原生界面。
-重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。
+恢复当前会话：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。需要下次仍常驻时，再手动打开顶部开关。
 ```
 
 如果后台没有确认，UI 必须恢复为开启，并显示真实错误。不能先把开关画成关闭，再等待后台碰运气同步。
 
-### 4.3 重新启用
+### 4.3 恢复当前会话后再由用户开启常驻
 
-完全原生状态提供三条入口：
+完全原生状态提供三条当前会话恢复入口：
 
-1. macOS 主入口：用户级应用 `/Users/<user>/Applications/HeiGe 皮肤启动器.app`。它在本机安装过程中生成，只调用稳定安装目录里的启用脚本。
-2. Windows 主入口：开始菜单中的「HeiGe Codex Skin Studio／启用皮肤」快捷方式。
-3. Codex 自然语言入口：用户在原生 Codex 中说「启用 HeiGe 皮肤」。已安装 Skill 调用脱离当前会话的启用助手，并在重启前给出明确提示。
+1. macOS 主入口：用户级应用 `/Users/<user>/Applications/HeiGe 皮肤启动器.app`。它在本机安装过程中生成，只调用稳定安装目录里的 session-only `apply` 脚本。
+2. Windows 主入口：开始菜单中的「HeiGe Codex Skin Studio／HeiGe 皮肤启动器」快捷方式，语义同样是 session-only `apply`。
+3. Codex 自然语言入口：用户在原生 Codex 中说「启用 HeiGe 皮肤」。已安装 Skill 调用脱离当前会话的 `apply` 助手，并在重启前给出明确提示。
 
 命令行脚本保留为排障兜底，不作为普通用户唯一入口。
 
-重新启用流程必须先校验应用路径、Node、主题、端口和状态，再安装用户级后台任务，最后正常退出并带 loopback CDP 重新打开 Codex。恢复上次有效主题；上次主题不存在时回退到默认主题并说明原因。
+当前会话恢复流程必须先校验应用路径、Node、主题、端口和状态，再正常退出并带 loopback CDP 重新打开 Codex。恢复上次有效正式主题；上次主题不存在时回退到默认主题并说明原因。这一步不写入 `persistenceEnabled=true`，也不注册长期后台任务。只有用户在已恢复的顶部菜单打开常驻开关，才执行常驻交易。
 
 ### 4.4 默认值与升级迁移
 
@@ -271,13 +273,7 @@ Windows resolver 必须：
 
 ### 8.2 enable-skin
 
-重新启用入口使用的统一命令：
-
-1. 校验运行环境和上次主题。
-2. 写入 `persistenceEnabled=true`。
-3. 注册平台后台任务。
-4. 通过脱离调用者生命周期的 helper 正常重启 Codex。
-5. 注入菜单并恢复上次有效主题。
+`enable-skin` 仅作为旧名称兼容入口，语义等同 session-only `apply`。它可以拉起并注入当前会话，但不得写入 `persistenceEnabled=true` 或注册长期后台任务。重新开启常驻只能操作顶部菜单开关。
 
 ### 8.3 pause 与 resume
 
@@ -295,11 +291,11 @@ restore 是彻底恢复，不再是 pause 的别名：
 
 ### 8.5 兼容脚本
 
-现有 `enable-persist.command` 保留为 `enable-skin` 的兼容入口。现有 `disable-persist.command` 保留为彻底关闭后台常驻的兼容入口，并在输出中区分「当前皮肤保留」和「下次完全原生」。
+`enable-persist.command` 保留为安全的非零弃用入口。它只提示常驻只能从顶部菜单开启，不应用皮肤，不变更状态，也不是 session-only alias。现有 `disable-persist.command` 保留为关闭后台常驻的兼容入口，并在输出中区分「当前皮肤保留」和「下次完全原生」。
 
 Windows 提供对应 `.ps1` 和 CRLF `.bat` 入口，包内 `SKILL.md` 按平台给出真实可执行步骤。
 
-## 九、安装器与重新启用入口
+## 九、安装器与当前会话恢复入口
 
 ### 9.1 macOS
 
@@ -312,18 +308,18 @@ Windows 提供对应 `.ps1` 和 CRLF `.bat` 入口，包内 `SKILL.md` 按平台
 该 bundle 不携带第二份引擎，只调用：
 
 ```text
-/Users/<user>/.codex/heige-codex-skin-studio/scripts/enable-skin.command
+/Users/<user>/.codex/heige-codex-skin-studio/scripts/apply.command
 ```
 
 应用 bundle 在本机生成，不下载可执行文件，不请求管理员权限。安装器验证入口存在、可执行，并输出 Finder 可见位置。
 
 ### 9.2 Windows
 
-安装器创建当前用户开始菜单快捷方式，目标为稳定安装目录内的 `enable-skin.bat`。不写系统级 Program Files，不请求管理员权限。
+安装器创建当前用户开始菜单快捷方式，目标为稳定安装目录内的 `apply.bat`。不写系统级 Program Files，不请求管理员权限。
 
 ### 9.3 Skill
 
-Skill 必须识别「启用皮肤」「重新打开皮肤」「恢复 HeiGe 主题」「开启常驻」等意图。执行前提示 Codex 将正常重启；通过 detached helper 完成重启，避免 helper 随当前 Codex 进程一起被杀。
+Skill 必须把「启用皮肤」「重新打开皮肤」「恢复 HeiGe 主题」映射到 session-only `apply`。即使用户说「开启常驻」，Skill 也只能先拉起当前会话并提示用户在顶部开关中确认，不得代替用户把常驻写成开启。执行前提示 Codex 将正常重启；通过 detached helper 完成重启，避免 helper 随当前 Codex 进程一起被杀。
 
 Skill 不得自行无限重试，也不得在用户只要求检查状态时修改后台任务。
 
@@ -432,7 +428,7 @@ Windows 不再只保证文件存在。发布门禁要求：
 4. 用户关闭常驻时看到明确的重新启用说明，后台确认后开关才成功。
 5. 关闭后的本次会话继续使用皮肤，退出后后台任务自注销。
 6. 下次启动没有皮肤、菜单、后台控制器和 CDP 端口。
-7. macOS 启动器、Windows 开始菜单和 Codex 自然语言三条路径都能重新启用。
+7. macOS 启动器、Windows 开始菜单和 Codex 自然语言三条路径都能只恢复当前会话，并提示用户在顶部菜单手动开启常驻。
 8. pause 在同一进程内保持暂停，resume 可恢复，restore 能真正回到普通启动。
 9. 多窗口主题、菜单和常驻状态一致。
 10. apply、remove 和 status 不产生主窗口假成功。

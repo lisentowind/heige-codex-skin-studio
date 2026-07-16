@@ -1,5 +1,7 @@
 # Controller, Persistence Switch, and Re-enable Entrypoints Implementation Plan
 
+> **状态：历史实施计划。** 常驻开启入口已被[严格方案 1](../specs/2026-07-16-option-1-menu-only-persistence-addendum.md)覆盖。本文中任何让 `enable-skin`、`enable-persist.command`、启动器、CLI 或 Skill 把常驻从 `false` 改为 `true` 的步骤均已失效，不得当作当前产品契约或执行步骤。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the legacy watchdog with one authenticated controller, make the top-menu persistence switch truthful, and give users reliable macOS launcher, CLI, and Skill paths to re-enable the skin after a fully native restart.
