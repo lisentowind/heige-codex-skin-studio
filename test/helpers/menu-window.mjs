@@ -58,7 +58,7 @@ export async function menuWindow({
 } = {}) {
   const window = new Window({ url: "app://-/index.html" });
   window.fetch = fetch;
-  window.eval(buildSkinMenuScript({
+  const buildOptions = {
     styleId: "heige-codex-skin-style",
     menuId: "heige-codex-skin-menu",
     activeId: "miku-488137",
@@ -76,7 +76,9 @@ export async function menuWindow({
       token: CONTROL_TOKEN,
       launcherName: "HeiGe 皮肤启动器",
     },
-  }));
+  };
+  const inject = () => window.eval(buildSkinMenuScript(buildOptions));
+  inject();
 
   const query = (role) => window.document.querySelector(`[data-heige-role="${role}"]`);
   const page = {
@@ -120,7 +122,13 @@ export async function menuWindow({
     async flush() {
       await flushMicrotasks(window);
     },
+    async injectAgain() {
+      inject();
+      await flushMicrotasks(window);
+      return window.__heigeCodexSkinRuntime;
+    },
     close() {
+      window.__heigeCodexSkinRuntime?.dispose?.();
       window.close();
     },
   };

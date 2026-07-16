@@ -180,11 +180,13 @@ export async function removeSkin({ port, deps = {} }) {
   const fetchTargets = deps.fetchRendererTargets ?? fetchRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const expression = `(() => {
+    try { window.__heigeCodexSkinRuntime?.dispose?.(); } catch (error) {}
     document.getElementById(${JSON.stringify(STYLE_ID)})?.remove();
     document.getElementById(${JSON.stringify(MENU_ID)})?.remove();
     delete document.documentElement.dataset.heigeCodexSkin;
     // 删掉脚本化 API，卸载后残留的闭包不再可达，避免污染 status/dataset
     try { delete window.__heigeCodexSkin; } catch (error) { window.__heigeCodexSkin = undefined; }
+    try { delete window.__heigeCodexSkinRuntime; } catch (error) { window.__heigeCodexSkinRuntime = undefined; }
     return true;
   })()`;
   const classified = classifyCodexTargets(await fetchTargets(port));

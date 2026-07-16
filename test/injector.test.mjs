@@ -109,6 +109,7 @@ test("removes and checks the live style without persistent machinery", async () 
   assert.equal(status.results.succeeded[0].kind, "main");
   assert.match(FakeSession.expressions[0], /remove\(\)/);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
+  assert.match(FakeSession.expressions[0], /__heigeCodexSkinRuntime\?\.dispose/);
 });
 
 test("one dead target does not abort injection into the survivors", async () => {

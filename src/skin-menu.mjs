@@ -100,7 +100,102 @@ export function buildSkinMenuScript({
   });
 
   return `(() => {
+  try { window.__heigeCodexSkinRuntime?.dispose?.(); } catch {}
   const data = ${payload};
+
+  const runtimeAbortController = new AbortController();
+  const signal = runtimeAbortController.signal;
+  const generationBytes = new Uint8Array(16);
+  if (!globalThis.crypto?.getRandomValues) throw new Error("HeiGe menu requires crypto.getRandomValues");
+  globalThis.crypto.getRandomValues(generationBytes);
+  const generation = [...generationBytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  const trackedListeners = [];
+  const trackedTimers = new Set();
+  const trackedReaders = new Set();
+  const trackedImages = new Map();
+  const trackedControllers = new Set();
+  const rawChannel = typeof BroadcastChannel === "function"
+    ? new BroadcastChannel("heige-codex-skin-v2")
+    : null;
+  const channel = {
+    closed: false,
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      try { rawChannel?.close(); } catch {}
+    },
+  };
+  const listen = (target, type, listener, options) => {
+    target.addEventListener(type, listener, options);
+    trackedListeners.push([target, type, listener, options]);
+    return listener;
+  };
+  const later = (callback, milliseconds) => {
+    const id = setTimeout(() => {
+      trackedTimers.delete(id);
+      if (!signal.aborted) callback();
+    }, milliseconds);
+    trackedTimers.add(id);
+    return id;
+  };
+  const clearLater = (id) => {
+    clearTimeout(id);
+    trackedTimers.delete(id);
+  };
+  const childController = () => {
+    const controller = new AbortController();
+    trackedControllers.add(controller);
+    if (signal.aborted) controller.abort();
+    return controller;
+  };
+  let statusSnapshot = () => ({
+    generation,
+    themeId: null,
+    menu: false,
+    mode: "native",
+    persistenceEnabled: data.control?.persistenceEnabled ?? false,
+    revision: data.control?.revision ?? 0,
+  });
+  let disposed = false;
+  let runtime;
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    runtimeAbortController.abort();
+    for (const controller of trackedControllers) { try { controller.abort(); } catch {} }
+    trackedControllers.clear();
+    for (const [target, type, listener, options] of trackedListeners.splice(0)) {
+      try { target.removeEventListener(type, listener, options); } catch {}
+    }
+    for (const id of trackedTimers) clearTimeout(id);
+    trackedTimers.clear();
+    for (const reader of trackedReaders) {
+      try { reader.onload = null; reader.onerror = null; reader.onabort = null; reader.abort?.(); } catch {}
+    }
+    trackedReaders.clear();
+    for (const [image, reject] of trackedImages) {
+      try { image.onload = null; image.onerror = null; image.src = ""; } catch {}
+      try { reject(new DOMException("HeiGe menu generation disposed", "AbortError")); } catch {}
+    }
+    trackedImages.clear();
+    channel.close();
+    const ownedMenu = document.getElementById(data.menuId);
+    const ownedStyle = document.getElementById(data.styleId);
+    if (ownedMenu?.dataset.heigeGeneration === generation) ownedMenu.remove();
+    if (ownedStyle?.dataset.heigeGeneration === generation) ownedStyle.remove();
+    if (window.__heigeCodexSkinRuntime === runtime) {
+      delete document.documentElement.dataset.heigeCodexSkin;
+      try { delete window.__heigeCodexSkin; } catch { window.__heigeCodexSkin = undefined; }
+      try { delete window.__heigeCodexSkinRuntime; } catch { window.__heigeCodexSkinRuntime = undefined; }
+    }
+    return true;
+  };
+  runtime = { generation, signal, channel, dispose, status: () => statusSnapshot() };
+  window.__heigeCodexSkinRuntime = runtime;
+  const isCurrent = () => !signal.aborted && window.__heigeCodexSkinRuntime === runtime;
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new DOMException("HeiGe menu generation disposed", "AbortError");
+  };
 
   let style = document.getElementById(data.styleId);
   if (!style) {
@@ -108,10 +203,12 @@ export function buildSkinMenuScript({
     style.id = data.styleId;
     document.head.appendChild(style);
   }
+  style.dataset.heigeGeneration = generation;
 
   document.getElementById(data.menuId)?.remove();
   const root = document.createElement("div");
   root.id = data.menuId;
+  root.dataset.heigeGeneration = generation;
   // 双平台统一放顶部中间：右上角会撞 Windows 的窗口控制按钮和 Codex 自身菜单；
   // 顶部中间正是标题栏拖拽区，no-drag 必须保留，否则点击被拖拽吞掉
   root.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:2147483000;font:500 13px/1.4 system-ui;user-select:none;-webkit-app-region:no-drag;";
@@ -140,20 +237,20 @@ export function buildSkinMenuScript({
     const text = document.createElement("span");
     text.textContent = label;
     item.append(dot, text);
-    item.addEventListener("mouseenter", () => { if (item.style.fontWeight !== "700") item.style.background = "rgba(0,0,0,.05)"; });
+    listen(item, "mouseenter", () => { if (item.style.fontWeight !== "700") item.style.background = "rgba(0,0,0,.05)"; });
     // 先无条件复位再 paint：上传行/隐藏行不在 rows 里，paint 遍历不到它们，
     // 只靠 paint 会让这两行的 hover 灰底永久残留
-    item.addEventListener("mouseleave", () => { item.style.background = "transparent"; paint(document.documentElement.dataset.heigeCodexSkin ?? null); });
-    item.addEventListener("click", () => onPick(item));
+    listen(item, "mouseleave", () => { item.style.background = "transparent"; paint(document.documentElement.dataset.heigeCodexSkin ?? null); });
+    listen(item, "click", () => onPick(item));
     if (before) panel.insertBefore(item, before); else panel.appendChild(item);
     return item;
   };
 
   // 选中态持久化：重新注入（含看门狗补针）后恢复用户上次选的主题，而不是硬切回 activeId
-  const writeSelected = (id) => { try { localStorage.setItem(data.selectedKey, id); } catch {} };
-  const readSelected = () => { try { return localStorage.getItem(data.selectedKey); } catch { return null; } };
+  const writeSelected = (id) => { assertCurrent(); try { localStorage.setItem(data.selectedKey, id); } catch {} };
+  const readSelected = () => { assertCurrent(); try { return localStorage.getItem(data.selectedKey); } catch { return null; } };
   // 卸载皮肤后 style 已脱离 DOM，任何脚本化调用不得再改 dataset/写存储，否则污染 status
-  const alive = () => style.isConnected;
+  const alive = () => { assertCurrent(); return style.isConnected; };
 
   const setTheme = (id, persist = true) => {
     if (!alive()) return;
@@ -240,6 +337,7 @@ export function buildSkinMenuScript({
 
   let customRow = null;
   const deleteCustom = () => {
+    assertCurrent();
     try { localStorage.removeItem(data.storageKey); } catch {}
     currentCustom = null;
     if (document.documentElement.dataset.heigeCodexSkin === data.customId) clearTheme();
@@ -256,56 +354,81 @@ export function buildSkinMenuScript({
     del.textContent = "\\u00d7";
     del.title = "\\u5220\\u9664\\u81ea\\u5b9a\\u4e49\\u4e3b\\u9898";
     del.style.cssText = "flex:none;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;color:rgba(0,0,0,.45);font-size:14px;";
-    del.addEventListener("mouseenter", () => { del.style.background = "rgba(220,60,60,.15)"; del.style.color = "#c03030"; });
-    del.addEventListener("mouseleave", () => { del.style.background = "transparent"; del.style.color = "rgba(0,0,0,.45)"; });
-    del.addEventListener("click", (event) => { event.stopPropagation(); deleteCustom(); });
+    listen(del, "mouseenter", () => { del.style.background = "rgba(220,60,60,.15)"; del.style.color = "#c03030"; });
+    listen(del, "mouseleave", () => { del.style.background = "transparent"; del.style.color = "rgba(0,0,0,.45)"; });
+    listen(del, "click", (event) => { event.stopPropagation(); deleteCustom(); });
     customRow.appendChild(del);
     rows.set(data.customId, customRow);
   };
 
   const loadCustom = () => {
+    assertCurrent();
     try {
       const saved = JSON.parse(localStorage.getItem(data.storageKey) ?? "null");
       return saved && saved.dataUrl && saved.colors ? saved : null;
     } catch { return null; }
   };
   const saveCustom = (theme) => {
+    assertCurrent();
     try { localStorage.setItem(data.storageKey, JSON.stringify(theme)); return true; }
     catch (error) { console.warn("HeiGe Codex Skin：自定义主题图片过大，本次生效但重启后会回退到上一张图", error); return false; }
   };
 
   const importFromDataUrl = (dataUrl, name) => new Promise((resolve, reject) => {
+    assertCurrent();
     const img = new Image();
-    img.onload = () => {
-      if (!img.width || !img.height) { reject(new Error("图片尺寸无效")); return; }
-      const scale = Math.min(1, 1600 / img.width);
-      const full = document.createElement("canvas");
-      // 下限 1px：超宽图（如 4000×1）取整会得 0 高，toDataURL 产出空图坏主题
-      full.width = Math.max(1, Math.round(img.width * scale));
-      full.height = Math.max(1, Math.round(img.height * scale));
-      full.getContext("2d").drawImage(img, 0, 0, full.width, full.height);
-      const sample = document.createElement("canvas");
-      sample.width = 48; sample.height = Math.max(1, Math.round(48 * img.height / img.width));
-      sample.getContext("2d").drawImage(img, 0, 0, sample.width, sample.height);
-      const theme = {
-        name: name || "\\u6211\\u7684\\u56fe\\u7247",
-        dataUrl: full.toDataURL("image/webp", 0.8),
-        colors: extractPalette(sample),
-      };
-      saveCustom(theme);
-      applyCustomTheme(theme);
-      resolve(theme.colors);
+    trackedImages.set(img, reject);
+    const finishImage = () => {
+      trackedImages.delete(img);
+      img.onload = null;
+      img.onerror = null;
     };
-    img.onerror = () => reject(new Error("图片读取失败"));
-    img.src = dataUrl;
+    img.onload = () => {
+      try {
+        assertCurrent();
+        if (!img.width || !img.height) throw new Error("图片尺寸无效");
+        const scale = Math.min(1, 1600 / img.width);
+        const full = document.createElement("canvas");
+        // 下限 1px：超宽图（如 4000×1）取整会得 0 高，toDataURL 产出空图坏主题
+        full.width = Math.max(1, Math.round(img.width * scale));
+        full.height = Math.max(1, Math.round(img.height * scale));
+        full.getContext("2d").drawImage(img, 0, 0, full.width, full.height);
+        const sample = document.createElement("canvas");
+        sample.width = 48; sample.height = Math.max(1, Math.round(48 * img.height / img.width));
+        sample.getContext("2d").drawImage(img, 0, 0, sample.width, sample.height);
+        const theme = {
+          name: name || "\\u6211\\u7684\\u56fe\\u7247",
+          dataUrl: full.toDataURL("image/webp", 0.8),
+          colors: extractPalette(sample),
+        };
+        assertCurrent();
+        saveCustom(theme);
+        applyCustomTheme(theme);
+        resolve(theme.colors);
+      } catch (error) {
+        reject(error);
+      } finally {
+        finishImage();
+      }
+    };
+    img.onerror = () => {
+      finishImage();
+      reject(isCurrent() ? new Error("图片读取失败") : new DOMException("HeiGe menu generation disposed", "AbortError"));
+    };
+    try {
+      img.src = dataUrl;
+    } catch (error) {
+      finishImage();
+      reject(error);
+    }
   });
 
   // 上传失败给用户一个可见反馈，不再静默吞掉 rejection
   const flashButton = (msg) => {
+    assertCurrent();
     const prevTitle = button.title;
     button.title = msg;
-    button.animate?.([{ filter: "none" }, { filter: "brightness(1.6) saturate(0)" }, { filter: "none" }], { duration: 900 });
-    setTimeout(() => { button.title = prevTitle; }, 2600);
+    later(() => { assertCurrent(); button.title = prevTitle; }, 2600);
     console.warn("HeiGe Codex Skin：" + msg);
   };
 
@@ -313,16 +436,33 @@ export function buildSkinMenuScript({
   picker.type = "file";
   picker.accept = "image/png,image/jpeg,image/webp";
   picker.style.display = "none";
-  picker.addEventListener("change", () => {
+  listen(picker, "change", () => {
+    assertCurrent();
     const file = picker.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      importFromDataUrl(reader.result, file.name.replace(/\\.[a-z0-9]+$/i, ""))
-        .catch(() => flashButton("\\u56fe\\u7247\\u5904\\u7406\\u5931\\u8d25\\uff0c\\u8bf7\\u6362\\u4e00\\u5f20"));
+    trackedReaders.add(reader);
+    const finishReader = () => {
+      trackedReaders.delete(reader);
+      reader.onload = null;
+      reader.onerror = null;
+      reader.onabort = null;
     };
-    reader.onerror = () => flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5");
-    reader.readAsDataURL(file);
+    reader.onload = () => {
+      if (!isCurrent()) { finishReader(); return; }
+      const result = reader.result;
+      finishReader();
+      importFromDataUrl(result, file.name.replace(/\\.[a-z0-9]+$/i, ""))
+        .catch(() => { if (isCurrent()) flashButton("\\u56fe\\u7247\\u5904\\u7406\\u5931\\u8d25\\uff0c\\u8bf7\\u6362\\u4e00\\u5f20"); });
+    };
+    reader.onerror = () => { finishReader(); if (isCurrent()) flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5"); };
+    reader.onabort = () => { finishReader(); };
+    try {
+      reader.readAsDataURL(file);
+    } catch {
+      finishReader();
+      if (isCurrent()) flashButton("\\u6587\\u4ef6\\u8bfb\\u53d6\\u5931\\u8d25\\uff0c\\u8bf7\\u91cd\\u8bd5");
+    }
     picker.value = "";
     panel.style.display = "none";
   });
@@ -407,13 +547,15 @@ export function buildSkinMenuScript({
     let pending = false;
 
     const showAlert = (message, kind = "error") => {
+      assertCurrent();
       alert.textContent = message;
       alert.style.background = kind === "success" ? "rgba(26,132,103,.10)" : "rgba(187,72,50,.10)";
       alert.style.color = kind === "success" ? "#175f4d" : "#713a31";
       alert.hidden = false;
     };
-    const hideAlert = () => { alert.hidden = true; alert.textContent = ""; };
+    const hideAlert = () => { assertCurrent(); alert.hidden = true; alert.textContent = ""; };
     const paintPersistence = () => {
+      assertCurrent();
       persistenceSwitch.setAttribute("aria-checked", String(persistenceEnabled));
       persistenceSwitch.setAttribute("aria-busy", String(pending));
       persistenceSwitch.disabled = pending;
@@ -431,6 +573,7 @@ export function buildSkinMenuScript({
     };
     const isRevision = (value) => Number.isSafeInteger(value) && value >= 0;
     const requestPersistence = async (target) => {
+      assertCurrent();
       if (pending || target === persistenceEnabled) return;
       const previousEnabled = persistenceEnabled;
       const requestRevision = controlRevision;
@@ -438,8 +581,8 @@ export function buildSkinMenuScript({
       confirmation.hidden = true;
       hideAlert();
       paintPersistence();
-      const abortController = new AbortController();
-      const timeoutId = setTimeout(() => abortController.abort(), 3000);
+      const abortController = childController();
+      const timeoutId = later(() => abortController.abort(), 3000);
       try {
         const response = await fetch(data.control.endpoint, {
           method: "POST",
@@ -455,7 +598,9 @@ export function buildSkinMenuScript({
           body: JSON.stringify({ revision: requestRevision, persistenceEnabled: target }),
           signal: abortController.signal,
         });
+        assertCurrent();
         const body = await response.json();
+        assertCurrent();
         if (response.ok) {
           if (
             body?.ok !== true ||
@@ -486,14 +631,18 @@ export function buildSkinMenuScript({
           showAlert(message);
         }
       } catch (error) {
+        if (!isCurrent()) return;
         showAlert(error?.message?.includes("后台响应无效") ? error.message : safeClientError(error));
       } finally {
-        clearTimeout(timeoutId);
+        clearLater(timeoutId);
+        trackedControllers.delete(abortController);
+        if (!isCurrent()) return;
         pending = false;
         paintPersistence();
       }
     };
     const activatePersistenceSwitch = () => {
+      assertCurrent();
       if (pending) return;
       if (persistenceEnabled) {
         hideAlert();
@@ -503,28 +652,29 @@ export function buildSkinMenuScript({
         void requestPersistence(true);
       }
     };
-    persistenceSwitch.addEventListener("click", activatePersistenceSwitch);
-    persistenceSwitch.addEventListener("keydown", (event) => {
+    listen(persistenceSwitch, "click", activatePersistenceSwitch);
+    listen(persistenceSwitch, "keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       activatePersistenceSwitch();
     });
-    cancel.addEventListener("click", () => {
+    listen(cancel, "click", () => {
       confirmation.hidden = true;
       persistenceSwitch.focus();
     });
-    confirm.addEventListener("click", () => { void requestPersistence(false); });
-    getPersistenceState = () => ({ persistenceEnabled, revision: controlRevision, pending });
+    listen(confirm, "click", () => { void requestPersistence(false); });
+    getPersistenceState = () => { assertCurrent(); return { persistenceEnabled, revision: controlRevision, pending }; };
     paintPersistence();
   }
 
   // ---- 隐藏按钮：收成半透明小圆点少占地方，点圆点恢复，状态跨重启保留 ----
-  const readHidden = () => { try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
-  const writeHidden = (value) => { try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
+  const readHidden = () => { assertCurrent(); try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
+  const writeHidden = (value) => { assertCurrent(); try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
   const FULL_BUTTON_CSS = button.style.cssText;
   const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;transition:opacity .15s,transform .15s;-webkit-app-region:no-drag;";
   let hidden = false;
   const setHidden = (value, persist = true) => {
+    assertCurrent();
     hidden = value;
     button.style.cssText = value ? MINI_BUTTON_CSS : FULL_BUTTON_CSS;
     button.textContent = value ? "" : "\\u{1F3A8}";
@@ -532,15 +682,16 @@ export function buildSkinMenuScript({
     if (value) panel.style.display = "none";
     if (persist) writeHidden(value);
   };
-  button.addEventListener("mouseenter", () => { if (hidden) { button.style.opacity = ".9"; button.style.transform = "scale(1.5)"; } });
-  button.addEventListener("mouseleave", () => { if (hidden) { button.style.opacity = ".35"; button.style.transform = "scale(1)"; } });
+  listen(button, "mouseenter", () => { if (hidden) { button.style.opacity = ".9"; button.style.transform = "scale(1.5)"; } });
+  listen(button, "mouseleave", () => { if (hidden) { button.style.opacity = ".35"; button.style.transform = "scale(1)"; } });
   const hideRow = row("\\u9690\\u85cf\\u6b64\\u6309\\u94ae", "rgba(0,0,0,.18)", () => setHidden(true));
   hideRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
 
   const saved = loadCustom();
   if (saved) ensureCustomRow(saved);
 
-  button.addEventListener("click", () => {
+  listen(button, "click", () => {
+    assertCurrent();
     if (hidden) { setHidden(false); return; }
     panel.style.display = panel.style.display === "none" ? "block" : "none";
   });
@@ -566,7 +717,20 @@ export function buildSkinMenuScript({
   if (readHidden()) setHidden(true, false);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
-  window.__heigeCodexSkin = { importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden, getPersistenceState };
+  statusSnapshot = () => {
+    assertCurrent();
+    const themeId = document.documentElement.dataset.heigeCodexSkin ?? null;
+    const persistence = getPersistenceState();
+    return {
+      generation,
+      themeId,
+      menu: root.isConnected,
+      mode: themeId === null ? "native" : "active",
+      persistenceEnabled: persistence?.persistenceEnabled ?? false,
+      revision: persistence?.revision ?? 0,
+    };
+  };
+  window.__heigeCodexSkin = { generation, importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden, getPersistenceState };
   return true;
 })()`;
 }
