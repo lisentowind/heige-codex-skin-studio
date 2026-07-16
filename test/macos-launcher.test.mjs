@@ -416,6 +416,44 @@ test("launcher lock reclaims a reused live PID with a different start identity",
   await assert.rejects(lstat(lockPath), /ENOENT/);
 });
 
+for (const scenario of ["dead", "live", "unreadable"]) {
+  test(`launcher lock handles schema-1 ${scenario} owners fail-closed`, async (t) => {
+    const { home } = await fixture(t);
+    const applications = join(home, "Applications");
+    const lockPath = join(applications, ".heige-codex-skin-launcher-install.lock");
+    await mkdir(lockPath, { recursive: true, mode: 0o700 });
+    const legacyPid = 991002;
+    await writeFile(join(lockPath, "owner.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      pid: legacyPid,
+      nonce: "123e4567-e89b-42d3-a456-426614174000",
+    })}\n`, { mode: 0o600 });
+    const identityReader = async (pid) => {
+      if (pid === process.pid) return { pid, startedAt: "current-installer" };
+      if (scenario === "dead") return null;
+      if (scenario === "live") return { pid, startedAt: "unknown-legacy-start" };
+      const error = new Error("permission denied");
+      error.code = "EACCES";
+      throw error;
+    };
+
+    if (scenario === "dead") {
+      const lock = await acquireMacosLauncherInstallLock({ home, readProcessIdentity: identityReader });
+      const owner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
+      assert.equal(owner.schemaVersion, 2);
+      await lock.release();
+      return;
+    }
+    await assert.rejects(
+      acquireMacosLauncherInstallLock({ home, readProcessIdentity: identityReader }),
+      scenario === "live"
+        ? /仍在进行/
+        : (error) => error?.code === "EACCES" || error?.cause?.code === "EACCES",
+    );
+    assert.equal((await lstat(lockPath)).isDirectory(), true);
+  });
+}
+
 test("recovers a backed-up launcher and stale lock after the installer is SIGKILLed", async (t) => {
   const { root, home, installRoot } = await fixture(t);
   const initial = await installMacosLauncher({ home, installRoot });

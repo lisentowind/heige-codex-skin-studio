@@ -614,6 +614,44 @@ test("stable tree lock reclaims a reused live PID with a different start identit
   await assert.rejects(lstat(lockPath), /ENOENT/);
 });
 
+for (const scenario of ["dead", "live", "unreadable"]) {
+  test(`stable tree lock handles schema-1 ${scenario} owners fail-closed`, async (t) => {
+    const { targetRoot } = await sourceFixture(t);
+    const lockPath = `${targetRoot}.install.lock`;
+    await mkdir(lockPath, { recursive: true, mode: 0o700 });
+    const legacyPid = 991001;
+    await writeFile(join(lockPath, "owner.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      pid: legacyPid,
+      nonce: "123e4567-e89b-42d3-a456-426614174000",
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    const identityReader = async (pid) => {
+      if (pid === process.pid) return { pid, startedAt: "current-installer" };
+      if (scenario === "dead") return null;
+      if (scenario === "live") return { pid, startedAt: "unknown-legacy-start" };
+      const error = new Error("permission denied");
+      error.code = "EACCES";
+      throw error;
+    };
+
+    if (scenario === "dead") {
+      const lock = await acquireInstallTreeParticipantLock({ targetRoot, readProcessIdentity: identityReader });
+      const owner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
+      assert.equal(owner.schemaVersion, 2);
+      await lock.release();
+      return;
+    }
+    await assert.rejects(
+      acquireInstallTreeParticipantLock({ targetRoot, readProcessIdentity: identityReader }),
+      scenario === "live"
+        ? /still running/i
+        : (error) => error?.code === "EACCES" || error?.cause?.code === "EACCES",
+    );
+    assert.equal((await lstat(lockPath)).isDirectory(), true);
+  });
+}
+
 test("rejects source and target symlinks without following their sentinels", async (t) => {
   const sourceCase = await sourceFixture(t);
   const outsideFile = join(sourceCase.root, "outside-source.txt");

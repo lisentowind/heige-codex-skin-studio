@@ -1018,15 +1018,22 @@ async function validateLock(lockPath) {
     throw new Error("install lock owner is invalid");
   }
   const owner = JSON.parse((await readStableFile(ownerPath, "install lock owner")).bytes.toString("utf8"));
+  const schema1 = exactKeys(owner, ["createdAt", "nonce", "pid", "schemaVersion"]) &&
+    owner.schemaVersion === 1;
+  const schema2 = exactKeys(
+    owner,
+    ["createdAt", "nonce", "pid", "schemaVersion", "startedAt"],
+  ) && owner.schemaVersion === 2;
   if (
-    !exactKeys(owner, ["createdAt", "nonce", "pid", "schemaVersion", "startedAt"]) ||
-    owner.schemaVersion !== 2 ||
+    (!schema1 && !schema2) ||
     !Number.isSafeInteger(owner.pid) ||
     owner.pid <= 0 ||
     typeof owner.nonce !== "string" ||
     !UUID_PATTERN.test(owner.nonce) ||
-    typeof owner.startedAt !== "string" ||
-    owner.startedAt.length === 0 ||
+    (schema2 && (
+      typeof owner.startedAt !== "string" ||
+      owner.startedAt.length === 0
+    )) ||
     typeof owner.createdAt !== "string" ||
     Number.isNaN(Date.parse(owner.createdAt))
   ) {
@@ -1084,7 +1091,10 @@ async function acquireInstallLock(targetRoot, identityReader = readProcessIdenti
     }
     const owner = await validateLock(lockPath);
     const current = await identityReader(owner.pid);
-    if (sameProcessIdentity(current, owner)) {
+    if (
+      (owner.schemaVersion === 1 && current !== null) ||
+      (owner.schemaVersion === 2 && sameProcessIdentity(current, owner))
+    ) {
       throw new Error("another stable tree installation is still running");
     }
     const stalePath = `${lockPath}.stale.${randomUUID()}`;

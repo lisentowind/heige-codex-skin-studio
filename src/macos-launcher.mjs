@@ -783,17 +783,26 @@ async function acquireInstallLock(applications, identityReader = readProcessIden
         throw new Error("launcher install lock owner 无效");
       }
       owner = JSON.parse(await readFile(ownerPath, "utf8"));
+      const schema1 = exactKeys(owner, ["nonce", "pid", "schemaVersion"])
+        && owner.schemaVersion === 1;
+      const schema2 = exactKeys(owner, ["nonce", "pid", "schemaVersion", "startedAt"])
+        && owner.schemaVersion === 2;
       if (
-        !exactKeys(owner, ["nonce", "pid", "schemaVersion", "startedAt"])
-        || owner.schemaVersion !== 2
+        (!schema1 && !schema2)
         || !Number.isSafeInteger(owner.pid)
         || owner.pid <= 0
         || typeof owner.nonce !== "string"
         || !UUID_PATTERN.test(owner.nonce)
-        || typeof owner.startedAt !== "string"
-        || owner.startedAt.length === 0
+        || (schema2 && (
+          typeof owner.startedAt !== "string"
+          || owner.startedAt.length === 0
+        ))
       ) throw new Error("launcher install lock owner schema 无效");
-      if (sameProcessIdentity(await identityReader(owner.pid), owner)) {
+      const observedIdentity = await identityReader(owner.pid);
+      if (
+        (schema1 && observedIdentity !== null) ||
+        (schema2 && sameProcessIdentity(observedIdentity, owner))
+      ) {
         throw new Error("另一个 HeiGe 皮肤启动器安装仍在进行");
       }
       const stale = `${lockPath}.stale.${randomUUID()}`;
