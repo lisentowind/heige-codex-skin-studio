@@ -40,6 +40,7 @@ import {
   CONTROLLER_LAUNCH_AGENT_LABEL,
   finalizeLegacyWatchdogMigration,
   inspectLaunchAgent,
+  inspectLaunchAgentProcessIdentity,
   migrateLegacyWatchdog,
   recoverLegacyWatchdogMigration,
   registerControllerAgent,
@@ -1478,6 +1479,24 @@ function publicMigrationResult(state, migratedFrom = null) {
   };
 }
 
+function exactMigrationReadyAck(ready, expectedState) {
+  if (
+    ready?.persistenceEnabled !== true ||
+    ready?.revision !== expectedState.revision ||
+    !Number.isSafeInteger(ready?.processIdentity?.pid) ||
+    ready.processIdentity.pid <= 0 ||
+    typeof ready.processIdentity.startedAt !== "string" ||
+    ready.processIdentity.startedAt.length === 0
+  ) {
+    throw new Error("legacy migration did not receive the exact background readiness ACK");
+  }
+  return {
+    persistenceEnabled: true,
+    revision: ready.revision,
+    processIdentity: { ...ready.processIdentity },
+  };
+}
+
 async function recoverLegacyLifecycle({ journalPath, dependencies }) {
   let coordinator = await dependencies.withStateLease(
     "cli:migrate-legacy:inspect-recovery",
@@ -1686,12 +1705,7 @@ export async function migrateLegacyLifecycle({
           expectedState: migrated.state,
           outerTransaction: { journalPath, transactionId },
         });
-        if (
-          ready?.persistenceEnabled !== true ||
-          ready?.revision !== migrated.state.revision
-        ) {
-          throw new Error("legacy migration did not receive the exact background readiness ACK");
-        }
+        const ack = exactMigrationReadyAck(ready, migrated.state);
 
         await dependencies.withStateLease(
           "cli:migrate-legacy:decide-commit",
@@ -1703,9 +1717,12 @@ export async function migrateLegacyLifecycle({
             coordinator = await dependencies.updateCoordinator(
               journalPath,
               coordinator,
-              { phase: "ready-acked" },
+              { ack, phase: "ready-acked" },
               { lease },
             );
+            if (!await dependencies.verifyAckIdentity(ack.processIdentity)) {
+              throw new Error("legacy migration controller ACK changed before commit");
+            }
             coordinator = await dependencies.updateCoordinator(
               journalPath,
               coordinator,
@@ -1773,6 +1790,10 @@ async function productionMigrateLegacy({ deps, paths, roots, port }) {
     migrateService: migrateLegacyWatchdog,
     finalizeService: finalizeLegacyWatchdogMigration,
     recoverService: recoverLegacyWatchdogMigration,
+    verifyAckIdentity: async (expected) => {
+      const observed = await inspectLaunchAgentProcessIdentity();
+      return observed?.pid === expected?.pid && observed?.startedAt === expected?.startedAt;
+    },
     themeExists: async (themeId) => {
       const themes = await deps.listThemes({ roots });
       return themes.some((theme) => theme.id === themeId);

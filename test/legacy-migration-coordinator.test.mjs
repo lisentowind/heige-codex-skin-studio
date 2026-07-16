@@ -51,6 +51,20 @@ function participant(statePath, afterState = null) {
   };
 }
 
+function serviceParticipant(fx) {
+  return {
+    schemaVersion: 1,
+    operation: "migrate-legacy-watchdog",
+    transactionId: TRANSACTION_ID,
+    coordinatorJournalPath: fx.journalPath,
+    participantJournalPath: join(fx.stateRoot, "launch-agent-migration.json"),
+    oldLabel: "com.heige.codex-skin-watchdog",
+    oldPlistPath: join(fx.stateRoot, "old.plist"),
+    newLabel: "com.heige.codex-skin-controller",
+    newPlistPath: join(fx.stateRoot, "new.plist"),
+  };
+}
+
 test("coordinator publishes one canonical private journal and removes it only under the bound lease", async (t) => {
   const fx = await fixture(t);
   const state = {
@@ -116,4 +130,41 @@ test("coordinator rejects a lease from another canonical state root and immutabl
     ),
     /immutable fields/,
   );
+});
+
+test("persistent service commit requires and preserves an exact PID plus start-time ACK", async (t) => {
+  const fx = await fixture(t);
+  const state = {
+    ...createDefaultStudioState({ themeId: DEFAULT_THEME_ID, token: CONTROL_TOKEN }),
+    persistenceEnabled: true,
+    revision: 1,
+  };
+  let document = await createLegacyMigrationCoordinator({
+    journalPath: fx.journalPath,
+    transactionId: TRANSACTION_ID,
+    stateParticipant: participant(fx.statePath),
+    lease: fx.lease,
+  });
+  document = await updateLegacyMigrationCoordinator(fx.journalPath, document, {
+    phase: "state-prepared",
+    stateParticipant: participant(fx.statePath, state),
+  }, { lease: fx.lease });
+  document = await updateLegacyMigrationCoordinator(fx.journalPath, document, {
+    phase: "service-prepared",
+    serviceParticipant: serviceParticipant(fx),
+  }, { lease: fx.lease });
+  const ack = {
+    persistenceEnabled: true,
+    revision: 1,
+    processIdentity: { pid: 8301, startedAt: "Fri Jul 17 16:50:00 2026" },
+  };
+  document = await updateLegacyMigrationCoordinator(fx.journalPath, document, {
+    ack,
+    phase: "ready-acked",
+  }, { lease: fx.lease });
+  document = await updateLegacyMigrationCoordinator(fx.journalPath, document, {
+    decision: "commit",
+    phase: "commit-decided",
+  }, { lease: fx.lease });
+  assert.deepEqual(document.ack, ack);
 });

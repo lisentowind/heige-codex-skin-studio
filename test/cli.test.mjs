@@ -172,6 +172,7 @@ function legacyMigrationHarness(overrides = {}) {
       assert.equal(stateLeaseActive, true);
       coordinator = {
         transactionId,
+        ack: null,
         decision: "undecided",
         phase: "prepared",
         stateParticipant: structuredClone(stateParticipant),
@@ -231,7 +232,16 @@ function legacyMigrationHarness(overrides = {}) {
       return {
         persistenceEnabled: true,
         revision: expectedState.revision,
+        processIdentity: {
+          pid: 8301,
+          startedAt: "Fri Jul 17 16:50:00 2026",
+        },
       };
+    },
+    verifyAckIdentity: async (identity) => {
+      events.push("ready:identity-verified");
+      return identity?.pid === 8301 &&
+        identity?.startedAt === "Fri Jul 17 16:50:00 2026";
     },
     finalizeService: async () => {
       assert.equal(stateLeaseActive, false, "service finalize must run outside the common lease");
@@ -586,6 +596,11 @@ test("legacy migration releases the common lease for service bootstrap and exact
   });
   assert.ok(
     harness.events.indexOf("ready:exact-ack") <
+      harness.events.indexOf("ready:identity-verified"),
+    "the handshake identity must be independently revalidated",
+  );
+  assert.ok(
+    harness.events.indexOf("ready:identity-verified") <
       harness.events.indexOf("coordinator:commit:commit-decided"),
     "the global commit decision must follow the exact ACK",
   );
@@ -594,6 +609,14 @@ test("legacy migration releases the common lease for service bootstrap and exact
       harness.events.indexOf("service:committed"),
     "the old watchdog may be removed only after the durable global commit",
   );
+});
+
+test("legacy migration rolls back when the exact ACK process changes before commit", async () => {
+  const harness = legacyMigrationHarness({ verifyAckIdentity: async () => false });
+  await assert.rejects(runLegacyMigration(harness), /ACK changed before commit/);
+  assert.equal(harness.coordinator, null);
+  assert.equal(harness.state, null);
+  assert.equal(harness.oldWatchdogIntact, true);
 });
 
 test("legacy migration readiness failure durably decides rollback before restoring service and state", async () => {
@@ -664,6 +687,9 @@ test("legacy migration rolls forward after a crash between global commit and par
 
   harness.dependencies.finalizeService = async () => {
     throw new Error("a recovered transaction must not be finalized twice");
+  };
+  harness.dependencies.verifyAckIdentity = async () => {
+    throw new Error("postcommit recovery must not require the original ACK PID");
   };
   assert.deepEqual(await runLegacyMigration(harness), {
     migratedFrom: null,

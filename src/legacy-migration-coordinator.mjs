@@ -32,6 +32,7 @@ const PHASE_TRANSITIONS = new Map([
   ["rollback-decided", new Set()],
 ]);
 const KEYS = [
+  "ack",
   "createdAt",
   "decision",
   "nonce",
@@ -53,6 +54,22 @@ function isRecord(value) {
 function exactKeys(value, keys) {
   return isRecord(value) &&
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+function validateAck(value) {
+  if (value === null) return null;
+  if (
+    !exactKeys(value, ["persistenceEnabled", "processIdentity", "revision"]) ||
+    value.persistenceEnabled !== true ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !exactKeys(value.processIdentity, ["pid", "startedAt"]) ||
+    !Number.isSafeInteger(value.processIdentity.pid) ||
+    value.processIdentity.pid <= 0 ||
+    typeof value.processIdentity.startedAt !== "string" ||
+    value.processIdentity.startedAt.length === 0
+  ) throw new Error("legacy migration exact ACK schema is invalid");
+  return { ...value, processIdentity: { ...value.processIdentity } };
 }
 
 function canonicalAbsolute(path, label) {
@@ -158,7 +175,21 @@ function validateDocument(value, expectedPath = null) {
     throw new Error("legacy migration coordinator path does not match its state participant");
   }
   const serviceParticipant = validateServiceParticipant(value.serviceParticipant, value, expectedPath);
-  return { ...value, serviceParticipant, stateParticipant };
+  const ack = validateAck(value.ack);
+  const persistentServiceCommit = ["ready-acked", "commit-decided"].includes(value.phase) &&
+    serviceParticipant !== null;
+  if (
+    persistentServiceCommit &&
+    (
+      ack === null ||
+      stateParticipant.afterState?.persistenceEnabled !== true ||
+      ack.revision !== stateParticipant.afterState.revision
+    )
+  ) throw new Error("legacy migration persistent commit is missing its exact ACK");
+  if (!persistentServiceCommit && ack !== null) {
+    throw new Error("legacy migration ACK is invalid for its phase");
+  }
+  return { ...value, ack, serviceParticipant, stateParticipant };
 }
 
 async function syncDirectory(path) {
@@ -306,6 +337,7 @@ export async function createLegacyMigrationCoordinator({
     decision: "undecided",
     phase: "prepared",
     createdAt: new Date().toISOString(),
+    ack: null,
     stateParticipant,
     serviceParticipant: null,
   }, journalPath);
@@ -324,7 +356,7 @@ export async function updateLegacyMigrationCoordinator(journalPath, current, cha
   if (!isRecord(changes)) {
     throw new Error("legacy migration coordinator changes must be an object");
   }
-  const mutable = new Set(["decision", "phase", "serviceParticipant", "stateParticipant"]);
+  const mutable = new Set(["ack", "decision", "phase", "serviceParticipant", "stateParticipant"]);
   if (Object.keys(changes).some((key) => !mutable.has(key))) {
     throw new Error("legacy migration coordinator changes contain immutable fields");
   }
