@@ -147,8 +147,33 @@ test("fetches renderer targets only from the fixed IPv4 loopback endpoint", asyn
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], "http://127.0.0.1:9341/json/list");
-  assert.deepEqual(calls[0][1], { redirect: "error" });
+  assert.equal(calls[0][1].redirect, "error");
+  assert.ok(calls[0][1].signal instanceof AbortSignal);
   assert.deepEqual(targets.map(({ id }) => id), ["target-a"]);
+});
+
+test("renderer discovery times out a fetch that never settles", async () => {
+  await assert.rejects(
+    fetchRendererTargets(9341, {
+      timeoutMs: 10,
+      fetchImpl: async () => new Promise(() => {}),
+    }),
+    /discovery.*timed out.*10ms/i,
+  );
+});
+
+test("renderer discovery times out a JSON body that never settles", async () => {
+  await assert.rejects(
+    fetchRendererTargets(9341, {
+      timeoutMs: 10,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => new Promise(() => {}),
+      }),
+    }),
+    /discovery.*timed out.*10ms/i,
+  );
 });
 
 test("rejects invalid renderer discovery ports before fetching", async () => {
@@ -260,6 +285,20 @@ test("CdpSession refuses non-loopback debugger sockets", () => {
 test("open enables the Runtime and Page domains", async () => {
   const { session } = await openFakeSession();
   session.close();
+});
+
+test("open times out a stalled WebSocket connection and closes it", async () => {
+  FakeWebSocket.reset();
+  const session = new CdpSession(LOOPBACK_SOCKET_URL, {
+    WebSocketImpl: FakeWebSocket,
+    connectTimeoutMs: 10,
+  });
+  const opening = session.open();
+  const socket = FakeWebSocket.instances[0];
+
+  await assert.rejects(opening, /WebSocket.*connect.*timed out.*10ms/i);
+  assert.equal(socket.closeCalls, 1);
+  assert.equal(socket.readyState, FakeWebSocket.CLOSED);
 });
 
 test("correlates out-of-order command responses with numeric IDs", async () => {

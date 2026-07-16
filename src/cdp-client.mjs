@@ -3,6 +3,8 @@ const MAX_PORT = 65535;
 const DEFAULT_WAIT_TIMEOUT_MS = 5000;
 const DEFAULT_POLL_MS = 100;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 5000;
 
 function validatePort(port) {
   if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) {
@@ -106,6 +108,27 @@ function sleepWithTimer(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function awaitBeforeDeadline(
+  promise,
+  { deadline, timeoutMs, label, onTimeout },
+) {
+  const remainingMs = Math.max(0, deadline - Date.now());
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, remainingMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function buildHttpError(response) {
   const status = Number.isInteger(response?.status)
     ? String(response.status)
@@ -153,17 +176,33 @@ export function filterRendererTargets(targets) {
 
 export async function fetchRendererTargets(
   port,
-  { fetchImpl = globalThis.fetch } = {},
+  {
+    fetchImpl = globalThis.fetch,
+    timeoutMs = DEFAULT_DISCOVERY_TIMEOUT_MS,
+  } = {},
 ) {
   validatePort(port);
+  validateDuration(timeoutMs, "timeoutMs", { allowZero: false });
   if (typeof fetchImpl !== "function") {
     throw new TypeError("fetchImpl must be a function");
   }
 
   const endpoint = `http://127.0.0.1:${port}/json/list`;
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
   let response;
   try {
-    response = await fetchImpl(endpoint, { redirect: "error" });
+    response = await awaitBeforeDeadline(
+      Promise.resolve(
+        fetchImpl(endpoint, { redirect: "error", signal: controller.signal }),
+      ),
+      {
+        deadline,
+        timeoutMs,
+        label: "renderer target discovery",
+        onTimeout: () => controller.abort(),
+      },
+    );
   } catch (error) {
     throw new Error(
       `failed to fetch renderer targets from ${endpoint}: ${errorMessage(error)}`,
@@ -180,7 +219,12 @@ export async function fetchRendererTargets(
 
   let targets;
   try {
-    targets = await response.json();
+    targets = await awaitBeforeDeadline(Promise.resolve(response.json()), {
+      deadline,
+      timeoutMs,
+      label: "renderer target discovery JSON",
+      onTimeout: () => controller.abort(),
+    });
   } catch (error) {
     throw new Error(
       `malformed renderer target JSON from ${endpoint}: ${errorMessage(error)}`,
@@ -211,18 +255,26 @@ export async function waitForRendererTargets(
   }
 
   let elapsedMs = 0;
+  const deadline = Date.now() + timeoutMs;
   let lastError = new Error("no renderer discovery attempt completed");
 
   while (true) {
     try {
-      const targets = await fetchRendererTargets(port, { fetchImpl });
+      const remainingBudgetMs = Math.max(
+        1,
+        Math.min(timeoutMs - elapsedMs, deadline - Date.now()),
+      );
+      const targets = await fetchRendererTargets(port, {
+        fetchImpl,
+        timeoutMs: remainingBudgetMs,
+      });
       if (targets.length > 0) return targets;
       lastError = new Error("no matching app:// page renderer targets");
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
 
-    if (elapsedMs >= timeoutMs) {
+    if (elapsedMs >= timeoutMs || Date.now() >= deadline) {
       throw new Error(
         `timed out after ${timeoutMs}ms waiting for renderer targets on 127.0.0.1:${port}: ${lastError.message}`,
         { cause: lastError },
@@ -241,6 +293,7 @@ export class CdpSession {
     {
       WebSocketImpl = globalThis.WebSocket,
       commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
+      connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
     } = {},
   ) {
     parseLoopbackWebSocketUrl(webSocketDebuggerUrl);
@@ -248,10 +301,12 @@ export class CdpSession {
       throw new TypeError("WebSocketImpl must be a WebSocket constructor");
     }
     validateDuration(commandTimeoutMs, "commandTimeoutMs", { allowZero: false });
+    validateDuration(connectTimeoutMs, "connectTimeoutMs", { allowZero: false });
 
     this.webSocketDebuggerUrl = webSocketDebuggerUrl;
     this.WebSocketImpl = WebSocketImpl;
     this.commandTimeoutMs = commandTimeoutMs;
+    this.connectTimeoutMs = connectTimeoutMs;
     this.socket = null;
     this.nextRequestId = 1;
     this.pending = new Map();
@@ -263,6 +318,7 @@ export class CdpSession {
     this.openPromise = null;
     this.resolveOpen = null;
     this.rejectOpen = null;
+    this.connectTimer = null;
   }
 
   open() {
@@ -276,6 +332,14 @@ export class CdpSession {
       this.resolveOpen = resolve;
       this.rejectOpen = reject;
     });
+    this.connectTimer = setTimeout(() => {
+      this.terminate(
+        new Error(
+          `CDP WebSocket connect timed out after ${this.connectTimeoutMs}ms`,
+        ),
+      );
+      this.closeSocket();
+    }, this.connectTimeoutMs);
 
     try {
       this.socket = new this.WebSocketImpl(this.webSocketDebuggerUrl);
@@ -290,6 +354,7 @@ export class CdpSession {
 
     this.socket.onopen = () => {
       if (this.closed || this.socketOpen) return;
+      this.clearConnectTimer();
       this.socketOpen = true;
       Promise.all([this.send("Runtime.enable"), this.send("Page.enable")])
         .then(() => {
@@ -438,6 +503,7 @@ export class CdpSession {
 
   terminate(error) {
     if (this.terminalError) return;
+    this.clearConnectTimer();
     this.terminalError = error;
     this.closed = true;
     this.socketOpen = false;
@@ -452,6 +518,12 @@ export class CdpSession {
       reject(error);
     }
     this.pending.clear();
+  }
+
+  clearConnectTimer() {
+    if (this.connectTimer === null) return;
+    clearTimeout(this.connectTimer);
+    this.connectTimer = null;
   }
 
   closeSocket() {
