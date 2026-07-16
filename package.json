@@ -3,9 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "heige-codex-skin": "src/cli.mjs"
+  },
   "scripts": {
     "test": "node --test",
     "doctor": "node src/cli.mjs doctor",
-    "status": "node src/cli.mjs status"
+    "status": "node src/cli.mjs status",
+    "list": "node src/cli.mjs list",
+    "apply": "node src/cli.mjs apply"
   }
 }

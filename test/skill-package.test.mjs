@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,46 +8,49 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const skillRoot = new URL("../skill/codex-miku-theme/", import.meta.url);
-
-async function text(path) {
-  return readFile(new URL(path, skillRoot), "utf8");
-}
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const skillRoot = new URL("../skill/heige-codex-skin-studio/", import.meta.url);
 
 test("keeps the reusable skill free of author paths", async () => {
-  const skill = await text("SKILL.md");
+  const skill = await readFile(new URL("SKILL.md", skillRoot), "utf8");
 
-  assert.match(skill, /^---\nname: codex-miku-theme\ndescription: Use when /);
+  assert.match(skill, /^---\nname: heige-codex-skin-studio\n/);
   assert.doesNotMatch(skill, /\/Users\/blakexu/);
 });
 
-test("installs the bundled Miku Future custom pet as the selected avatar", async (t) => {
-  const home = await mkdtemp(join(tmpdir(), "codex-miku-skill-"));
+test("packages and installs a self-contained distribution", async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "heige-skin-skill-")));
   t.after(() => rm(home, { recursive: true, force: true }));
 
-  const codexRoot = join(home, ".codex");
-  const configPath = join(codexRoot, "config.toml");
-  await mkdir(codexRoot, { recursive: true });
-  await writeFile(configPath, `model = "gpt-5"\n`);
+  await execFileAsync(join(repoRoot, "scripts/package-skill.command"));
 
-  await execFileAsync(
-    fileURLToPath(new URL("scripts/install-pet.command", skillRoot)),
-    [],
+  const archive = join(repoRoot, "output/heige-codex-skin-studio.skill");
+  await execFileAsync("/usr/bin/unzip", ["-q", archive, "-d", home]);
+
+  const unpacked = join(home, "heige-codex-skin-studio");
+  await execFileAsync(join(unpacked, "scripts/install.command"), [], {
+    env: { ...process.env, HOME: home, HEIGE_SKIP_APPLY: "1" },
+  });
+
+  const installed = join(home, ".codex/heige-codex-skin-studio");
+  for (const relative of [
+    "src/cli.mjs",
+    "themes/miku-488137/theme.json",
+    "custom-pet/install.command",
+    "scripts/apply.command",
+    "scripts/pause.command",
+  ]) {
+    await access(join(installed, relative));
+  }
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [join(installed, "src/cli.mjs"), "list"],
     { env: { ...process.env, HOME: home } },
   );
-
-  const installedRoot = join(codexRoot, "pets", "miku-future");
-  const sourceRoot = new URL("payload/custom-pet/miku-future/", skillRoot);
-  assert.deepEqual(
-    await readFile(join(installedRoot, "pet.json")),
-    await readFile(new URL("pet.json", sourceRoot)),
-  );
-  assert.deepEqual(
-    await readFile(join(installedRoot, "spritesheet.webp")),
-    await readFile(new URL("spritesheet.webp", sourceRoot)),
-  );
-  assert.match(
-    await readFile(configPath, "utf8"),
-    /^selected-avatar-id = "custom:miku-future"$/m,
+  const themes = JSON.parse(stdout);
+  assert.ok(
+    themes.some((theme) => theme.id === "miku-488137"),
+    "installed copy must ship the Miku preset",
   );
 });
