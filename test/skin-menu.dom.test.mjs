@@ -604,6 +604,8 @@ test("validated upload scales within both canvas budgets and persists", async (t
   const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
   assert.equal(alert.getAttribute("aria-busy"), "false");
   assert.match(alert.textContent, /已应用并保存/);
+  assert.match(alert.textContent, /不会改写最近正式主题/);
+  assert.match(alert.textContent, /自动补针或常驻启动时可能继续显示/);
   assert.deepEqual(drawCalls[0], { width: 2000, height: 500 });
   assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
   assert.match(page.window.localStorage.getItem("heigeCodexCustomTheme"), /data:image\/webp/);

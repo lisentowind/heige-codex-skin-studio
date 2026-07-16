@@ -68,6 +68,7 @@ test("custom quick image stays a local temporary slot rather than a durable them
   for (const doc of [readme, skill, skillReadme]) {
     assert.match(doc, /自定义图片[^\n。]*(?:本地临时槽|本地快捷槽)/);
     assert.match(doc, /不[^\n。]*(?:正式主题|持久主题|权威主题)/);
+    assert.match(doc, /renderer 本地存储[^\n。]*(?:自动补针|常驻启动)[^\n。]*继续显示/i);
   }
 });
 

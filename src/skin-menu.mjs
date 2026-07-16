@@ -729,7 +729,7 @@ export function buildSkinMenuScript({
         applyCustomTheme(theme);
         showUploadAlert(
           persisted
-            ? "自定义图片已应用并保存。它是 Codex 本地快捷图片；皮肤启动器恢复最近正式主题，不把它记为最近主题。"
+            ? "自定义图片已应用并保存到当前 Codex 的本地快捷槽。它不会改写最近正式主题；自动补针或常驻启动时可能继续显示，清除本地数据后会丢失。"
             : "自定义图片本次已应用，但存储空间不足，重启后不会保留。",
           persisted ? "success" : "warning",
         );
