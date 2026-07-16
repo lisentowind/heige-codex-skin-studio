@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
   lstat,
@@ -192,11 +193,28 @@ async function pathInfo(path) {
 }
 
 async function readSmallRegular(path, label) {
-  const info = await lstat(path);
-  if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_GENERATED_FILE_BYTES) {
-    throw new Error(`${label} 不是受支持的 generated bundle 文件`);
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await open(path, fsConstants.O_RDONLY | noFollow);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size <= 0n || before.size > BigInt(MAX_GENERATED_FILE_BYTES)) {
+      throw new Error(`${label} 不是受支持的 generated bundle 文件`);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeNs !== after.mtimeNs
+      || BigInt(bytes.byteLength) !== before.size
+    ) throw new Error(`${label} 在归属校验期间发生变化`);
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error(`${label} 不是有效 UTF-8`);
+    return { info: { mode: Number(before.mode) }, text };
+  } finally {
+    await handle.close();
   }
-  return { info, text: await readFile(path, "utf8") };
 }
 
 function oneMatch(text, expression, label) {

@@ -169,6 +169,18 @@ test("refuses extra bundle content and a nested directory symlink without deleti
     assert.equal(await readFile(join(outside, "sentinel"), "utf8"), "preserve me\n");
     assert.equal((await lstat(macos)).isSymbolicLink(), true);
   });
+
+  await t.test("nested executable symlink", async (t) => {
+    const { root, home, installRoot } = await fixture(t);
+    const result = await installMacosLauncher({ home, installRoot });
+    const outside = join(root, "foreign-executable");
+    await writeFile(outside, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
+    await rm(result.executablePath);
+    await symlink(outside, result.executablePath);
+    await assert.rejects(installMacosLauncher({ home, installRoot }), /归属|generated|符号链接/i);
+    assert.equal(await readFile(outside, "utf8"), "#!/bin/zsh\nexit 0\n");
+    assert.equal((await lstat(result.executablePath)).isSymbolicLink(), true);
+  });
 });
 
 test("rejects path control characters and lone UTF-16 surrogates before writing output", async () => {
