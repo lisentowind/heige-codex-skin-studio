@@ -3,10 +3,12 @@ import { join } from "node:path";
 
 export const PRODUCT_ID = "heige-codex-skin-studio";
 export const PRODUCT_NAME = "HeiGe Codex Skin Studio";
-export const STATE_SCHEMA_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
 export const THEME_SCHEMA_VERSION = 1;
 export const DEFAULT_THEME_ID = "miku-488137";
+export const NATIVE_THEME_ID = "__heige_native__";
 export const DEFAULT_CDP_PORT = 9341;
+export const CODEX_RENDERER_ORIGIN = "app://-";
 export const EXPECTED_BUNDLE_ID = "com.openai.codex";
 export const EXPECTED_TEAM_ID = "2DC432GLL2";
 
@@ -28,6 +30,9 @@ export function resolveStudioPaths({
     installRoot,
     stateRoot,
     statePath: join(stateRoot, "state.json"),
+    sessionPath: join(stateRoot, "session.json"),
+    transitionPath: join(stateRoot, "transition.json"),
+    lockPath: join(stateRoot, "operation.lock"),
     logPath: join(stateRoot, "injector.log"),
     userThemesRoot: join(stateRoot, "themes"),
   };

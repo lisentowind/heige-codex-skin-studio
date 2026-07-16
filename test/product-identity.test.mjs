@@ -9,10 +9,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("exposes the approved product identity and studio paths", async () => {
   const {
+    CODEX_RENDERER_ORIGIN,
     DEFAULT_CDP_PORT,
     DEFAULT_THEME_ID,
     EXPECTED_BUNDLE_ID,
     EXPECTED_TEAM_ID,
+    NATIVE_THEME_ID,
     PRODUCT_ID,
     PRODUCT_NAME,
     STATE_SCHEMA_VERSION,
@@ -22,8 +24,10 @@ test("exposes the approved product identity and studio paths", async () => {
 
   assert.equal(PRODUCT_ID, "heige-codex-skin-studio");
   assert.equal(PRODUCT_NAME, "HeiGe Codex Skin Studio");
-  assert.equal(STATE_SCHEMA_VERSION, 1);
+  assert.equal(STATE_SCHEMA_VERSION, 2);
   assert.equal(THEME_SCHEMA_VERSION, 1);
+  assert.equal(NATIVE_THEME_ID, "__heige_native__");
+  assert.equal(CODEX_RENDERER_ORIGIN, "app://-");
   assert.equal(DEFAULT_THEME_ID, "miku-488137");
   assert.equal(DEFAULT_CDP_PORT, 9341);
   assert.equal(EXPECTED_BUNDLE_ID, "com.openai.codex");
@@ -32,6 +36,9 @@ test("exposes the approved product identity and studio paths", async () => {
     installRoot: "/Users/example/.codex/heige-codex-skin-studio",
     stateRoot: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio",
     statePath: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/state.json",
+    sessionPath: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/session.json",
+    transitionPath: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/transition.json",
+    lockPath: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/operation.lock",
     logPath: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/injector.log",
     userThemesRoot: "/Users/example/Library/Application Support/HeiGeCodexSkinStudio/themes",
   });
