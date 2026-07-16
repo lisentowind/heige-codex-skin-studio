@@ -180,6 +180,7 @@ function normalizedDependencies(input) {
       "verifyBackgroundHandshake",
     ),
     backgroundProcess: input.backgroundProcess === true,
+    allowInternalPersistenceEnable: input.allowInternalPersistenceEnable === true,
     newTransitionNonce: input.newTransitionNonce ?? randomUUID,
     fault: input.fault ?? (async () => {}),
     logger: input.logger ?? noopLogger(),
@@ -474,6 +475,7 @@ export function createSkinController(input) {
   };
 
   let setPersistencePublic;
+  let setPersistenceFromMenu;
   let setThemeSelectionPublic;
 
   const ensureServer = async (state) => {
@@ -483,7 +485,7 @@ export function createSkinController(input) {
         token: state.controlToken,
         allowedOrigins: new Set([CODEX_RENDERER_ORIGIN]),
         readState: deps.readState,
-        setPersistence: (request) => setPersistencePublic(request),
+        setPersistence: (request) => setPersistenceFromMenu(request),
         setThemeSelection: (request) => setThemeSelectionPublic(request),
         onPersistenceResponseFinished: (state) => {
           if (!deps.backgroundProcess && state?.persistenceEnabled === true) {
@@ -880,12 +882,12 @@ export function createSkinController(input) {
     );
   };
 
-  setPersistencePublic = async ({
+  const setPersistence = async ({
     expectedRevision,
     enabled,
     includeProcessIdentity = false,
     signal,
-  } = {}) => {
+  } = {}, { menuCapability = false } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw new Error("expectedRevision must be a non-negative safe integer");
     }
@@ -897,6 +899,14 @@ export function createSkinController(input) {
       const changed = await deps.withLease("controller:set-persistence", async (lease) => {
         const state = validateControlState(await deps.readState());
         lastKnownState = state;
+        if (
+          enabled &&
+          !state.persistenceEnabled &&
+          menuCapability !== true &&
+          !deps.allowInternalPersistenceEnable
+        ) {
+          throw new Error("常驻只能在 Codex 顶部菜单的「皮肤常驻」开关中开启");
+        }
         if (state.persistenceEnabled === enabled) {
           if (enabled) {
             const processIdentity = await probeProcess();
@@ -1085,6 +1095,9 @@ export function createSkinController(input) {
       throw error;
     }
   };
+
+  setPersistencePublic = (request) => setPersistence(request);
+  setPersistenceFromMenu = (request) => setPersistence(request, { menuCapability: true });
 
   setThemeSelectionPublic = async ({ expectedRevision, themeId, signal } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {

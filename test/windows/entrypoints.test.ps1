@@ -230,7 +230,7 @@ try {
         } "原始错误：original apply failure；补偿错误：closed restore failure"
     }
 
-    Test-Case "Enable applies this session then enables next-launch persistence" {
+    Test-Case "Enable compatibility name applies only this session" {
         $script:Events = @()
         $script:CliCalls = @()
         $result = Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
@@ -240,22 +240,19 @@ try {
             -CliProvider {
                 param($Context, $Arguments)
                 $script:CliCalls += ,@($Arguments)
-                if ($Arguments[0] -eq "apply") {
-                    $script:Events += "apply"
-                    return [pscustomobject]@{ mode = "active" }
-                }
-                $script:Events += "enable"
-                return [pscustomobject]@{ persistenceEnabled = $true; revision = 4 }
-            } `
-            -UnregisterProvider { param($Context) throw "must not unregister" }
-        Assert-Equal @("preflight", "start-cdp", "apply", "enable") $script:Events
-        Assert-ExactCliCall -Actual $script:CliCalls[1] `
-            -Expected @("set-persistence", "true", "--port", "9341")
-        Assert-True $result.PersistenceEnabled
+                $script:Events += "apply"
+                return [pscustomobject]@{ mode = "active"; persistenceEnabled = $false }
+            }
+        Assert-Equal @("preflight", "start-cdp", "apply") $script:Events
+        Assert-Equal 1 $script:CliCalls.Count
+        Assert-ExactCliCall -Actual $script:CliCalls[0] `
+            -Expected @("apply", "--theme", "miku-488137", "--port", "9341")
+        Assert-False $result.PersistenceEnabled
+        Assert-False $result.PersistenceChanged
         Assert-Equal "complete" $result.Completion
     }
 
-    Test-Case "Enable without an explicit theme applies the authoritative stored selection" {
+    Test-Case "Enable compatibility name restores stored selection without changing persistence" {
         $script:CliCalls = @()
         $result = Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { New-TestEntrypointContext } `
@@ -264,72 +261,14 @@ try {
             -CliProvider {
                 param($Context, $Arguments)
                 $script:CliCalls += ,@($Arguments)
-                if ($Arguments[0] -eq "apply") {
-                    return [pscustomobject]@{ mode = "active" }
-                }
-                return [pscustomobject]@{ persistenceEnabled = $true; revision = 5 }
-            } `
-            -UnregisterProvider { param($Context) throw "must not unregister" }
+                return [pscustomobject]@{ mode = "active"; persistenceEnabled = $true }
+            }
         Assert-ExactCliCall -Actual $script:CliCalls[0] `
             -Expected @("apply", "--prefer-stored", "--port", "9341")
-        Assert-ExactCliCall -Actual $script:CliCalls[1] `
-            -Expected @("set-persistence", "true", "--port", "9341")
+        Assert-Equal 1 $script:CliCalls.Count
         Assert-True $result.PersistenceEnabled
+        Assert-False $result.PersistenceChanged
         Assert-Equal "stored-or-default" $result.ThemeSelection
-    }
-
-    Test-Case "Enable failure is explicit partial success with authoritative false and task absence" {
-        $script:StateEnabled = $false
-        $script:TaskExists = $false
-        $script:UnregisterCalled = $false
-        $script:Calls = @()
-        Assert-Throws {
-            Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
-                -ContextProvider { New-TestEntrypointContext } `
-                -CdpStatusProvider { param($Context, $Port) $true } `
-                -StartCdpProvider { param($Context, $Port) } `
-                -CliProvider {
-                    param($Context, $Arguments)
-                    $script:Calls += ($Arguments -join " ")
-                    if ($Arguments[0] -eq "apply") {
-                        return [pscustomobject]@{ mode = "active" }
-                    }
-                    if ($Arguments[1] -eq "true") {
-                        $script:StateEnabled = $true
-                        $script:TaskExists = $true
-                        throw "exact controller ACK timed out"
-                    }
-                    $script:StateEnabled = $false
-                    $script:TaskExists = $false
-                    return [pscustomobject]@{ persistenceEnabled = $false; revision = 6 }
-                } `
-                -UnregisterProvider {
-                    param($Context)
-                    $script:UnregisterCalled = $true
-                    $script:TaskExists = $false
-                    [pscustomobject]@{ VerifiedAbsent = $true }
-                }
-        } "本次会话皮肤已应用，但常驻保持关闭"
-        Assert-False $script:StateEnabled
-        Assert-False $script:TaskExists
-        Assert-True $script:UnregisterCalled
-        Assert-Match 'set-persistence false' ($script:Calls -join "|")
-    }
-
-    Test-Case "Enable never claims disabled when compensation cannot verify it" {
-        Assert-Throws {
-            Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
-                -ContextProvider { New-TestEntrypointContext } `
-                -CdpStatusProvider { param($Context, $Port) $true } `
-                -StartCdpProvider { param($Context, $Port) } `
-                -CliProvider {
-                    param($Context, $Arguments)
-                    if ($Arguments[0] -eq "apply") { return [pscustomobject]@{ mode = "active" } }
-                    if ($Arguments[1] -eq "true") { throw "enable failed" }
-                    throw "disable compensation failed"
-                } `
-                -UnregisterProvider { param($Context) [pscustomobject]@{ VerifiedAbsent = $true } }
-        } "无法确认权威常驻状态"
     }
 
     Test-Case "Pause is a clean no-op without an exact current CDP process" {
@@ -966,7 +905,7 @@ try {
         )
         Assert-False ($source -match '/bin/ps|/usr/bin/open|osascript|/usr/sbin/lsof')
         Assert-False ($source -match '"enable-skin"|"restore"')
-        Assert-Match '"set-persistence",\s*"true"' $source
+        Assert-False ($source -match '"set-persistence",\s*"true"')
         Assert-Match '"set-persistence",\s*"false"' $source
         Assert-Match 'Get-CimInstance[^\r\n]*Win32_Process' $source
         Assert-Match 'ParentProcessId' $source
@@ -981,7 +920,7 @@ try {
         Assert-Match 'ThemeSelection' $source
     }
 
-    Test-Case "Windows Start Menu apply wrapper restores stored theme while enable remains explicit" {
+    Test-Case "Windows Start Menu and legacy enable wrappers remain session-only" {
         $applySource = [System.IO.File]::ReadAllText(
             (Join-Path $script:RepositoryRoot "scripts\windows\apply.ps1")
         )
@@ -992,6 +931,9 @@ try {
         Assert-Match 'PSBoundParameters\.ContainsKey\("Theme"\)' $applySource
         Assert-Match 'Invoke-HeiGeApplyFlow\s+@arguments' $applySource
         Assert-Match 'Invoke-HeiGeEnableSkinFlow' $enableSource
+        Assert-Match '当前会话' $enableSource
+        Assert-Match 'Codex 顶部.*皮肤常驻.*开关' $enableSource
+        Assert-False ($enableSource -match '已.*开启常驻')
     }
 
     Test-Case "Windows restore has an offline path and truthful closed native messages" {

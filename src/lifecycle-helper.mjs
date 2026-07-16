@@ -30,7 +30,7 @@ const PROCESS_KEYS = Object.freeze(["executablePath", "pid", "startedAt"]);
 const CONTINUATION_KEYS = Object.freeze(["cliPath", "command", "nodePath", "port", "themeId"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const CONTINUATION_COMMANDS = new Set(["apply", "enable-after-restart"]);
+const CONTINUATION_COMMANDS = new Set(["apply"]);
 const LIFECYCLE_FAILURE = Symbol("heige.lifecycle.failure");
 const SAFE_FAILURES = Object.freeze({
   CONTINUATION_FAILED_COMPENSATED: Object.freeze({

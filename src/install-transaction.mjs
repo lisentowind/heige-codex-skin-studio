@@ -36,6 +36,15 @@ const SOURCE_ENTRIES = Object.freeze([
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_JOURNAL_BYTES = 128 * 1024;
 const MAX_PACKAGE_BYTES = 256 * 1024;
+const OPTION1_DEPRECATED_ENABLE_ENTRYPOINT = [
+  "#!/bin/zsh",
+  "set -euo pipefail",
+  "",
+  "# HEIGE_OPTION1_MENU_ONLY=1",
+  "print -u2 -- \"此旧入口不再开启常驻。请先打开「HeiGe 皮肤启动器」恢复本次皮肤，再在 Codex 顶部「皮肤常驻」开关中开启下次常驻。\"",
+  "exit 64",
+  "",
+].join("\n");
 const PARTICIPANT_KEYS = [
   "afterManifestSha256",
   "backupPath",
@@ -443,7 +452,11 @@ async function validateLegacyTree(root, {
     && enableText.includes("com.heige.codex-skin-watchdog");
   const isCurrentEnable = enableText.includes("run-cli.zsh")
     && enableText.includes("enable-skin");
-  if (!enableText.startsWith("#!/bin/zsh\n") || (!isHistoricalEnable && !isCurrentEnable)) {
+  const isOption1DeprecatedEnable = enableText === OPTION1_DEPRECATED_ENABLE_ENTRYPOINT;
+  if (
+    !enableText.startsWith("#!/bin/zsh\n") ||
+    (!isHistoricalEnable && !isCurrentEnable && !isOption1DeprecatedEnable)
+  ) {
     throw new Error("legacy enable entrypoint identity signature is invalid");
   }
 

@@ -271,7 +271,7 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     launchMode: "cdp",
     port: 9341,
     afterLaunch: {
-      command: "enable-after-restart",
+      command: "apply",
       cliPath: "/trusted/src/cli.mjs",
       nodePath: "/trusted/node",
       port: 9341,
@@ -292,12 +292,12 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     launchMode: "cdp",
     port: 9341,
     restarted: true,
-    continuation: "enable-after-restart",
+    continuation: "apply",
   });
   assert.deepEqual(calls.slice(-2), [
     ["port", 9341],
     ["after", {
-      command: "enable-after-restart",
+      command: "apply",
       cliPath: "/trusted/src/cli.mjs",
       nodePath: "/trusted/node",
       port: 9341,
@@ -318,6 +318,25 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     completedAt: sidecar.completedAt,
   });
   assert.equal((await stat(`${path}.result.json`)).mode & 0o777, 0o600);
+});
+
+test("a detached lifecycle action rejects the removed persistence-enable continuation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "heige-lifecycle-legacy-enable-"));
+  const path = join(root, "action.json");
+
+  await assert.rejects(writeLifecycleActionFile(path, {
+    process: null,
+    appPath: "/Applications/ChatGPT.app",
+    launchMode: "cdp",
+    port: 9341,
+    afterLaunch: {
+      command: "enable-after-restart",
+      cliPath: "/trusted/src/cli.mjs",
+      nodePath: "/trusted/node",
+      port: 9341,
+      themeId: "miku-488137",
+    },
+  }), /command 不在允许列表/);
 });
 
 test("a failed detached continuation restores the exact native prestate and rethrows the original error", async () => {
@@ -689,6 +708,52 @@ test("macOS launcher defaults to the stored theme and uses an explicit theme onl
   );
 });
 
+test("macOS legacy enable-skin is session-only and enable-persist refuses to fake success", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "heige-option1-launchers-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scriptsRoot = join(root, "scripts");
+  const libraryRoot = join(scriptsRoot, "lib");
+  const capture = join(root, "arguments.txt");
+  await mkdir(libraryRoot, { recursive: true });
+  for (const name of ["apply.command", "enable-skin.command", "enable-persist.command"]) {
+    const destination = join(scriptsRoot, name);
+    await writeFile(
+      destination,
+      await readFile(join(repositoryRoot, "scripts", name), "utf8"),
+      { mode: 0o755 },
+    );
+    await chmod(destination, 0o755);
+  }
+  const runner = join(libraryRoot, "run-cli.zsh");
+  await writeFile(
+    runner,
+    '#!/bin/zsh\nprint -rl -- "$@" > "$HEIGE_CAPTURE"\n',
+    { mode: 0o755 },
+  );
+  await chmod(runner, 0o755);
+
+  await run("/bin/zsh", [join(scriptsRoot, "enable-skin.command")], {
+    env: { PATH: "/usr/bin:/bin", HEIGE_CAPTURE: capture },
+  });
+  assert.deepEqual((await readFile(capture, "utf8")).trim().split("\n"), [
+    "apply",
+    "--prefer-stored",
+    "--port",
+    "9341",
+  ]);
+
+  await assert.rejects(
+    run("/bin/zsh", [join(scriptsRoot, "enable-persist.command")], {
+      env: { PATH: "/usr/bin:/bin", HEIGE_CAPTURE: capture },
+    }),
+    (error) => {
+      assert.match(error.stderr, /顶部.*皮肤常驻.*开关/);
+      assert.equal(error.code, 64);
+      return true;
+    },
+  );
+});
+
 test("lifecycle shell entrypoints contain no independent process or service mutation", async () => {
   const wrappers = [
     "apply.command",
@@ -696,8 +761,6 @@ test("lifecycle shell entrypoints contain no independent process or service muta
     "pause.command",
     "resume.command",
     "restore.command",
-    "enable-skin.command",
-    "enable-persist.command",
     "disable-persist.command",
     "lib/launch-codex.zsh",
   ];
@@ -706,6 +769,13 @@ test("lifecycle shell entrypoints contain no independent process or service muta
     assert.match(source, /run-cli\.zsh/, relative);
     assert.doesNotMatch(source, /\b(?:launchctl|osascript|curl|pgrep|pkill|kill|nohup|open)\b/, relative);
   }
+  const compatibilityEnable = await readFile(join(repositoryRoot, "scripts/enable-skin.command"), "utf8");
+  assert.match(compatibilityEnable, /scripts\/apply\.command/);
+  assert.doesNotMatch(compatibilityEnable, /set-persistence|enable-after-restart|launchctl/);
+  const deprecatedEnable = await readFile(join(repositoryRoot, "scripts/enable-persist.command"), "utf8");
+  assert.match(deprecatedEnable, /HEIGE_OPTION1_MENU_ONLY=1/);
+  assert.match(deprecatedEnable, /exit 64/);
+  assert.doesNotMatch(deprecatedEnable, /run-cli\.zsh|launchctl|set-persistence/);
   const customize = await readFile(join(repositoryRoot, "scripts/customize.command"), "utf8");
   assert.match(customize, /run-cli\.zsh" customize/);
   await assert.rejects(readFile(join(repositoryRoot, "scripts/lib/skin-watchdog.zsh"), "utf8"), /ENOENT/);

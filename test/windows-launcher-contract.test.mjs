@@ -17,7 +17,7 @@ function functionBody(text, name, nextName) {
   return text.slice(start, end);
 }
 
-test("Windows Start Menu launcher is session-only apply while enable remains explicit", async () => {
+test("Windows Start Menu and legacy enable names are session-only apply", async () => {
   const [startMenu, installer, applyWrapper, enableWrapper, entrypoints] = await Promise.all([
     source("scripts/windows/lib/start-menu.ps1"),
     source("scripts/windows/install.ps1"),
@@ -35,6 +35,11 @@ test("Windows Start Menu launcher is session-only apply while enable remains exp
     "Invoke-HeiGeApplyFlow",
     "Invoke-HeiGeEnableSkinFlow",
   );
+  const enableFlow = functionBody(
+    entrypoints,
+    "Invoke-HeiGeEnableSkinFlow",
+    "Invoke-HeiGePauseFlow",
+  );
 
   assert.match(prepare, /scripts\\windows\\apply\.bat/);
   assert.doesNotMatch(prepare, /\$target\s*=.*enable-skin\.bat/);
@@ -44,6 +49,12 @@ test("Windows Start Menu launcher is session-only apply while enable remains exp
   assert.match(entrypoints, /"--prefer-stored"/);
   assert.doesNotMatch(applyFlow, /set-persistence|Invoke-HeiGeEnableSkinFlow/);
   assert.match(enableWrapper, /Invoke-HeiGeEnableSkinFlow/);
+  assert.match(enableWrapper, /当前会话/);
+  assert.match(enableWrapper, /Codex 顶部.*皮肤常驻.*开关/);
+  assert.doesNotMatch(enableWrapper, /已.*开启常驻/);
+  assert.match(enableFlow, /Invoke-HeiGeApplyFlow/);
+  assert.doesNotMatch(enableFlow, /set-persistence|Register-HeiGe|ScheduledTask/);
+  assert.match(applyFlow, /PersistenceChanged\s*=\s*\$false/);
 });
 
 test("Windows Start Menu migration trusts only the exact owned legacy launcher", async () => {

@@ -426,59 +426,23 @@ function Invoke-HeiGeEnableSkinFlow {
         [scriptblock]$CliProvider,
         [scriptblock]$CdpStatusProvider,
         [scriptblock]$ProcessProvider,
-        [scriptblock]$CompensateProvider,
-        [scriptblock]$UnregisterProvider
+        [scriptblock]$CompensateProvider
     )
     if ($PSBoundParameters.ContainsKey("Theme") -and [string]::IsNullOrWhiteSpace($Theme)) {
         throw "Theme 显式传入时不能为空。"
     }
-    $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
-    Invoke-HeiGeApplyWithContext -Context $context -Theme $Theme -Port $Port `
-        -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider `
-        -CdpStatusProvider $CdpStatusProvider -ProcessProvider $ProcessProvider `
-        -CompensateProvider $CompensateProvider | Out-Null
-
-    try {
-        $enabled = Invoke-HeiGeContextCli -Context $context `
-            -Arguments @("set-persistence", "true", "--port", [string]$Port) -CliProvider $CliProvider
-        Assert-HeiGePersistenceResult -Result $enabled -Expected $true
-    } catch {
-        $enableError = $_.Exception.Message
-        $disabledVerified = $false
-        $taskAbsentVerified = $false
-        $disableError = $null
-        $unregisterError = $null
-        try {
-            $disabled = Invoke-HeiGeContextCli -Context $context `
-                -Arguments @("set-persistence", "false", "--port", [string]$Port) -CliProvider $CliProvider
-            Assert-HeiGePersistenceResult -Result $disabled -Expected $false
-            $disabledVerified = $true
-        } catch {
-            $disableError = $_.Exception.Message
-        }
-        try {
-            Unregister-HeiGeEntrypointTask -Context $context `
-                -UnregisterProvider $UnregisterProvider | Out-Null
-            $taskAbsentVerified = $true
-        } catch {
-            $unregisterError = $_.Exception.Message
-        }
-        if ($disabledVerified -and $taskAbsentVerified) {
-            throw "常驻启用失败。本次会话皮肤已应用，但常驻保持关闭，计划任务已移除。原始错误：$enableError"
-        }
-        throw "常驻启用失败，且无法确认权威常驻状态。原始错误：$enableError；关闭补偿：$disableError；任务注销：$unregisterError"
+    $arguments = @{
+        Root = $Root
+        Port = $Port
+        ContextProvider = $ContextProvider
+        StartCdpProvider = $StartCdpProvider
+        CliProvider = $CliProvider
+        CdpStatusProvider = $CdpStatusProvider
+        ProcessProvider = $ProcessProvider
+        CompensateProvider = $CompensateProvider
     }
-    return [pscustomobject][ordered]@{
-        Mode = "active"
-        PersistenceEnabled = $true
-        Theme = $Theme
-        ThemeSelection = if ([string]::IsNullOrWhiteSpace($Theme)) {
-            "stored-or-default"
-        } else {
-            "explicit"
-        }
-        Completion = "complete"
-    }
+    if ($PSBoundParameters.ContainsKey("Theme")) { $arguments.Theme = $Theme }
+    return Invoke-HeiGeApplyFlow @arguments
 }
 
 function Invoke-HeiGePauseFlow {

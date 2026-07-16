@@ -38,6 +38,7 @@ import {
 const execFileAsync = promisify(execFile);
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const installModule = fileURLToPath(new URL("../src/install-transaction.mjs", import.meta.url));
+const option1DeprecatedEnableEntrypoint = join(repoRoot, "scripts", "enable-persist.command");
 const PUBLIC_MARKERLESS_COMMIT = "79b03dccf246134ff3b28e9d9afc7751fee8812b";
 
 async function sourceFixture(t) {
@@ -343,6 +344,44 @@ test("adopts only the strict current-user legacy tree and replaces it with a mar
   assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "src-v2\n");
   assert.equal((await lstat(join(targetRoot, INSTALL_MARKER_NAME))).isFile(), true);
   await assert.rejects(lstat(join(targetRoot, "INSTALLED_COMMIT")), /ENOENT/);
+});
+
+test("adopts a legacy tree containing the exact strict option 1 deprecated enable entrypoint", async (t) => {
+  const fixture = await legacyFixture(t);
+  const targetEntrypoint = join(fixture.targetRoot, "scripts", "enable-persist.command");
+  await cp(option1DeprecatedEnableEntrypoint, targetEntrypoint, {
+    force: true,
+    preserveTimestamps: true,
+  });
+
+  const { stdout } = await execLegacyInstall(fixture);
+
+  const result = JSON.parse(stdout);
+  assert.equal(result.installed, true);
+  assert.equal(result.migratedLegacy, true);
+  assert.equal((await lstat(join(fixture.targetRoot, INSTALL_MARKER_NAME))).isFile(), true);
+  await assert.rejects(lstat(join(fixture.targetRoot, "INSTALLED_COMMIT")), /ENOENT/);
+});
+
+test("rejects a legacy tree whose strict option 1 deprecated enable entrypoint was altered", async (t) => {
+  const fixture = await legacyFixture(t);
+  const targetEntrypoint = join(fixture.targetRoot, "scripts", "enable-persist.command");
+  const exactEntrypoint = await readFile(option1DeprecatedEnableEntrypoint, "utf8");
+  assert.match(exactEntrypoint, /HEIGE_OPTION1_MENU_ONLY=1/);
+  await writeFile(
+    targetEntrypoint,
+    exactEntrypoint.replace("HEIGE_OPTION1_MENU_ONLY=1", "HEIGE_OPTION1_MENU_ONLY=0"),
+  );
+
+  await assert.rejects(
+    execLegacyInstall(fixture),
+    /legacy enable entrypoint identity signature is invalid/i,
+  );
+  assert.equal((await lstat(fixture.targetRoot)).isDirectory(), true);
+  assert.equal(
+    await readFile(targetEntrypoint, "utf8"),
+    exactEntrypoint.replace("HEIGE_OPTION1_MENU_ONLY=1", "HEIGE_OPTION1_MENU_ONLY=0"),
+  );
 });
 
 test("migrates the real markerless tree installed by public commit 79b03dc", async (t) => {

@@ -367,7 +367,7 @@ test("Node 22 is accepted for runtime commands", async () => {
   assert.equal((await runCli(["list"], fx.deps))[0].id, "miku-488137");
 });
 
-test("Windows CLI help directs lifecycle work to PowerShell or batch wrappers", async () => {
+test("Windows CLI help directs session lifecycle work to PowerShell or batch wrappers", async () => {
   const fx = lifecycleDeps({ platform: "win32" });
   const help = await runCli(["help"], fx.deps);
   assert.equal(help.platform, "win32");
@@ -422,7 +422,7 @@ test("apply prefer-stored uses authoritative lastNonNative only when Theme is om
   assert.equal(explicit.calls.registerEphemeral[0].themeId, "miku-488137");
 });
 
-test("launcher restores the last theme after a native restart without enabling persistence", async () => {
+test("launcher restores the last theme after a native restart and CLI cannot re-enable persistence", async () => {
   let runtime = "cdp";
   const lastThemeId = "genshin-night";
   const fx = lifecycleDeps({
@@ -485,11 +485,11 @@ test("launcher restores the last theme after a native restart without enabling p
   assert.equal(fx.calls.registerEphemeral.at(-1).themeId, lastThemeId);
   assert.equal(fx.state.persistenceEnabled, false, "launcher apply must remain current-session only");
 
-  assert.deepEqual(await runCli(["set-persistence", "true"], fx.deps), {
-    persistenceEnabled: true,
-    revision: 7,
-  });
-  assert.equal(fx.state.persistenceEnabled, true, "only the user's later switch enables persistence");
+  await assert.rejects(
+    runCli(["set-persistence", "true"], fx.deps),
+    /顶部菜单.*皮肤常驻.*开关/,
+  );
+  assert.equal(fx.state.persistenceEnabled, false, "only the top-menu switch may enable persistence");
 });
 
 test("apply confirmation rejects a partial multi-window status result", async () => {
@@ -565,16 +565,33 @@ test("apply starts a fully closed Codex through a launch-only detached action", 
   assert.equal(fx.calls.detached[0].afterLaunch.command, "apply");
 });
 
-test("pause resume restore and enable-skin remain distinct lifecycle operations", async () => {
+test("enable-skin is a session-only compatibility alias while pause resume and restore stay distinct", async () => {
   const fx = lifecycleDeps();
   assert.deepEqual(await runCli(["pause"], fx.deps), { mode: "paused" });
   assert.deepEqual(await runCli(["resume"], fx.deps), { mode: "active" });
   assert.deepEqual(await runCli(["restore"], fx.deps), { mode: "restoring", persistenceEnabled: false });
-  assert.deepEqual(await runCli(["enable-skin"], fx.deps), { mode: "active", persistenceEnabled: true });
-  assert.deepEqual(await runCli(["set-persistence", "false"], fx.deps), { persistenceEnabled: false, revision: 7 });
-  assert.deepEqual(await runCli(["migrate-legacy"], fx.deps), { migratedFrom: "watchdog", persistenceEnabled: true });
-  assert.equal(fx.calls.detached.length, 1, "an existing CDP enable must not restart Codex");
+  assert.deepEqual(await runCli(["enable-skin"], fx.deps), { mode: "active", persistenceEnabled: false });
+  assert.deepEqual(await runCli(["set-persistence", "false"], fx.deps), { persistenceEnabled: false, revision: 6 });
+  assert.equal(fx.calls.detached.length, 1, "an existing CDP session apply must not restart Codex");
   assert.equal(fx.calls.detached[0].port, 9341, "restore helper must verify the old CDP port was released");
+});
+
+test("help and public routing do not expose internal migration or persistence continuation commands", async () => {
+  let migrationCalls = 0;
+  const fx = lifecycleDeps({
+    migrateLegacy: async () => {
+      migrationCalls += 1;
+      return { migratedFrom: "watchdog", persistenceEnabled: true };
+    },
+  });
+
+  const help = await runCli(["help"], fx.deps);
+  assert.equal(help.commands.some((entry) => entry.includes("migrate-legacy")), false);
+  assert.equal(help.commands.some((entry) => entry.includes("enable-after-restart")), false);
+  assert.equal(help.commands.includes("set-persistence false [--revision N]"), true);
+  await assert.rejects(runCli(["migrate-legacy"], fx.deps), /未知命令/);
+  await assert.rejects(runCli(["enable-after-restart"], fx.deps), /未知命令/);
+  assert.equal(migrationCalls, 0);
 });
 
 test("legacy migration releases the common lease for service bootstrap and exact readiness ACK", async () => {
@@ -1296,7 +1313,7 @@ test("offline disable commits authority and a non-retained native session before
   ]);
 });
 
-test("enable-skin from a native process defers the state transition until the verified CDP restart", async () => {
+test("enable-skin from a native process queues only a session apply after verified CDP restart", async () => {
   const fx = lifecycleDeps({
     preflightLifecycle: async (input) => {
       if (input.requirePort) {
@@ -1319,12 +1336,13 @@ test("enable-skin from a native process defers the state transition until the ve
   assert.deepEqual(result, { mode: "restarting", persistenceEnabled: false, queued: true });
   assert.deepEqual(fx.calls.controller, []);
   assert.deepEqual(fx.calls.detached[0].afterLaunch, {
-    command: "enable-after-restart",
+    command: "apply",
     themeId: "miku-488137",
   });
+  assert.equal(fx.state.persistenceEnabled, false);
 });
 
-test("enable-skin starts a fully closed Codex and completes enable only after launch", async () => {
+test("enable-skin starts a fully closed Codex for the current session only", async () => {
   const fx = lifecycleDeps({
     preflightLifecycle: async (input) => {
       if (input.requirePort) {
@@ -1345,7 +1363,8 @@ test("enable-skin starts a fully closed Codex and completes enable only after la
     queued: true,
   });
   assert.equal(fx.calls.detached[0].preflight.process, null);
-  assert.equal(fx.calls.detached[0].afterLaunch.command, "enable-after-restart");
+  assert.equal(fx.calls.detached[0].afterLaunch.command, "apply");
+  assert.equal(fx.state.persistenceEnabled, false);
 });
 
 test("Windows direct lifecycle never queues the macOS helper and points restart work to wrappers", async (t) => {
@@ -1502,6 +1521,29 @@ test("set-persistence accepts only the exact boolean words", async () => {
   for (const value of ["TRUE", "0", "yes", "false "]) {
     await assert.rejects(runCli(["set-persistence", value], fx.deps), /true 或 false/);
   }
+  assert.deepEqual(fx.calls.controller, []);
+});
+
+test("public set-persistence true is rejected before state or process probes", async () => {
+  let stateReads = 0;
+  let preflights = 0;
+  const fx = lifecycleDeps({
+    readState: async () => {
+      stateReads += 1;
+      throw new Error("must not read state");
+    },
+    preflightLifecycle: async () => {
+      preflights += 1;
+      throw new Error("must not probe process");
+    },
+  });
+
+  await assert.rejects(
+    runCli(["set-persistence", "true"], fx.deps),
+    /顶部菜单.*皮肤常驻.*开关/,
+  );
+  assert.equal(stateReads, 0);
+  assert.equal(preflights, 0);
   assert.deepEqual(fx.calls.controller, []);
 });
 

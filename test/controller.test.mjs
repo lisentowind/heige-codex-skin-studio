@@ -119,6 +119,7 @@ function fixture(overrides = {}) {
 
   const deps = {
     backgroundProcess: overrides.backgroundProcess === true,
+    allowInternalPersistenceEnable: overrides.allowInternalPersistenceEnable ?? true,
     withLease: async (operation, action, context) => {
       calls.lease.push(operation);
       calls.leaseContext.push(clone(context));
@@ -414,6 +415,45 @@ test("turning persistence off keeps only the verified current process", async ()
   assert.equal(result.action, "unregister");
   assert.equal(fx.calls.inject.length, 0);
   assert.deepEqual(fx.session, nativeSession());
+});
+
+test("an unauthorised direct controller call cannot enable persistence", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+    allowInternalPersistenceEnable: false,
+  });
+
+  await assert.rejects(
+    createSkinController(fx.deps).setPersistence({ expectedRevision: 1, enabled: true }),
+    /顶部菜单.*皮肤常驻.*开关/,
+  );
+
+  assert.equal(fx.state.persistenceEnabled, false);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.transition, null);
+  assert.equal(fx.calls.register.length, 0);
+  assert.equal(fx.calls.prepareHandshake.length, 0);
+});
+
+test("the private control-server closure is the only ordinary false-to-true capability", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+    allowInternalPersistenceEnable: false,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  const changed = await fx.calls.server[0].setPersistence({
+    expectedRevision: 1,
+    enabled: true,
+  });
+
+  assert.deepEqual(changed, { persistenceEnabled: true, revision: 2 });
+  assert.equal(fx.state.persistenceEnabled, true);
 });
 
 test("foreground controller hands off only on the tick after the successful HTTP response finishes", async () => {

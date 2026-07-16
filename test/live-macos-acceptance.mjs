@@ -2595,6 +2595,12 @@ export async function recoverLiveAcceptance({
     let state = await readStudioState(statePath);
     if (state !== null && initialPersistenceEnabled === true) {
       await runStableCommand("enable-skin", { home, targetRoot, run });
+      const session = await openMainRendererSession();
+      try {
+        await setPersistenceViaMenu(session, true);
+      } finally {
+        session.close();
+      }
       state = await waitForValue(
         () => readStudioState(statePath),
         (value) => value?.persistenceEnabled === true,

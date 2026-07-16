@@ -92,7 +92,6 @@ const COMMAND_OPTIONS = new Map([
   ["customize", new Set(["image", "name", "port"])],
   ["apply", new Set(["port", "prefer-stored", "theme"])],
   ["enable-skin", new Set(["port", "theme"])],
-  ["enable-after-restart", new Set(["port", "theme"])],
   ["set-persistence", new Set(["port", "revision"])],
   ["pause", new Set(["port"])],
   ["resume", new Set(["port"])],
@@ -106,7 +105,6 @@ const COMMAND_OPTIONS = new Map([
     "state-directory",
     "task-name",
   ])],
-  ["migrate-legacy", new Set(["port"])],
   ["status", new Set(["port"])],
   ["doctor", new Set(["port"])],
   ["install-pet", new Set(["source"])],
@@ -1084,6 +1082,8 @@ export async function productionController({
   });
   return createSkinController({
     backgroundProcess: background,
+    allowInternalPersistenceEnable:
+      migrationAuthorization !== null || installAuthorization !== null,
     statePath: paths.statePath,
     sessionPath: paths.sessionPath,
     transitionPath: paths.transitionPath,
@@ -1401,7 +1401,7 @@ async function productionRegisterEphemeral({ deps, paths, port, preflight, theme
 }
 
 function windowsLifecycleWrapperRequired(command) {
-  const wrapper = command === "enable-after-restart" ? "enable-skin" : command;
+  const wrapper = command;
   const error = new Error(
     `Windows 上 ${wrapper} 需要启动或重启 Codex 时，必须使用 ` +
     `scripts/windows/${wrapper}.ps1 或 scripts/windows/${wrapper}.bat；` +
@@ -2189,12 +2189,11 @@ export async function runCli(argv, overrides = {}) {
         "customize [--image PATH --name NAME]",
         "apply [--theme ID] [--port 9341]",
         "enable-skin [--theme ID] [--port 9341]",
-        "set-persistence true|false [--revision N]",
+        "set-persistence false [--revision N]",
         "pause",
         "resume",
         "restore",
         "controller",
-        "migrate-legacy",
         "status",
         "doctor",
         "install-pet [--source PATH]",
@@ -2254,44 +2253,24 @@ export async function runCli(argv, overrides = {}) {
       themeId,
     });
   }
-  if (command === "enable-skin" || command === "enable-after-restart") {
-    const before = await deps.readState();
-    const themeId = args.theme ?? before?.lastNonNativeThemeId ?? DEFAULT_THEME_ID;
-    await themeBundle({ deps, roots, themeId });
+  if (command === "enable-skin") {
+    const stored = args.theme === undefined ? await deps.readState() : null;
+    const themeId = args.theme ?? stored?.lastNonNativeThemeId ?? DEFAULT_THEME_ID;
     const port = portFrom(args.port);
-    const allowRestart = command === "enable-skin";
-    const preflightResult = allowRestart
-      ? await preflightWithNativeFallback(deps, { command, port, themeId })
-      : {
-        preflight: await deps.preflightLifecycle({ command, port, requirePort: true, themeId }),
-        restartRequired: false,
-      };
-    const { preflight, restartRequired } = preflightResult;
-    if (restartRequired) {
-      assertDirectLifecycleRestartSupported(deps.platform, command);
-      const queued = await deps.restartDetached({
-        launchMode: "cdp",
-        port,
-        preflight,
-        themeId,
-        afterLaunch: { command: "enable-after-restart", themeId },
-      });
-      return {
-        mode: "restarting",
-        persistenceEnabled: before?.persistenceEnabled === true,
-        queued: queued?.queued === true,
-      };
-    }
-    const state = await deps.ensureState({ themeId, preflight, keepUntilProcessExit: true });
-    const controller = await lifecycleController(deps, { port, preflight, preferStored: false });
-    await withStoppedController(controller, () => controller.setPersistence({
-      expectedRevision: state.revision,
-      enabled: true,
-    }));
-    return { mode: "active", persistenceEnabled: true };
+    return applySelectedTheme({
+      deps,
+      roots,
+      command,
+      port,
+      preferStored: args.theme === undefined,
+      themeId,
+    });
   }
   if (command === "set-persistence") {
     const enabled = exactBoolean(positionals[0]);
+    if (enabled && installAuthorization === null) {
+      throw new Error("常驻只能在 Codex 顶部菜单的「皮肤常驻」开关中开启；此命令仅支持 false");
+    }
     const port = portFrom(args.port);
     const state = await deps.readState();
     if (state === null) throw new Error("状态文件不存在，请先运行 apply");
@@ -2377,9 +2356,6 @@ export async function runCli(argv, overrides = {}) {
     } finally {
       await ephemeralLease?.release();
     }
-  }
-  if (command === "migrate-legacy") {
-    return deps.migrateLegacy({ port: portFrom(args.port) });
   }
   if (command === "status") return deps.skinStatus({ port: portFrom(args.port) });
   if (command === "install-pet") {

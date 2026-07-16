@@ -14,7 +14,7 @@ $arguments = @{ Root = $root; Port = $Port }
 if ($PSBoundParameters.ContainsKey("Theme")) { $arguments.Theme = $Theme }
 $result = Invoke-HeiGeEnableSkinFlow @arguments
 if ($result.ThemeSelection -ceq "explicit") {
-    Write-Host "皮肤已应用并开启常驻：$($result.Theme)。下次启动 Codex 会继续使用。"
+    Write-Host "皮肤已应用到当前会话：$($result.Theme)。下次仍需常驻，请在 Codex 顶部打开「皮肤常驻」开关。"
 } else {
-    Write-Host "上次使用的皮肤已恢复并开启常驻。下次启动 Codex 会继续使用。"
+    Write-Host "上次使用的皮肤已恢复到当前会话。下次仍需常驻，请在 Codex 顶部打开「皮肤常驻」开关。"
 }
