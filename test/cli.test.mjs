@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {
   controllerInjectionPreference,
+  normalizeWindowsBackgroundStatus,
+  probeWindowsCdpProcess,
   runCli,
+  runControllerProcess,
+  validatePortOwner,
   waitForAppliedSkin,
 } from "../src/cli.mjs";
 
@@ -33,10 +37,12 @@ function lifecycleDeps(overrides = {}) {
   };
   const calls = {
     controller: [],
+    createController: [],
     detached: [],
     migrate: [],
     preflight: [],
     registerEphemeral: [],
+    runController: [],
   };
   const controller = {
     pause: async () => ({ mode: "paused" }),
@@ -70,7 +76,14 @@ function lifecycleDeps(overrides = {}) {
       calls.registerEphemeral.push(structuredClone(input));
       return { mode: "active" };
     },
-    createController: () => controller,
+    createController: (input) => {
+      calls.createController.push(structuredClone(input));
+      return controller;
+    },
+    runController: async (instance, input) => {
+      calls.runController.push(structuredClone(input));
+      return instance.start();
+    },
     restartDetached: async (input) => {
       calls.detached.push(structuredClone(input));
       return { queued: true };
@@ -356,6 +369,351 @@ test("controller command never reports exit-zero success for an error state", as
     }),
   });
   await assert.rejects(runCli(["controller", "--once"], fx.deps), /控制器启动或巡检失败/);
+});
+
+test("controller CLI rejects dynamic handshake credentials outside the one-shot request file", async () => {
+  const taskName = "HeiGe Codex Skin Studio Test 123e4567-e89b-42d3-a456-426614174000";
+  await assert.rejects(runCli([
+    "controller",
+    "--platform",
+    "windows",
+    "--task-name",
+    taskName,
+    "--state-directory",
+    "/tmp/heige-controller-isolated",
+    "--handshake-revision",
+    "5",
+    "--handshake-nonce",
+    "controller-start-5",
+  ], lifecycleDeps().deps), /无法识别|handshake/i);
+});
+
+test("long-lived Windows controller forwards a fixed background identity without dynamic credentials", async () => {
+  const taskName = "HeiGe Codex Skin Studio Test 123e4567-e89b-42d3-a456-426614174000";
+  const fx = lifecycleDeps();
+  await runCli([
+    "controller",
+    "--background",
+    "--once",
+    "--platform",
+    "windows",
+    "--task-name",
+    taskName,
+    "--state-directory",
+    "/tmp/heige-controller-isolated",
+  ], fx.deps);
+  assert.equal(fx.calls.createController[0].background, true);
+  assert.equal(fx.calls.runController[0].startupHandshake, null);
+  assert.deepEqual(fx.calls.runController[0].backgroundRuntime, {
+    platform: "win32",
+    backgroundIdentity: taskName,
+  });
+});
+
+test("background controller claims one start request before start and publishes its exact terminal ACK", async () => {
+  const events = [];
+  const request = {
+    schemaVersion: 1,
+    revision: 8,
+    transitionNonce: "controller-transition-8",
+    platform: "win32",
+    backgroundIdentity: "HeiGe Codex Skin Studio Controller",
+    createdAt: "2026-07-17T08:00:00.000Z",
+  };
+  const result = await runControllerProcess({
+    start: async () => {
+      events.push("start");
+      return {
+        action: "idle",
+        mode: "active",
+        persistenceEnabled: true,
+        revision: 8,
+      };
+    },
+    stop: async () => events.push("stop"),
+  }, {
+    once: true,
+    backgroundRuntime: {
+      platform: "win32",
+      backgroundIdentity: "HeiGe Codex Skin Studio Controller",
+    },
+    paths: { stateRoot: "C:\\PrivateState" },
+    claimStartRequest: async (input) => {
+      events.push(["claim", input]);
+      return request;
+    },
+    readCurrentIdentity: async () => ({ pid: process.pid, startedAt: "exact-start" }),
+    publishHandshake: async (input) => events.push(["publish", input]),
+  });
+  assert.equal(result.revision, 8);
+  assert.deepEqual(events.map((entry) => Array.isArray(entry) ? entry[0] : entry), [
+    "claim",
+    "start",
+    "publish",
+    "stop",
+  ]);
+  assert.deepEqual(events[2][1], {
+    stateRoot: "C:\\PrivateState",
+    revision: 8,
+    transitionNonce: "controller-transition-8",
+    platform: "win32",
+    backgroundIdentity: "HeiGe Codex Skin Studio Controller",
+    pid: process.pid,
+    startedAt: "exact-start",
+    outcome: "ready",
+  });
+});
+
+test("background login with no one-shot request follows the latest revision without forging an ACK", async () => {
+  const events = [];
+  const result = await runControllerProcess({
+    start: async () => {
+      events.push("start");
+      return {
+        action: "idle",
+        mode: "active",
+        persistenceEnabled: true,
+        revision: 19,
+      };
+    },
+    stop: async () => events.push("stop"),
+  }, {
+    once: true,
+    backgroundRuntime: {
+      platform: "darwin",
+      backgroundIdentity: "com.heige.codex-skin-controller",
+    },
+    paths: { stateRoot: "/private/state" },
+    claimStartRequest: async () => {
+      events.push("claim");
+      return null;
+    },
+    publishHandshake: async () => events.push("publish"),
+  });
+  assert.equal(result.revision, 19, "a later theme CAS revision must not break login startup");
+  assert.deepEqual(events, ["claim", "start", "stop"]);
+});
+
+test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {
+  const calls = [];
+  const identity = {
+    pid: 4242,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  };
+  const execFileImpl = async (file, args) => {
+    calls.push([file, ...args]);
+    return {
+      stdout: JSON.stringify([{
+        ...identity,
+        processName: "Codex",
+        localAddress: "127.0.0.1",
+        localPort: 9341,
+      }]),
+    };
+  };
+  assert.deepEqual(await probeWindowsCdpProcess(9341, {
+    execFileImpl,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  }), identity);
+  assert.equal(await validatePortOwner(9341, identity, {
+    platform: "win32",
+    execFileImpl,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  }), true);
+  assert.equal(calls.every((entry) => !entry.includes("/usr/sbin/lsof")), true);
+  assert.equal(calls.every((entry) => entry.join(" ").includes("Get-NetTCPConnection")), true);
+});
+
+test("Windows CDP validation rejects non-loopback, multiple, and exact identity mismatches", async (t) => {
+  const exact = {
+    pid: 4242,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+    processName: "Codex",
+    localAddress: "127.0.0.1",
+    localPort: 9341,
+  };
+  for (const [name, records] of [
+    ["non-loopback", [{ ...exact, localAddress: "0.0.0.0" }]],
+    ["multiple", [exact, { ...exact, pid: 5252 }]],
+    ["non-Codex", [{ ...exact, processName: "node" }]],
+  ]) {
+    await t.test(name, async () => {
+      const execFileImpl = async () => ({ stdout: JSON.stringify(records) });
+      await assert.rejects(probeWindowsCdpProcess(9341, {
+        execFileImpl,
+        powershellPath: "powershell.exe",
+      }), /owner|loopback|unique|Codex|process/i);
+      assert.equal(await validatePortOwner(9341, exact, {
+        platform: "win32",
+        execFileImpl,
+        powershellPath: "powershell.exe",
+      }), false);
+    });
+  }
+  const mismatchExec = async () => ({ stdout: JSON.stringify([exact]) });
+  assert.equal(await validatePortOwner(9341, {
+    ...exact,
+    startedAt: "2026-07-17T08:01:00.0000000Z",
+  }, {
+    platform: "win32",
+    execFileImpl: mismatchExec,
+    powershellPath: "powershell.exe",
+  }), false);
+  assert.equal(await probeWindowsCdpProcess(9341, {
+    execFileImpl: async () => ({ stdout: "[]" }),
+    powershellPath: "powershell.exe",
+  }), null, "a closed CDP port is a normal wait-for-app state");
+});
+
+test("Windows task registration is distinct from exact running readiness", () => {
+  assert.deepEqual(normalizeWindowsBackgroundStatus({
+    Exists: true,
+    State: "Ready",
+    TaskRunning: false,
+  }), {
+    registered: true,
+    running: false,
+  });
+  assert.deepEqual(normalizeWindowsBackgroundStatus({
+    Exists: true,
+    State: "Running",
+    TaskRunning: true,
+  }), {
+    registered: true,
+    running: true,
+  });
+  assert.deepEqual(normalizeWindowsBackgroundStatus({
+    Exists: false,
+    State: "Absent",
+    TaskRunning: false,
+  }), {
+    registered: false,
+    running: false,
+  });
+});
+
+test("controller CLI rejects case-drifted task names duplicate flags and unsafe Windows state roots", async () => {
+  const taskName = "HeiGe Codex Skin Studio Test 123e4567-e89b-42d3-a456-426614174000";
+  await assert.rejects(runCli([
+    "controller",
+    "--platform",
+    "windows",
+    "--task-name",
+    taskName,
+    "--state-directory",
+    "/tmp/heige-controller-isolated",
+    "--handshake-revision",
+    "5",
+  ], lifecycleDeps().deps), /无法识别|handshake/i);
+  await assert.rejects(runCli([
+    "controller",
+    "--platform",
+    "windows",
+    "--task-name",
+    "heige Codex Skin Studio Test 123e4567-e89b-42d3-a456-426614174000",
+    "--state-directory",
+    "/tmp/heige-controller-isolated",
+  ], lifecycleDeps().deps), /TaskName|允许范围/i);
+  await assert.rejects(runCli([
+    "controller",
+    "--platform",
+    "windows",
+    "--task-name",
+    taskName,
+    "--state-directory",
+    "relative-state",
+  ], lifecycleDeps().deps), /绝对|absolute/i);
+  await assert.rejects(runCli([
+    "controller",
+    "--platform",
+    "windows",
+    "--platform",
+    "windows",
+    "--task-name",
+    taskName,
+  ], lifecycleDeps().deps), /重复/);
+});
+
+test("background controller publishes ready only after exact successful start", async () => {
+  const calls = [];
+  const controller = {
+    start: async () => ({
+      action: "idle",
+      mode: "active",
+      persistenceEnabled: true,
+      revision: 8,
+    }),
+    stop: async () => calls.push("stop"),
+  };
+  const startupHandshake = {
+    revision: 8,
+    transitionNonce: "controller-transition-8",
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+  };
+  const result = await runControllerProcess(controller, {
+    once: true,
+    startupHandshake,
+    paths: { stateRoot: "/private/state" },
+    readCurrentIdentity: async () => ({ pid: process.pid, startedAt: "exact-start" }),
+    publishHandshake: async (input) => calls.push(input),
+  });
+  assert.equal(result.action, "idle");
+  assert.deepEqual(calls, [{
+    stateRoot: "/private/state",
+    ...startupHandshake,
+    pid: process.pid,
+    startedAt: "exact-start",
+    outcome: "ready",
+  }, "stop"]);
+});
+
+test("disabled background publishes unregister promptly and a wrong revision publishes nothing", async () => {
+  const published = [];
+  let stoppedAfterMismatch = false;
+  const startupHandshake = {
+    revision: 4,
+    transitionNonce: "controller-start-4",
+    platform: "win32",
+    backgroundIdentity: "HeiGe Codex Skin Studio Controller",
+  };
+  const unregister = await runControllerProcess({
+    start: async () => ({
+      action: "unregister",
+      mode: "native",
+      persistenceEnabled: false,
+      revision: 4,
+    }),
+    stop: async () => { stoppedAfterMismatch = true; },
+  }, {
+    startupHandshake,
+    paths: { stateRoot: "C:\\State" },
+    readCurrentIdentity: async () => ({ pid: process.pid, startedAt: "exact-start" }),
+    publishHandshake: async (input) => published.push(input),
+  });
+  assert.equal(unregister.action, "unregister");
+  assert.equal(published[0].outcome, "unregister");
+  stoppedAfterMismatch = false;
+
+  await assert.rejects(runControllerProcess({
+    start: async () => ({
+      action: "idle",
+      mode: "active",
+      persistenceEnabled: true,
+      revision: 5,
+    }),
+    stop: async () => { stoppedAfterMismatch = true; },
+  }, {
+    once: true,
+    startupHandshake,
+    paths: { stateRoot: "C:\\State" },
+    readCurrentIdentity: async () => ({ pid: process.pid, startedAt: "exact-start" }),
+    publishHandshake: async (input) => published.push(input),
+  }), /revision/i);
+  assert.equal(published.length, 1);
+  assert.equal(stoppedAfterMismatch, true);
 });
 
 test("install-pet CLI routing remains intact", async () => {

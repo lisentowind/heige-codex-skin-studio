@@ -100,21 +100,28 @@ function fixture(overrides = {}) {
     inspect: [],
     register: [],
     unregister: [],
+    inspectBackground: [],
     wake: [],
     handshake: [],
     preflight: [],
+    prepareHandshake: [],
     logs: [],
+    backgroundSequence: [],
   };
   let nonceIndex = 0;
   let journalWriteCount = 0;
 
   const deps = {
+    backgroundProcess: overrides.backgroundProcess === true,
     withLease: async (operation, action) => {
       calls.lease.push(operation);
       if (overrides.lockFailure) throw new Error("LOCK_NOT_OWNED");
       const value = await action(Object.freeze({ operation }));
       if (overrides.releaseFailureAfterEnable && operation === "controller:set-persistence") {
         throw new Error("LOCK_RELEASE_FAILED");
+      }
+      if (overrides.releaseFailureAfterFinalize && operation === "controller:finalize-enable") {
+        throw new Error("LOCK_RELEASE_FAILED_AFTER_FINALIZE");
       }
       return value;
     },
@@ -216,24 +223,39 @@ function fixture(overrides = {}) {
       if (overrides.preflightFailure) throw new Error("preflight failed");
       return true;
     },
+    prepareBackgroundHandshake: async (input) => {
+      calls.backgroundSequence.push("prepare");
+      calls.prepareHandshake.push(clone(input));
+      return { notBefore: 12345 };
+    },
     registerBackground: async () => {
+      calls.backgroundSequence.push("register");
       calls.register.push(true);
       if (overrides.registerFailure) throw new Error("后台控制器启动失败");
       backgroundRegistered = true;
-      return { loaded: true };
+      return { registered: true };
     },
     unregisterBackground: async () => {
       calls.unregister.push(true);
       backgroundRegistered = false;
-      return { loaded: false };
+      return { registered: false, loaded: false };
     },
-    inspectBackground: async () => ({ loaded: backgroundRegistered }),
+    inspectBackground: async (expected) => {
+      calls.inspectBackground.push(clone(expected));
+      return {
+        registered: backgroundRegistered,
+        running: backgroundRegistered,
+        loaded: backgroundRegistered && overrides.backgroundReady !== false,
+      };
+    },
     wakeBackground: async () => {
+      calls.backgroundSequence.push("wake");
       calls.wake.push(true);
       if (overrides.wakeFailure) throw new Error("后台控制器启动失败");
     },
-    verifyBackgroundHandshake: async ({ revision }) => {
-      calls.handshake.push(revision);
+    verifyBackgroundHandshake: async (input) => {
+      calls.backgroundSequence.push("verify");
+      calls.handshake.push(clone(input));
       if (overrides.handshakeFailure) throw new Error("后台控制器启动失败");
       return true;
     },
@@ -371,6 +393,70 @@ test("same-value persistence request is idempotent even when its request revisio
   });
   assert.deepEqual(result, { persistenceEnabled: true, revision: 1 });
   assert.equal(fx.transition, null);
+});
+
+test("same-value enabled state repairs a missing background job without changing revision", async () => {
+  const fx = fixture({ backgroundRegistered: false });
+  const result = await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 0,
+    enabled: true,
+  });
+  assert.deepEqual(result, { persistenceEnabled: true, revision: 1 });
+  assert.equal(fx.calls.register.length, 1);
+  assert.equal(fx.calls.wake.length, 1);
+  assert.deepEqual(fx.calls.backgroundSequence.slice(0, 4), [
+    "register",
+    "prepare",
+    "wake",
+    "verify",
+  ]);
+  assert.equal(fx.calls.handshake[0].revision, 1);
+  assert.equal(fx.state.revision, 1);
+});
+
+test("a merely registered background job is not treated as an exact readiness ACK", async () => {
+  const fx = fixture({ backgroundRegistered: true, backgroundReady: false });
+  const result = await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 0,
+    enabled: true,
+  });
+  assert.deepEqual(result, { persistenceEnabled: true, revision: 1 });
+  assert.equal(fx.calls.register.length, 1);
+  assert.equal(fx.calls.wake.length, 1);
+  assert.equal(fx.calls.handshake.length, 1);
+  assert.deepEqual(fx.calls.inspectBackground[0], {
+    revision: 1,
+    transitionNonce: fx.state.lastTransitionNonce,
+  });
+});
+
+test("the already-running background controller does not restart itself for an idempotent enable", async () => {
+  const fx = fixture({
+    backgroundProcess: true,
+    backgroundRegistered: true,
+    backgroundReady: false,
+  });
+  assert.deepEqual(await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 0,
+    enabled: true,
+  }), { persistenceEnabled: true, revision: 1 });
+  assert.equal(fx.calls.inspectBackground.length, 0);
+  assert.equal(fx.calls.register.length, 0);
+  assert.equal(fx.calls.wake.length, 0);
+});
+
+test("failed same-value repair compensates the stale enabled claim to false", async () => {
+  const fx = fixture({ backgroundRegistered: false, handshakeFailure: true });
+  await assert.rejects(createSkinController(fx.deps).setPersistence({
+    expectedRevision: 0,
+    enabled: true,
+  }), (error) => {
+    assert.equal(error.code, "BACKGROUND_START_FAILED");
+    assert.deepEqual(error.state, { persistenceEnabled: false, revision: 2 });
+    return true;
+  });
+  assert.equal(fx.state.persistenceEnabled, false);
+  assert.equal(fx.backgroundRegistered, false);
 });
 
 test("a different-value stale revision fails before writing a transition", async () => {
@@ -672,9 +758,74 @@ test("enable ACK follows registration wake handshake and clears current-session 
   assert.equal(fx.calls.preflight.length, 1);
   assert.equal(fx.calls.register.length, 1);
   assert.equal(fx.calls.wake.length, 1);
-  assert.deepEqual(fx.calls.handshake, [2]);
+  assert.deepEqual(fx.calls.prepareHandshake, [{
+    revision: 2,
+    transitionNonce: "controller-transition-1",
+  }]);
+  assert.deepEqual(fx.calls.handshake, [{
+    revision: 2,
+    transitionNonce: "controller-transition-1",
+    handshakeRequest: { notBefore: 12345 },
+  }]);
   assert.equal(fx.session.keepUntilProcessExit, false);
   assert.equal(fx.transition, null);
+});
+
+test("enable releases the operation lease before wake and exact background handshake", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+  });
+  let tail = Promise.resolve();
+  let backgroundStart = null;
+  let backgroundAcquired = false;
+  const activeOperations = new Set();
+  fx.deps.withLease = async (operation, action) => {
+    const previous = tail;
+    let release;
+    tail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    activeOperations.add(operation);
+    fx.calls.lease.push(operation);
+    try {
+      return await action(Object.freeze({ operation }));
+    } finally {
+      activeOperations.delete(operation);
+      release();
+    }
+  };
+  fx.deps.wakeBackground = async () => {
+    fx.calls.wake.push(true);
+    backgroundStart = fx.deps.withLease("controller:background-start", async () => {
+      backgroundAcquired = true;
+      return true;
+    });
+  };
+  fx.deps.verifyBackgroundHandshake = async ({ revision, transitionNonce }) => {
+    assert.equal(
+      activeOperations.has("controller:set-persistence"),
+      false,
+      "foreground must not hold the operation lease while waiting for ACK",
+    );
+    await Promise.race([
+      backgroundStart,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("background start could not acquire the shared lease")),
+        50,
+      )),
+    ]);
+    assert.equal(revision, 2);
+    assert.equal(transitionNonce, "controller-transition-1");
+    return true;
+  };
+
+  const result = await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 1,
+    enabled: true,
+  });
+  assert.deepEqual(result, { persistenceEnabled: true, revision: 2 });
+  assert.equal(backgroundAcquired, true);
 });
 
 test("enable handshake failure compensates after the enabled CAS and unregisters", async () => {
@@ -717,6 +868,26 @@ test("an unacknowledged enable caused by lease-release failure is compensated of
   assert.equal(fx.state.revision, 3);
   assert.equal(fx.backgroundRegistered, false);
   assert.equal(fx.calls.lease.includes("controller:compensate-unacked-enable"), true);
+});
+
+test("finalize lease-release failure is compensated by a new exact lease", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false },
+    session: activeSession({ keepUntilProcessExit: true }),
+    releaseFailureAfterFinalize: true,
+    backgroundRegistered: false,
+  });
+  await assert.rejects(
+    createSkinController(fx.deps).setPersistence({ expectedRevision: 1, enabled: true }),
+    (error) => {
+      assert.equal(error.code, "BACKGROUND_START_FAILED");
+      assert.deepEqual(error.state, { persistenceEnabled: false, revision: 3 });
+      return true;
+    },
+  );
+  assert.equal(fx.calls.lease.includes("controller:finalize-enable"), true);
+  assert.equal(fx.calls.lease.includes("controller:compensate-unacked-enable"), true);
+  assert.equal(fx.backgroundRegistered, false);
 });
 
 test("restore disables persistence removes skin unregisters and closes the endpoint", async () => {

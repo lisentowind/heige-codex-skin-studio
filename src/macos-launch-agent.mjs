@@ -14,6 +14,7 @@ const TEST_LABEL_PREFIX = `${CONTROLLER_LAUNCH_AGENT_LABEL}.test.`;
 const LEGACY_TEST_LABEL_PREFIX = `${LEGACY_WATCHDOG_LABEL}.test.`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const HANDSHAKE_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const NOT_FOUND_CODES = new Set([3, 113, "3", "113"]);
 const PLIST_BACKUP_MAX_BYTES = 256 * 1024;
 const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
@@ -341,15 +342,25 @@ export async function inspectTrustedProductionRuntime() {
 
 async function resolveProgramArguments(options) {
   const explicit = options.programArguments;
+  let resolved;
   if (explicit !== undefined) {
     validateProgramArguments(explicit);
     if (!options.testMode) {
       throw new Error("production LaunchAgent must use the stable controller entrypoint");
     }
-    return [...explicit];
+    resolved = [...explicit];
+  } else {
+    const runtime = await resolveStableRuntime(options);
+    resolved = [runtime.nodePath, runtime.controllerPath, "controller"];
   }
-  const runtime = await resolveStableRuntime(options);
-  return [runtime.nodePath, runtime.controllerPath, "controller"];
+  resolved.push(
+    "--background",
+    "--platform",
+    "darwin",
+    "--task-name",
+    options.label,
+  );
+  return resolved;
 }
 
 function normalizedOptions(options = {}) {
@@ -960,9 +971,27 @@ function safeError(error) {
 function assertControllerPlistAttribution(options, plist, programArguments) {
   const expectedStdout = join(options.stateDir, "controller.log");
   const expectedStderr = join(options.stateDir, "controller.error.log");
-  const matchesArguments = Array.isArray(plist.ProgramArguments) &&
-    plist.ProgramArguments.length === programArguments.length &&
-    plist.ProgramArguments.every((value, index) => value === programArguments[index]);
+  const actualArguments = plist.ProgramArguments;
+  const exactArguments = Array.isArray(actualArguments) &&
+    actualArguments.length === programArguments.length &&
+    actualArguments.every((value, index) => value === programArguments[index]);
+  const controllerBase = programArguments.length >= 3 && programArguments[2] === "controller"
+    ? programArguments.slice(0, 3)
+    : null;
+  const safeHandshakeArguments = controllerBase !== null &&
+    Array.isArray(actualArguments) &&
+    actualArguments.length === 7 &&
+    actualArguments.slice(0, 3).every((value, index) => value === controllerBase[index]) &&
+    actualArguments[3] === "--handshake-revision" &&
+    /^(?:0|[1-9]\d*)$/.test(actualArguments[4]) &&
+    Number.isSafeInteger(Number(actualArguments[4])) &&
+    actualArguments[5] === "--handshake-nonce" &&
+    HANDSHAKE_NONCE_PATTERN.test(actualArguments[6]);
+  const baseControllerArguments = controllerBase !== null &&
+    Array.isArray(actualArguments) &&
+    actualArguments.length === 3 &&
+    actualArguments.every((value, index) => value === controllerBase[index]);
+  const matchesArguments = exactArguments || safeHandshakeArguments || baseControllerArguments;
   const exactTopLevelKeys = Object.keys(plist).length === CONTROLLER_PLIST_KEYS.size &&
     Object.keys(plist).every((key) => CONTROLLER_PLIST_KEYS.has(key));
   const exactKeepAliveKeys = plist.KeepAlive !== null &&
@@ -1181,6 +1210,25 @@ export async function inspectLaunchAgent(input = {}) {
     plistLabel: plist?.Label ?? null,
     loaded: await isLoaded(options),
   };
+}
+
+export async function wakeControllerAgent(input = {}) {
+  const options = normalizedOptions(input);
+  assertMutationLabel(options.label, options.testMode === true);
+  assertProductionLocations(options);
+  launchDomain(options);
+  if (!(await isLoaded(options))) {
+    const error = new Error(`LaunchAgent ${options.label} is not loaded`);
+    error.code = "LAUNCH_AGENT_NOT_LOADED";
+    throw error;
+  }
+  await command(options, "/bin/launchctl", ["kickstart", "-k", launchTarget(options)]);
+  if (!(await isLoaded(options))) {
+    const error = new Error(`LaunchAgent ${options.label} was not loaded after kickstart`);
+    error.code = "LAUNCH_AGENT_NOT_LOADED";
+    throw error;
+  }
+  return { label: options.label, loaded: true, woken: true };
 }
 
 async function restoreRegistration(

@@ -2,10 +2,19 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import {
+  claimBackgroundStartRequest,
+  publishBackgroundHandshake,
+  publishBackgroundStartRequest,
+  readBackgroundHandshake,
+  removeBackgroundHandshake,
+  removeBackgroundStartRequest,
+  waitForBackgroundHandshake,
+} from "./background-handshake.mjs";
 import {
   classifyInjection,
   discoverCodex,
@@ -27,10 +36,12 @@ import {
   writeLifecycleActionFile,
 } from "./lifecycle-helper.mjs";
 import {
+  CONTROLLER_LAUNCH_AGENT_LABEL,
   inspectLaunchAgent,
   migrateLegacyWatchdog,
   registerControllerAgent,
   unregisterControllerAgent,
+  wakeControllerAgent,
 } from "./macos-launch-agent.mjs";
 import { withOperationLock } from "./operation-lock.mjs";
 import { installPet } from "./pet-installer.mjs";
@@ -48,7 +59,7 @@ import { createSingleImageTheme, listThemes } from "./theme-store.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const BOOLEAN_FLAGS = new Set(["ephemeral", "once", "prefer-stored"]);
+const BOOLEAN_FLAGS = new Set(["background", "ephemeral", "once", "prefer-stored"]);
 const COMMAND_OPTIONS = new Map([
   ["help", new Set()],
   ["list", new Set()],
@@ -61,12 +72,22 @@ const COMMAND_OPTIONS = new Map([
   ["pause", new Set(["port"])],
   ["resume", new Set(["port"])],
   ["restore", new Set(["port"])],
-  ["controller", new Set(["ephemeral", "once", "platform", "port", "task-name"])],
+  ["controller", new Set([
+    "background",
+    "ephemeral",
+    "once",
+    "platform",
+    "port",
+    "state-directory",
+    "task-name",
+  ])],
   ["migrate-legacy", new Set(["port"])],
   ["status", new Set(["port"])],
   ["doctor", new Set(["port"])],
   ["install-pet", new Set(["source"])],
 ]);
+const WINDOWS_PRODUCTION_TASK = "HeiGe Codex Skin Studio Controller";
+const WINDOWS_TEST_TASK = /^HeiGe Codex Skin Studio Test [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function parseInvocation(argv) {
   const command = argv[0] ?? "help";
@@ -79,6 +100,7 @@ function parseInvocation(argv) {
       continue;
     }
     const name = key.slice(2);
+    if (Object.hasOwn(args, name)) throw new Error(`重复参数：--${name}`);
     if (BOOLEAN_FLAGS.has(name)) {
       args[name] = true;
       continue;
@@ -107,6 +129,72 @@ function assertNodeVersion(value) {
   if (!match || Number(match[1]) < 22) {
     throw new Error(`运行命令需要 Node.js 22 或更高版本，实际为 ${String(value)}`);
   }
+}
+
+function controllerPlatform(value) {
+  const selected = value ?? process.platform;
+  if (selected === "windows") return "win32";
+  if (selected === "win32" || selected === "darwin") return selected;
+  throw new Error("controller --platform 只支持 darwin 或 windows");
+}
+
+function controllerBackgroundIdentity(platform, taskName) {
+  if (platform === "darwin") {
+    if (taskName !== undefined && taskName !== CONTROLLER_LAUNCH_AGENT_LABEL) {
+      throw new Error("macOS controller 不接受 Windows TaskName");
+    }
+    return CONTROLLER_LAUNCH_AGENT_LABEL;
+  }
+  if (taskName === undefined) return WINDOWS_PRODUCTION_TASK;
+  if (
+    taskName !== WINDOWS_PRODUCTION_TASK &&
+    (typeof taskName !== "string" || !WINDOWS_TEST_TASK.test(taskName))
+  ) {
+    throw new Error("Windows controller TaskName 不在允许范围内");
+  }
+  return taskName;
+}
+
+function pathsAtStateRoot(base, stateRoot) {
+  return {
+    ...base,
+    stateRoot,
+    statePath: join(stateRoot, "state.json"),
+    sessionPath: join(stateRoot, "session.json"),
+    transitionPath: join(stateRoot, "transition.json"),
+    lockPath: join(stateRoot, "operation.lock"),
+    logPath: join(stateRoot, "injector.log"),
+    userThemesRoot: join(stateRoot, "themes"),
+  };
+}
+
+function controllerPaths({ platform, stateDirectory, taskName }) {
+  const base = resolveStudioPaths({ platform });
+  if (stateDirectory === undefined) {
+    if (platform === "win32" && typeof taskName === "string" && WINDOWS_TEST_TASK.test(taskName)) {
+      throw new Error("Windows 隔离测试任务必须提供 --state-directory");
+    }
+    return base;
+  }
+  if (platform !== "win32") throw new Error("--state-directory 仅支持 Windows controller");
+  if (
+    typeof stateDirectory !== "string" ||
+    !isAbsolute(stateDirectory) ||
+    normalize(stateDirectory) !== stateDirectory ||
+    stateDirectory.includes("\0")
+  ) {
+    throw new Error("--state-directory 必须是规范绝对路径");
+  }
+  const selected = resolve(stateDirectory);
+  const production = resolve(base.stateRoot);
+  if (taskName === WINDOWS_PRODUCTION_TASK && selected.toLowerCase() !== production.toLowerCase()) {
+    throw new Error("Windows 生产任务只能使用默认 APPDATA 状态目录");
+  }
+  if (typeof taskName === "string" && WINDOWS_TEST_TASK.test(taskName) &&
+      selected.toLowerCase() === production.toLowerCase()) {
+    throw new Error("Windows 隔离测试任务不得使用生产状态目录");
+  }
+  return pathsAtStateRoot(base, selected);
 }
 
 function portFrom(value) {
@@ -152,7 +240,39 @@ function publicProcess(value) {
   };
 }
 
-async function readPsIdentity(pid) {
+async function readProcessIdentity(pid, platform = process.platform) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("进程 PID 无效");
+  if (platform === "win32") {
+    const systemRoot = process.env.SystemRoot;
+    if (typeof systemRoot !== "string" || systemRoot.length === 0) {
+      throw new Error("Windows SystemRoot 不可用");
+    }
+    const powershell = join(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    try {
+      const { stdout } = await execFile(powershell, [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
+          `[Console]::Out.Write(($p.Id.ToString() + '|' + ` +
+          `$p.StartTime.ToUniversalTime().ToString('o')))`,
+      ]);
+      const [observedPid, startedAt, ...extra] = stdout.trim().split("|");
+      if (extra.length > 0 || Number(observedPid) !== pid || !startedAt) return null;
+      return { pid, startedAt };
+    } catch (error) {
+      if (/Cannot find a process|No process was found/i.test(String(error?.stderr ?? error?.message))) {
+        return null;
+      }
+      throw error;
+    }
+  }
   let stdout;
   try {
     ({ stdout } = await execFile("/bin/ps", ["-p", String(pid), "-o", "pid=,lstart="]));
@@ -165,25 +285,132 @@ async function readPsIdentity(pid) {
   return { pid, startedAt: match[2] };
 }
 
-async function currentLockIdentity() {
-  const identity = await readPsIdentity(process.pid);
+async function currentLockIdentity(platform = process.platform) {
+  const identity = await readProcessIdentity(process.pid, platform);
   if (identity === null) throw new Error("无法读取当前 CLI 进程身份");
   return identity;
 }
 
-async function lockOptions(paths) {
+async function lockOptions(paths, platform = process.platform) {
   return {
     lockPath: paths.lockPath,
     stateRoot: paths.stateRoot,
-    identity: await currentLockIdentity(),
-    readProcessIdentity: readPsIdentity,
+    identity: await currentLockIdentity(platform),
+    readProcessIdentity: (pid) => readProcessIdentity(pid, platform),
   };
 }
 
-async function validatePortOwner(port, processIdentity) {
+const WINDOWS_PROCESS_STARTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,7}Z$/;
+const WINDOWS_CODEX_PROCESS_NAMES = new Set(["chatgpt", "codex"]);
+
+export async function probeWindowsCdpProcess(port, {
+  execFileImpl = execFile,
+  powershellPath = windowsPowerShellPath(),
+} = {}) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Windows CDP port is invalid");
+  }
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$connections = @(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction Stop)`,
+    "$records = @($connections | ForEach-Object {",
+    "  $owner = Get-Process -Id $_.OwningProcess -ErrorAction Stop",
+    "  [pscustomobject][ordered]@{",
+    "    pid = [int]$owner.Id",
+    "    executablePath = [string]$owner.Path",
+    "    startedAt = $owner.StartTime.ToUniversalTime().ToString('o')",
+    "    processName = [string]$owner.ProcessName",
+    "    localAddress = [string]$_.LocalAddress",
+    "    localPort = [int]$_.LocalPort",
+    "  }",
+    "})",
+    "[Console]::Out.Write((ConvertTo-Json -InputObject @($records) -Compress))",
+  ].join("\n");
+  const { stdout } = await execFileImpl(powershellPath, [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    script,
+  ]);
+  let records;
+  try {
+    records = JSON.parse(String(stdout).trim());
+  } catch (cause) {
+    throw new Error("Windows CDP owner query returned invalid JSON", { cause });
+  }
+  if (!Array.isArray(records)) {
+    throw new Error("Windows CDP owner query did not return an array");
+  }
+  if (records.length === 0) return null;
+  if (records.length !== 1) {
+    throw new Error("Windows CDP loopback owner is not unique");
+  }
+  const record = records[0];
+  const exactKeys = [
+    "executablePath",
+    "localAddress",
+    "localPort",
+    "pid",
+    "processName",
+    "startedAt",
+  ];
+  if (
+    record === null ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    Object.keys(record).sort().join("\0") !== exactKeys.sort().join("\0")
+  ) {
+    throw new Error("Windows CDP owner record schema is invalid");
+  }
+  if (record.localAddress !== "127.0.0.1" || record.localPort !== port) {
+    throw new Error("Windows CDP owner is not an exact IPv4 loopback listener");
+  }
+  if (!Number.isSafeInteger(record.pid) || record.pid <= 0) {
+    throw new Error("Windows CDP owner PID is invalid");
+  }
+  if (
+    typeof record.processName !== "string" ||
+    !WINDOWS_CODEX_PROCESS_NAMES.has(record.processName.toLowerCase())
+  ) {
+    throw new Error("Windows CDP owner is not a Codex process");
+  }
+  if (
+    typeof record.executablePath !== "string" ||
+    !win32.isAbsolute(record.executablePath) ||
+    record.executablePath.includes("\0") ||
+    /[\r\n]/.test(record.executablePath)
+  ) {
+    throw new Error("Windows CDP owner executable path is invalid");
+  }
+  if (typeof record.startedAt !== "string" || !WINDOWS_PROCESS_STARTED_AT.test(record.startedAt)) {
+    throw new Error("Windows CDP owner process start time is invalid");
+  }
+  return {
+    pid: record.pid,
+    executablePath: record.executablePath,
+    startedAt: record.startedAt,
+  };
+}
+
+export async function validatePortOwner(port, processIdentity, {
+  platform = process.platform,
+  execFileImpl = execFile,
+  powershellPath,
+} = {}) {
+  if (platform === "win32") {
+    try {
+      const observed = await probeWindowsCdpProcess(port, {
+        execFileImpl,
+        ...(powershellPath === undefined ? {} : { powershellPath }),
+      });
+      return sameProcessIdentity(observed, processIdentity);
+    } catch {
+      return false;
+    }
+  }
   let stdout;
   try {
-    ({ stdout } = await execFile("/usr/sbin/lsof", [
+    ({ stdout } = await execFileImpl("/usr/sbin/lsof", [
       "-nP",
       "-a",
       "-p",
@@ -307,11 +534,128 @@ export function controllerInjectionPreference({ ephemeral = false, preferStored 
   return preferStored ?? !ephemeral;
 }
 
-async function productionController({ port, paths, roots, deps, ephemeral = false, preferStored }) {
+function windowsPowerShellPath() {
+  const systemRoot = process.env.SystemRoot;
+  if (typeof systemRoot !== "string" || systemRoot.length === 0) {
+    throw new Error("Windows SystemRoot 不可用");
+  }
+  return join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+}
+
+async function runWindowsControllerAction({
+  action,
+  taskName,
+  port,
+  stateRoot,
+  revision,
+  transitionNonce,
+}) {
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    join(repositoryRoot, "scripts", "windows", "controller.ps1"),
+    "-Action",
+    action,
+    "-TaskName",
+    taskName,
+    "-Port",
+    String(port),
+    "-StateDirectory",
+    stateRoot,
+  ];
+  if (action === "start") {
+    args.push(
+      "-ExpectedRevision",
+      String(revision),
+      "-ExpectedTransitionNonce",
+      transitionNonce,
+    );
+  }
+  const { stdout } = await execFile(windowsPowerShellPath(), args);
+  const text = stdout.trim();
+  if (text.length === 0) return {};
+  try {
+    return JSON.parse(text);
+  } catch (cause) {
+    throw new Error(`Windows controller ${action} 返回了无效 JSON`, { cause });
+  }
+}
+
+export function normalizeWindowsBackgroundStatus(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { registered: false, running: false };
+  }
+  const registered = value.Exists === true;
+  return {
+    registered,
+    running: registered && value.TaskRunning === true && value.State === "Running",
+  };
+}
+
+async function exactReadyHandshake({
+  stateRoot,
+  expected,
+  platform,
+  backgroundIdentity,
+}) {
+  if (
+    !Number.isSafeInteger(expected?.revision) ||
+    typeof expected?.transitionNonce !== "string"
+  ) {
+    return false;
+  }
+  try {
+    const document = await readBackgroundHandshake({ stateRoot });
+    if (
+      document === null ||
+      document.revision !== expected.revision ||
+      document.transitionNonce !== expected.transitionNonce ||
+      document.platform !== platform ||
+      document.backgroundIdentity !== backgroundIdentity ||
+      document.outcome !== "ready"
+    ) {
+      return false;
+    }
+    const identity = await readProcessIdentity(document.pid, platform);
+    return identity !== null &&
+      identity.pid === document.pid &&
+      identity.startedAt === document.startedAt;
+  } catch {
+    return false;
+  }
+}
+
+async function productionController({
+  port,
+  paths,
+  roots,
+  deps,
+  ephemeral = false,
+  preferStored,
+  platform = process.platform,
+  taskName,
+  startupHandshake = null,
+  background = false,
+}) {
   const injectionPreferStored = controllerInjectionPreference({ ephemeral, preferStored });
-  const lock = await lockOptions(paths);
+  const backgroundIdentity = controllerBackgroundIdentity(
+    platform,
+    platform === "win32" ? (taskName ?? WINDOWS_PRODUCTION_TASK) : taskName,
+  );
+  const lock = await lockOptions(paths, platform);
+  let deferredWindowsUnregister = false;
   const probe = async () => {
-    const app = await resolveCodexApp();
+    if (platform === "win32") return probeWindowsCdpProcess(port);
+    const app = await resolveCodexApp({ platform });
     const candidates = (await listCodexProcesses({ app })).filter((entry) => entry.cdpPort === port);
     if (candidates.length === 0) return null;
     if (candidates.length !== 1) throw new Error("Codex 进程身份不唯一");
@@ -323,6 +667,7 @@ async function productionController({ port, paths, roots, deps, ephemeral = fals
     token: initial?.controlToken ?? "",
   });
   return createSkinController({
+    backgroundProcess: background,
     statePath: paths.statePath,
     sessionPath: paths.sessionPath,
     transitionPath: paths.transitionPath,
@@ -330,7 +675,7 @@ async function productionController({ port, paths, roots, deps, ephemeral = fals
     probeCurrentProcess: probe,
     validatePortOwner: async (candidate) => {
       const current = await probe();
-      return sameProcessIdentity(current, candidate) && validatePortOwner(port, candidate);
+      return sameProcessIdentity(current, candidate) && validatePortOwner(port, candidate, { platform });
     },
     inspectSkin: () => deps.skinStatus({ port }),
     injectSkin: async ({ themeId, control, targetIds }) => {
@@ -349,18 +694,193 @@ async function productionController({ port, paths, roots, deps, ephemeral = fals
       });
     },
     removeSkin: () => deps.removeSkin({ port }),
-    registerBackground: () => registerControllerAgent(),
-    unregisterBackground: () => unregisterControllerAgent(),
-    inspectBackground: () => inspectLaunchAgent(),
-    wakeBackground: async () => true,
-    verifyBackgroundHandshake: async () => (await inspectLaunchAgent()).loaded === true,
+    prepareBackgroundHandshake: async ({ revision, transitionNonce }) => {
+      await removeBackgroundHandshake({ stateRoot: paths.stateRoot });
+      const request = await publishBackgroundStartRequest({
+        stateRoot: paths.stateRoot,
+        revision,
+        transitionNonce,
+        platform,
+        backgroundIdentity,
+      });
+      return { notBefore: Date.parse(request.createdAt) };
+    },
+    registerBackground: () => platform === "darwin"
+      ? registerControllerAgent().then((value) => ({
+        ...value,
+        registered: value.loaded === true,
+      }))
+      : runWindowsControllerAction({
+        action: "register",
+        taskName: backgroundIdentity,
+        port,
+        stateRoot: paths.stateRoot,
+      }).then((value) => ({
+        ...value,
+        registered: value.Registered === true || value.Exists === true,
+      })),
+    unregisterBackground: async () => {
+      if (platform === "darwin") {
+        const value = await unregisterControllerAgent();
+        await removeBackgroundStartRequest({ stateRoot: paths.stateRoot }).catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
+        await removeBackgroundHandshake({ stateRoot: paths.stateRoot }).catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
+        return { ...value, registered: false, loaded: false };
+      }
+      if (startupHandshake !== null) {
+        deferredWindowsUnregister = true;
+        return { registered: false, loaded: false, deferred: true };
+      }
+      const value = await runWindowsControllerAction({
+        action: "unregister",
+        taskName: backgroundIdentity,
+        port,
+        stateRoot: paths.stateRoot,
+      });
+      await removeBackgroundStartRequest({ stateRoot: paths.stateRoot }).catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
+      await removeBackgroundHandshake({ stateRoot: paths.stateRoot }).catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
+      return { ...value, registered: false, loaded: false };
+    },
+    inspectBackground: async (expected) => {
+      let status;
+      if (platform === "darwin") {
+        const value = await inspectLaunchAgent();
+        status = {
+          ...value,
+          registered: value.plistExists === true && value.loaded === true,
+          running: value.loaded === true,
+        };
+      } else {
+        if (deferredWindowsUnregister) {
+          return { registered: false, running: false, loaded: false, deferred: true };
+        }
+        const value = await runWindowsControllerAction({
+          action: "status",
+          taskName: backgroundIdentity,
+          port,
+          stateRoot: paths.stateRoot,
+        });
+        status = { ...value, ...normalizeWindowsBackgroundStatus(value) };
+      }
+      const loaded = status.registered === true &&
+        status.running === true &&
+        await exactReadyHandshake({
+          stateRoot: paths.stateRoot,
+          expected,
+          platform,
+          backgroundIdentity,
+        });
+      return { ...status, loaded };
+    },
+    wakeBackground: (request) => platform === "darwin"
+      ? wakeControllerAgent()
+      : runWindowsControllerAction({
+        action: "start",
+        taskName: backgroundIdentity,
+        port,
+        stateRoot: paths.stateRoot,
+        revision: request.revision,
+        transitionNonce: request.transitionNonce,
+      }),
+    verifyBackgroundHandshake: async ({ revision, transitionNonce, handshakeRequest }) => {
+      const observed = await waitForBackgroundHandshake({
+        stateRoot: paths.stateRoot,
+        expected: {
+          revision,
+          transitionNonce,
+          platform,
+          backgroundIdentity,
+          outcome: "ready",
+        },
+        forbiddenPid: process.pid,
+        notBefore: handshakeRequest?.notBefore,
+        readProcessIdentity: (pid) => readProcessIdentity(pid, platform),
+      });
+      await removeBackgroundHandshake({ stateRoot: paths.stateRoot });
+      return observed.outcome === "ready";
+    },
     preflightEnable: async () => true,
     logger,
   });
 }
 
-async function productionRunController(controller, { once = false } = {}) {
+export async function runControllerProcess(controller, {
+  once = false,
+  startupHandshake = null,
+  backgroundRuntime = null,
+  paths,
+  claimStartRequest = claimBackgroundStartRequest,
+  publishHandshake = publishBackgroundHandshake,
+  readCurrentIdentity,
+} = {}) {
+  if (startupHandshake !== null && backgroundRuntime !== null) {
+    throw new Error("background controller cannot combine inline and one-shot handshake requests");
+  }
+  let activeHandshake = startupHandshake;
+  if (backgroundRuntime !== null) {
+    if (
+      backgroundRuntime === null ||
+      typeof backgroundRuntime !== "object" ||
+      !["darwin", "win32"].includes(backgroundRuntime.platform) ||
+      typeof backgroundRuntime.backgroundIdentity !== "string" ||
+      backgroundRuntime.backgroundIdentity.length === 0
+    ) {
+      throw new Error("background runtime identity is invalid");
+    }
+    activeHandshake = await claimStartRequest({
+      stateRoot: paths.stateRoot,
+      platform: backgroundRuntime.platform,
+      backgroundIdentity: backgroundRuntime.backgroundIdentity,
+    });
+  }
   let result = await controller.start();
+  if (activeHandshake !== null) {
+    try {
+      if (result?.action === "error" || result?.mode === "error") {
+        throw new Error("controller start failed before background handshake");
+      }
+      if (result?.revision !== activeHandshake.revision) {
+        throw new Error("controller start revision does not match the handshake request");
+      }
+      const outcome = result.action === "unregister" ? "unregister" : "ready";
+      if (
+        (outcome === "ready" && result.persistenceEnabled !== true) ||
+        (outcome === "unregister" && result.persistenceEnabled !== false)
+      ) {
+        throw new Error("controller start outcome does not match authoritative persistence state");
+      }
+      const identity = await (readCurrentIdentity ?? (() =>
+        readProcessIdentity(process.pid, activeHandshake.platform)))();
+      if (
+        identity === null ||
+        identity?.pid !== process.pid ||
+        typeof identity?.startedAt !== "string" ||
+        identity.startedAt.length === 0
+      ) {
+        throw new Error("controller process identity is unavailable for background handshake");
+      }
+      await publishHandshake({
+        stateRoot: paths.stateRoot,
+        revision: activeHandshake.revision,
+        transitionNonce: activeHandshake.transitionNonce,
+        platform: activeHandshake.platform,
+        backgroundIdentity: activeHandshake.backgroundIdentity,
+        pid: identity.pid,
+        startedAt: identity.startedAt,
+        outcome,
+      });
+    } catch (error) {
+      await controller.stop();
+      throw error;
+    }
+  }
   if (once || result.action === "unregister" || result.action === "error") {
     await controller.stop();
     return result;
@@ -517,8 +1037,8 @@ async function productionChooseThemeInputs() {
   }
 }
 
-function defaults(overrides) {
-  const paths = resolveStudioPaths();
+function defaults(overrides, { paths: selectedPaths, platform = process.platform } = {}) {
+  const paths = overrides.paths ?? selectedPaths ?? resolveStudioPaths({ platform });
   const bundledThemesRoot = join(repositoryRoot, "themes");
   const roots = [bundledThemesRoot, paths.userThemesRoot];
   const base = {
@@ -555,7 +1075,10 @@ function defaults(overrides) {
     productionController({ ...input, deps: merged, paths: merged.paths, roots: merged.roots }));
   merged.runController = overrides.runController ?? (overrides.createController
     ? (controller) => controller.start()
-    : productionRunController);
+    : ((controller, options) => runControllerProcess(controller, {
+      ...options,
+      paths: merged.paths,
+    })));
   merged.restartDetached = overrides.restartDetached ?? ((input) =>
     productionRestartDetached({ ...input, paths: merged.paths }));
   merged.migrateLegacy = overrides.migrateLegacy ?? ((input) =>
@@ -630,7 +1153,24 @@ async function withStoppedController(controller, action) {
 
 export async function runCli(argv, overrides = {}) {
   const { args, command, positionals } = parseInvocation(argv);
-  const deps = defaults(overrides);
+  const selectedControllerPlatform = command === "controller"
+    ? controllerPlatform(args.platform)
+    : process.platform;
+  const selectedTaskName = command === "controller" ? args["task-name"] : undefined;
+  const selectedBackgroundIdentity = command === "controller"
+    ? controllerBackgroundIdentity(selectedControllerPlatform, selectedTaskName)
+    : undefined;
+  const selectedPaths = command === "controller"
+    ? controllerPaths({
+      platform: selectedControllerPlatform,
+      stateDirectory: args["state-directory"],
+      taskName: selectedTaskName,
+    })
+    : undefined;
+  const deps = defaults(overrides, {
+    paths: selectedPaths,
+    platform: selectedControllerPlatform,
+  });
   if (command === "help") {
     return {
       commands: [
@@ -762,13 +1302,25 @@ export async function runCli(argv, overrides = {}) {
   }
   if (command === "controller") {
     const port = portFrom(args.port);
+    const startupHandshake = null;
     const controller = await lifecycleController(deps, {
+      background: Boolean(args.background),
       ephemeral: Boolean(args.ephemeral),
-      platform: args.platform ?? process.platform,
+      platform: selectedControllerPlatform,
       port,
-      taskName: args["task-name"] ?? null,
+      taskName: selectedTaskName,
+      startupHandshake,
     });
-    const result = await deps.runController(controller, { once: Boolean(args.once) });
+    const result = await deps.runController(controller, {
+      backgroundRuntime: args.background
+        ? {
+          platform: selectedControllerPlatform,
+          backgroundIdentity: selectedBackgroundIdentity,
+        }
+        : null,
+      once: Boolean(args.once),
+      startupHandshake,
+    });
     if (result?.action === "error" || result?.mode === "error") {
       throw new Error("控制器启动或巡检失败");
     }

@@ -162,6 +162,9 @@ function normalizedDependencies(input) {
     removeSkin: requireFunction(input.removeSkin, "removeSkin"),
     startControlServer: input.startControlServer ?? startLoopbackControlServer,
     preflightEnable: input.preflightEnable ?? (async () => true),
+    prepareBackgroundHandshake: input.prepareBackgroundHandshake ?? (async () => ({
+      notBefore: Date.now(),
+    })),
     registerBackground: requireFunction(input.registerBackground, "registerBackground"),
     unregisterBackground: requireFunction(input.unregisterBackground, "unregisterBackground"),
     inspectBackground: requireFunction(input.inspectBackground, "inspectBackground"),
@@ -170,6 +173,7 @@ function normalizedDependencies(input) {
       input.verifyBackgroundHandshake,
       "verifyBackgroundHandshake",
     ),
+    backgroundProcess: input.backgroundProcess === true,
     newTransitionNonce: input.newTransitionNonce ?? randomUUID,
     fault: input.fault ?? (async () => {}),
     logger: input.logger ?? noopLogger(),
@@ -441,7 +445,7 @@ export function createSkinController(input) {
   const unregisterAndVerify = async () => {
     await deps.unregisterBackground();
     const inspected = await deps.inspectBackground();
-    if (!isRecord(inspected) || inspected.loaded !== false) {
+    if (!isRecord(inspected) || inspected.registered !== false) {
       throw new Error("background controller remained registered after unregister");
     }
   };
@@ -541,7 +545,7 @@ export function createSkinController(input) {
     }
   };
 
-  const enableTransition = async ({ lease, state, processIdentity, nonce }) => {
+  const prepareEnableTransition = async ({ lease, state, processIdentity, nonce }) => {
     await assertPortOwner(processIdentity);
     if (await deps.preflightEnable({ state, process: processIdentity }) !== true) {
       throw new Error("background enable preflight failed");
@@ -566,14 +570,6 @@ export function createSkinController(input) {
         preparedPublished = true;
         throw error;
       }
-      const registration = await deps.registerBackground({
-        pendingRevision: state.revision,
-        transitionNonce: nonce,
-      });
-      if (!isRecord(registration) || registration.loaded !== true) {
-        throw new Error("后台控制器启动失败");
-      }
-
       const updated = validateControlState(await deps.compareAndUpdate({
         expectedRevision: state.revision,
         mutate: (current) => ({
@@ -593,19 +589,7 @@ export function createSkinController(input) {
       journal = { ...journal, stage: "session-committed" };
       await deps.writeJournal(journal, lease);
 
-      await deps.wakeBackground({ revision: updated.revision, transitionNonce: nonce });
-      if (await deps.verifyBackgroundHandshake({
-        revision: updated.revision,
-        transitionNonce: nonce,
-      }) !== true) {
-        throw new Error("后台控制器启动失败");
-      }
-      const inspected = await deps.inspectBackground();
-      if (!isRecord(inspected) || inspected.loaded !== true) {
-        throw new Error("后台控制器启动失败");
-      }
-      await deps.clearJournal(nonce, lease);
-      return { state: updated, session };
+      return { journal, state: updated, session };
     } catch (error) {
       if (!preparedPublished) throw error;
       throw await compensateFailedEnable({
@@ -614,6 +598,26 @@ export function createSkinController(input) {
         primaryError: error,
       });
     }
+  };
+
+  const finalizeEnableTransition = async ({ lease, expectedRevision, nonce, journal }) => {
+    const current = validateControlState(await deps.readState());
+    if (
+      current.persistenceEnabled !== true ||
+      current.revision !== expectedRevision + 1 ||
+      current.lastTransitionNonce !== nonce
+    ) {
+      throw new Error("background ACK no longer matches the authoritative enabled state");
+    }
+    const pending = await deps.readTransition();
+    if (pending !== null) {
+      if (!sameTransition(pending, journal) || pending.stage !== "session-committed") {
+        throw new Error("background ACK does not match the pending enable transition");
+      }
+      await deps.clearJournal(nonce, lease);
+    }
+    lastKnownState = current;
+    return current;
   };
 
   const reconcile = async ({ lease, recovered = false, includeHealthCount = false }) => {
@@ -772,10 +776,22 @@ export function createSkinController(input) {
 
     let enableAttempt = null;
     try {
-      return await deps.withLease("controller:set-persistence", async (lease) => {
+      const changed = await deps.withLease("controller:set-persistence", async (lease) => {
         const state = validateControlState(await deps.readState());
         lastKnownState = state;
-        if (state.persistenceEnabled === enabled) return publicState(state);
+        if (state.persistenceEnabled === enabled) {
+          if (enabled) {
+            const processIdentity = await probeProcess();
+            await assertPortOwner(processIdentity);
+            enableAttempt = {
+              committedRevision: state.revision,
+              nonce: deps.newTransitionNonce(),
+              processIdentity,
+              requireStateNonce: false,
+            };
+          }
+          return { idempotent: true, state };
+        }
         if (state.revision !== expectedRevision) throw new ControllerTransitionError(
           "REVISION_CONFLICT",
           `state revision is ${state.revision}`,
@@ -784,30 +800,94 @@ export function createSkinController(input) {
 
         const processIdentity = await probeProcess();
         await assertPortOwner(processIdentity);
-        let changed;
         if (enabled) {
           enableAttempt = {
+            committedRevision: state.revision + 1,
             nonce: deps.newTransitionNonce(),
             processIdentity,
+            requireStateNonce: true,
           };
-          changed = await enableTransition({
+          return prepareEnableTransition({
             lease,
             state,
             processIdentity,
             nonce: enableAttempt.nonce,
           });
-        } else {
-          changed = await disableTransition({ lease, state, processIdentity });
         }
-        return publicState(changed.state);
+        return disableTransition({ lease, state, processIdentity });
       });
+
+      if (!enabled) return publicState(changed.state);
+      if (changed.idempotent === true) {
+        if (deps.backgroundProcess) return publicState(changed.state);
+        const inspected = await deps.inspectBackground({
+          revision: changed.state.revision,
+          transitionNonce: changed.state.lastTransitionNonce,
+        });
+        if (isRecord(inspected) && inspected.loaded === true) return publicState(changed.state);
+      }
+
+      const registration = await deps.registerBackground({
+        pendingRevision: changed.idempotent === true
+          ? changed.state.revision
+          : changed.state.revision - 1,
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+      });
+      if (!isRecord(registration) || registration.registered !== true) {
+        throw new Error("后台控制器注册失败");
+      }
+      const handshakeRequest = await deps.prepareBackgroundHandshake({
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+      });
+      await deps.wakeBackground({
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+      });
+      if (await deps.verifyBackgroundHandshake({
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+        handshakeRequest,
+      }) !== true) {
+        throw new Error("后台控制器启动握手失败");
+      }
+      const inspected = await deps.inspectBackground({
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+      });
+      if (!isRecord(inspected) || inspected.registered !== true) {
+        throw new Error("后台控制器未保持注册状态");
+      }
+      const finalized = await deps.withLease("controller:finalize-enable", async (lease) => {
+        if (changed.idempotent === true) {
+          const current = validateControlState(await deps.readState());
+          if (
+            current.persistenceEnabled !== true ||
+            current.revision !== changed.state.revision
+          ) {
+            throw new Error("background repair ACK no longer matches the authoritative state");
+          }
+          return current;
+        }
+        return finalizeEnableTransition({
+          lease,
+          expectedRevision,
+          nonce: enableAttempt.nonce,
+          journal: changed.journal,
+        });
+      });
+      return publicState(finalized);
     } catch (error) {
       if (enabled && enableAttempt !== null) {
         const authoritative = await deps.readState().catch(() => null);
         const exactUnacknowledgedEnable = isRecord(authoritative) &&
           authoritative.persistenceEnabled === true &&
-          authoritative.revision === expectedRevision + 1 &&
-          authoritative.lastTransitionNonce === enableAttempt.nonce;
+          authoritative.revision === enableAttempt.committedRevision &&
+          (
+            enableAttempt.requireStateNonce !== true ||
+            authoritative.lastTransitionNonce === enableAttempt.nonce
+          );
         if (exactUnacknowledgedEnable) {
           let compensationError = null;
           let compensatedState = null;
@@ -818,8 +898,11 @@ export function createSkinController(input) {
                 const current = validateControlState(await deps.readState());
                 if (
                   current.persistenceEnabled !== true ||
-                  current.revision !== expectedRevision + 1 ||
-                  current.lastTransitionNonce !== enableAttempt.nonce
+                  current.revision !== enableAttempt.committedRevision ||
+                  (
+                    enableAttempt.requireStateNonce === true &&
+                    current.lastTransitionNonce !== enableAttempt.nonce
+                  )
                 ) {
                   throw new Error("unacknowledged enable changed before compensation");
                 }

@@ -14,6 +14,7 @@ import {
   registerControllerAgent,
   renderControllerPlist,
   unregisterControllerAgent,
+  wakeControllerAgent,
 } from "../src/macos-launch-agent.mjs";
 
 const CONTROLLER_LABEL = "com.heige.codex-skin-controller";
@@ -29,6 +30,21 @@ function renderedLabel(xml) {
     .replaceAll("&gt;", ">")
     .replaceAll("&quot;", "\"")
     .replaceAll("&apos;", "'") ?? null;
+}
+
+function xmlUnescape(value) {
+  return value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'");
+}
+
+function renderedProgramArguments(xml) {
+  const array = String(xml).match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
+  if (!array) return null;
+  return [...array.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => xmlUnescape(match[1]));
 }
 
 async function pathExists(path) {
@@ -208,7 +224,7 @@ async function fixture(t, overrides = {}) {
     if (!label) throw new Error(`unparseable plist: ${path}`);
     return {
       Label: label,
-      ProgramArguments: [nodePath, controllerPath, "controller"],
+      ProgramArguments: renderedProgramArguments(xml) ?? [nodePath, controllerPath, "controller"],
       RunAtLoad: true,
       KeepAlive: { SuccessfulExit: false },
       ProcessType: "Background",
@@ -285,6 +301,11 @@ async function fixture(t, overrides = {}) {
     if (args[0] === "bootout") {
       const label = args[1].split("/").at(-1);
       loaded.delete(label);
+      return { stdout: "", stderr: "" };
+    }
+    if (args[0] === "kickstart") {
+      const label = args.at(-1).split("/").at(-1);
+      if (!loaded.has(label)) throw new Error("kickstart target is not loaded");
       return { stdout: "", stderr: "" };
     }
     throw new Error(`unexpected launchctl action: ${args[0]}`);
@@ -602,6 +623,45 @@ test("register writes private files, lints, bootstraps and verifies gui uid stat
   assert.equal(lintIndex < bootstrapIndex, true, "lint must finish before publish/bootstrap");
   assert.equal(await pathExists(deps.commands[lintIndex][2]), false);
   assert.equal(deps.chmodPaths.includes(deps.controllerPlistPath), false);
+});
+
+test("register keeps one fixed background command across revision drift", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  await registerControllerAgent({
+    ...deps,
+    revision: 7,
+    transitionNonce: "controller-transition-9",
+  });
+  const plist = await deps.readPlist(deps.controllerPlistPath);
+  assert.deepEqual(plist.ProgramArguments.slice(-5), [
+    "--background",
+    "--platform",
+    "darwin",
+    "--task-name",
+    deps.label,
+  ]);
+  assert.equal(plist.ProgramArguments.includes("--handshake-revision"), false);
+  assert.equal(plist.ProgramArguments.includes("controller-transition-9"), false);
+  const removed = await unregisterControllerAgent(deps);
+  assert.equal(removed.loaded, false);
+});
+
+test("wake uses launchctl kickstart and verifies the exact job remains loaded", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+  deps.commands.length = 0;
+  assert.deepEqual(await wakeControllerAgent(deps), {
+    label: deps.label,
+    loaded: true,
+    woken: true,
+  });
+  assert.deepEqual(deps.commands, [
+    ["/bin/launchctl", "print", `gui/${UID}/${deps.label}`],
+    ["/bin/launchctl", "kickstart", "-k", `gui/${UID}/${deps.label}`],
+    ["/bin/launchctl", "print", `gui/${UID}/${deps.label}`],
+  ]);
 });
 
 test("register leaves an existing loaded controller byte-for-byte intact when staged lint fails", async (t) => {
@@ -1378,9 +1438,19 @@ test("rollback reports primary and rollback failures and retains the journal", a
   assert.equal(journal.newBackup.existed, false);
   assert.equal(journal.newBackup.bytesBase64, null);
   assert.equal(journal.newBackup.sha256, null);
+  const fixedArguments = [
+    deps.nodePath,
+    deps.controllerPath,
+    "controller",
+    "--background",
+    "--platform",
+    "darwin",
+    "--task-name",
+    deps.label,
+  ];
   const forwardBytes = Buffer.from(renderControllerPlist({
     label: deps.label,
-    programArguments: [deps.nodePath, deps.controllerPath, "controller"],
+    programArguments: fixedArguments,
     stateDir: deps.stateDir,
   }));
   assert.match(journal.nonce, /^[0-9a-f-]{36}$/i);
@@ -1390,7 +1460,7 @@ test("rollback reports primary and rollback failures and retains the journal", a
   assert.match(journal.forward.stagedPath, new RegExp(
     `^${deps.controllerPlistPath.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.staged\\.`,
   ));
-  assert.deepEqual(journal.forward.programArguments, [deps.nodePath, deps.controllerPath, "controller"]);
+  assert.deepEqual(journal.forward.programArguments, fixedArguments);
   assert.equal(journal.forward.bytesBase64, forwardBytes.toString("base64"));
   assert.equal(
     journal.forward.sha256,
