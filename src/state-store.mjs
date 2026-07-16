@@ -9,7 +9,7 @@ import {
   rm,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, join, parse, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, parse, sep } from "node:path";
 
 import {
   DEFAULT_THEME_ID,
@@ -64,6 +64,18 @@ const TRANSITION_FILE_NAME = "transition.json";
 const MAX_PRIVATE_JSON_BYTES = 64 * 1024;
 const MAX_LEGACY_THEME_BYTES = 256;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const INSTALL_STATE_PRODUCT = "heige-codex-skin-studio";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INSTALL_STATE_PARTICIPANT_KEYS = [
+  "afterState",
+  "beforeState",
+  "expectedControlToken",
+  "operation",
+  "product",
+  "schemaVersion",
+  "statePath",
+  "transactionId",
+];
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -550,6 +562,193 @@ function generateControlToken(randomBytes) {
   return Buffer.from(entropy).toString("base64url");
 }
 
+async function legacyStateCandidate({
+  legacyThemePath,
+  legacyAgentLoaded,
+  themeExists,
+  defaultThemeId,
+  randomBytes,
+}) {
+  let themeId = defaultThemeId;
+  let persistenceEnabled = false;
+  let migratedFrom = null;
+  if (legacyAgentLoaded) {
+    let legacyTheme;
+    try {
+      await verifyDirectoryAncestors(dirname(legacyThemePath));
+      const snapshot = await readBoundedFile(legacyThemePath, {
+        maxBytes: MAX_LEGACY_THEME_BYTES,
+        label: "旧版主题记录",
+      });
+      legacyTheme = UTF8_DECODER.decode(snapshot.bytes);
+    } catch (cause) {
+      throw new Error(
+        `旧版主题状态无效：主题文件必须是不超过 ${MAX_LEGACY_THEME_BYTES} bytes 的普通文件且不得是符号链接`,
+        { cause },
+      );
+    }
+    themeId = legacyTheme.trim();
+    try {
+      validateThemeId(themeId, { field: "旧版主题 ID" });
+    } catch (cause) {
+      throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
+    }
+    if (await themeExists(themeId) !== true) {
+      throw new Error("旧版主题状态无效：主题不存在");
+    }
+    persistenceEnabled = true;
+    migratedFrom = "watchdog";
+  } else {
+    validateThemeId(themeId, { field: "默认主题 ID" });
+    if (await themeExists(themeId) !== true) {
+      throw new Error("默认主题不存在，拒绝创建状态");
+    }
+  }
+
+  const token = generateControlToken(randomBytes);
+  return {
+    migratedFrom,
+    state: validateStudioState({
+      ...createDefaultStudioState({ themeId, token }),
+      persistenceEnabled,
+      revision: persistenceEnabled ? 1 : 0,
+    }),
+  };
+}
+
+export function validateInstallStateParticipant(value) {
+  assertExactKeys(value, INSTALL_STATE_PARTICIPANT_KEYS, "install state participant schema ");
+  if (
+    value.schemaVersion !== 1 ||
+    value.product !== INSTALL_STATE_PRODUCT ||
+    value.operation !== "install-state" ||
+    typeof value.transactionId !== "string" ||
+    !UUID.test(value.transactionId)
+  ) {
+    throw new Error("install state participant schema identity is invalid");
+  }
+  if (
+    typeof value.statePath !== "string" ||
+    !isAbsolute(value.statePath) ||
+    normalize(value.statePath) !== value.statePath ||
+    basename(value.statePath) !== STATE_FILE_NAME
+  ) {
+    throw new Error("install state participant statePath is invalid");
+  }
+  const beforeState = value.beforeState === null ? null : validateStudioState(value.beforeState);
+  const afterState = validateStudioState(value.afterState);
+  const expectedControlToken = validateControlToken(value.expectedControlToken);
+  if (afterState.controlToken !== expectedControlToken) {
+    throw new Error("install state participant afterState identity is invalid");
+  }
+  if (beforeState !== null) {
+    if (
+      beforeState.controlToken !== expectedControlToken ||
+      JSON.stringify(beforeState) !== JSON.stringify(afterState)
+    ) {
+      throw new Error("install state participant existing state changed during preparation");
+    }
+  } else if (!(
+    afterState.lastTransitionNonce === null &&
+    (
+      (afterState.persistenceEnabled === false && afterState.revision === 0) ||
+      (afterState.persistenceEnabled === true && afterState.revision === 1)
+    )
+  )) {
+    throw new Error("install state participant new-state invariant is invalid");
+  }
+  return Object.freeze({
+    ...value,
+    beforeState,
+    afterState,
+    expectedControlToken,
+  });
+}
+
+export async function prepareInstallStateParticipant({
+  transactionId = randomUUID(),
+  statePath,
+  lease,
+  legacyThemePath,
+  legacyAgentLoaded,
+  themeExists,
+  defaultThemeId = DEFAULT_THEME_ID,
+  randomBytes = cryptoRandomBytes,
+} = {}) {
+  statePath = await mutationPath(lease, statePath, STATE_FILE_NAME);
+  if (typeof legacyAgentLoaded !== "boolean") {
+    throw new Error("legacyAgentLoaded 必须是布尔值");
+  }
+  if (typeof themeExists !== "function") throw new Error("themeExists 必须是函数");
+  if (typeof transactionId !== "string" || !UUID.test(transactionId)) {
+    throw new Error("install state transactionId is invalid");
+  }
+  const beforeState = await readStudioState(statePath);
+  const candidate = beforeState === null
+    ? await legacyStateCandidate({
+      legacyThemePath,
+      legacyAgentLoaded,
+      themeExists,
+      defaultThemeId,
+      randomBytes,
+    })
+    : { state: beforeState };
+  await guardOperationLease(lease);
+  return validateInstallStateParticipant({
+    schemaVersion: 1,
+    product: INSTALL_STATE_PRODUCT,
+    operation: "install-state",
+    transactionId,
+    statePath,
+    beforeState,
+    afterState: candidate.state,
+    expectedControlToken: candidate.state.controlToken,
+  });
+}
+
+function exactStudioState(left, right) {
+  return left !== null && right !== null && JSON.stringify(left) === JSON.stringify(right);
+}
+
+export async function publishInstallStateParticipant(value, { lease } = {}) {
+  const participant = validateInstallStateParticipant(value);
+  const statePath = await mutationPath(lease, participant.statePath, STATE_FILE_NAME);
+  return commitWithOperationLease(lease, async () => {
+    const current = await readStudioState(statePath);
+    if (participant.beforeState === null) {
+      if (current !== null) throw new Error("install state destination appeared before publish");
+      await atomicWriteJson(statePath, participant.afterState);
+      return { ...participant, published: true };
+    }
+    if (!exactStudioState(current, participant.beforeState)) {
+      throw new Error("install state precondition changed before publish");
+    }
+    return { ...participant, published: false };
+  });
+}
+
+export async function rollbackInstallStateParticipant(value, { lease } = {}) {
+  const participant = validateInstallStateParticipant(value);
+  return rollbackLegacyStateMigration({
+    statePath: participant.statePath,
+    lease,
+    beforeState: participant.beforeState,
+    expectedControlToken: participant.expectedControlToken,
+  });
+}
+
+export async function finalizeInstallStateParticipant(value, { lease } = {}) {
+  const participant = validateInstallStateParticipant(value);
+  const statePath = await mutationPath(lease, participant.statePath, STATE_FILE_NAME);
+  return commitWithOperationLease(lease, async () => {
+    const current = await readStudioState(statePath);
+    if (!exactStudioState(current, participant.afterState)) {
+      throw new Error("install state committed value is missing or changed");
+    }
+    return { ...participant, finalized: true };
+  });
+}
+
 export async function migrateLegacyState({
   statePath,
   lease,
@@ -571,47 +770,12 @@ export async function migrateLegacyState({
       return { state: existing, migratedFrom: null };
     }
 
-    let themeId = defaultThemeId;
-    let persistenceEnabled = false;
-    let migratedFrom = null;
-    if (legacyAgentLoaded) {
-      let legacyTheme;
-      try {
-        await verifyDirectoryAncestors(dirname(legacyThemePath));
-        const snapshot = await readBoundedFile(legacyThemePath, {
-          maxBytes: MAX_LEGACY_THEME_BYTES,
-          label: "旧版主题记录",
-        });
-        legacyTheme = UTF8_DECODER.decode(snapshot.bytes);
-      } catch (cause) {
-        throw new Error(
-          `旧版主题状态无效：主题文件必须是不超过 ${MAX_LEGACY_THEME_BYTES} bytes 的普通文件且不得是符号链接`,
-          { cause },
-        );
-      }
-      themeId = legacyTheme.trim();
-      try {
-        validateThemeId(themeId, { field: "旧版主题 ID" });
-      } catch (cause) {
-        throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
-      }
-      if (await themeExists(themeId) !== true) {
-        throw new Error("旧版主题状态无效：主题不存在");
-      }
-      persistenceEnabled = true;
-      migratedFrom = "watchdog";
-    } else {
-      validateThemeId(themeId, { field: "默认主题 ID" });
-      if (await themeExists(themeId) !== true) {
-        throw new Error("默认主题不存在，拒绝创建状态");
-      }
-    }
-
-    const token = generateControlToken(randomBytes);
-    const state = validateStudioState({
-      ...createDefaultStudioState({ themeId, token }),
-      persistenceEnabled,
-      revision: persistenceEnabled ? 1 : 0,
+    const { state, migratedFrom } = await legacyStateCandidate({
+      legacyThemePath,
+      legacyAgentLoaded,
+      themeExists,
+      defaultThemeId,
+      randomBytes,
     });
     await atomicWriteJson(statePath, state);
     return { state, migratedFrom };

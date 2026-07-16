@@ -655,6 +655,10 @@ function assertParticipant(value) {
   return value;
 }
 
+export function validateInstallTreeParticipant(value) {
+  return assertParticipant(value);
+}
+
 function journalPathFor(targetRoot) {
   return `${targetRoot}.install-journal.json`;
 }
@@ -1054,6 +1058,20 @@ async function acquireInstallLock(targetRoot, isAlive = processIsAlive) {
     await syncDirectory(parent);
   }
   throw new Error("could not acquire the stable tree install lock");
+}
+
+export async function acquireInstallTreeParticipantLock({
+  targetRoot,
+  isProcessAlive,
+} = {}) {
+  targetRoot = await canonicalizeTargetRoot(targetRoot);
+  const release = await acquireInstallLock(targetRoot, isProcessAlive);
+  return Object.freeze({ targetRoot, release });
+}
+
+export async function recoverInstallTreePreparationUnderLock({ targetRoot } = {}) {
+  targetRoot = await canonicalizeTargetRoot(targetRoot);
+  return recoverPreparationIntentUnderLock(targetRoot);
 }
 
 async function removeExactOwnedTree(path, manifestSha256) {

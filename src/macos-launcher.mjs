@@ -798,7 +798,11 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
   throw new Error("无法取得 launcher install lock");
 }
 
-export async function acquireMacosLauncherInstallLock({ home, isProcessAlive } = {}) {
+export async function acquireMacosLauncherInstallLock({
+  home,
+  isProcessAlive,
+  recover = true,
+} = {}) {
   home = assertAbsolutePath(home, "home");
   const canonicalHome = await requireRealDirectory(home, "home");
   const applications = join(home, "Applications");
@@ -818,13 +822,15 @@ export async function acquireMacosLauncherInstallLock({ home, isProcessAlive } =
   const releaseLock = await acquireInstallLock(applications, isProcessAlive);
   let removeApplicationsAfterRelease = !applicationsPriorExisted;
   try {
-    await recoverTransaction({
-      appPath: join(applications, `${MACOS_LAUNCHER_NAME}.app`),
-      journalPath: join(applications, TRANSACTION_FILE),
-    });
-    const preparationRecovery = await recoverPreparationIntent(home, { lockMayExist: true });
-    if (preparationRecovery.recovered && !preparationRecovery.applicationsPriorExisted) {
-      removeApplicationsAfterRelease = true;
+    if (recover) {
+      await recoverTransaction({
+        appPath: join(applications, `${MACOS_LAUNCHER_NAME}.app`),
+        journalPath: join(applications, TRANSACTION_FILE),
+      });
+      const preparationRecovery = await recoverPreparationIntent(home, { lockMayExist: true });
+      if (preparationRecovery.recovered && !preparationRecovery.applicationsPriorExisted) {
+        removeApplicationsAfterRelease = true;
+      }
     }
   } catch (error) {
     try {
@@ -921,6 +927,15 @@ function assertLauncherParticipant(value) {
     || value.unchanged
   ) throw new Error("不存在的 launcher prestate 含有无效归属字段");
   return value;
+}
+
+export function validateMacosLauncherParticipant(value) {
+  return assertLauncherParticipant(value);
+}
+
+export async function recoverMacosLauncherPreparationUnderLock({ home } = {}) {
+  home = assertAbsolutePath(home, "home");
+  return recoverPreparationIntent(home, { lockMayExist: true });
 }
 
 async function validateParticipantContext(participant) {
