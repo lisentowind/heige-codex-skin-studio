@@ -17,6 +17,8 @@ import { startControlServer as startLoopbackControlServer } from "./control-serv
 
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const RENDERER_GENERATION = /^[a-f0-9]{32}$/;
+const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LOCAL_CUSTOM_THEME_ID = "custom-upload";
 const ACTIONS = new Set([
   "idle",
   "inject",
@@ -266,6 +268,14 @@ function publicState(state) {
   };
 }
 
+function publicThemeState(state) {
+  return {
+    ...publicState(state),
+    selectedThemeId: state.selectedThemeId,
+    lastNonNativeThemeId: state.lastNonNativeThemeId,
+  };
+}
+
 function rendererStatusIsHealthy(value, state) {
   if (!isRecord(value)) return false;
   try {
@@ -286,6 +296,7 @@ function rendererStatusIsHealthy(value, state) {
     ) {
       return false;
     }
+    if (mode === "active" && themeId === LOCAL_CUSTOM_THEME_ID) return true;
     if (state.selectedThemeId === NATIVE_THEME_ID) {
       return mode === "native" &&
         (themeId === null || themeId === NATIVE_THEME_ID);
@@ -463,6 +474,7 @@ export function createSkinController(input) {
   };
 
   let setPersistencePublic;
+  let setThemeSelectionPublic;
 
   const ensureServer = async (state) => {
     const started = server === null;
@@ -472,6 +484,7 @@ export function createSkinController(input) {
         allowedOrigins: new Set([CODEX_RENDERER_ORIGIN]),
         readState: deps.readState,
         setPersistence: (request) => setPersistencePublic(request),
+        setThemeSelection: (request) => setThemeSelectionPublic(request),
         onPersistenceResponseFinished: (state) => {
           if (!deps.backgroundProcess && state?.persistenceEnabled === true) {
             handoffRequested = true;
@@ -1073,6 +1086,57 @@ export function createSkinController(input) {
     }
   };
 
+  setThemeSelectionPublic = async ({ expectedRevision, themeId, signal } = {}) => {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error("expectedRevision must be a non-negative safe integer");
+    }
+    if (!(
+      themeId === NATIVE_THEME_ID ||
+      (
+        typeof themeId === "string" &&
+        themeId !== LOCAL_CUSTOM_THEME_ID &&
+        THEME_ID.test(themeId)
+      )
+    )) {
+      throw new Error("themeId is invalid");
+    }
+    if (signal?.aborted) throw signal.reason ?? new Error("theme selection request aborted");
+    return deps.withLease("controller:set-theme-selection", async (lease) => {
+      const state = validateControlState(await deps.readState());
+      lastKnownState = state;
+      if (state.selectedThemeId === themeId) return publicThemeState(state);
+      if (state.revision !== expectedRevision) throw new ControllerTransitionError(
+        "REVISION_CONFLICT",
+        `state revision is ${state.revision}`,
+        state,
+      );
+      const processIdentity = await probeProcess();
+      await assertPortOwner(processIdentity);
+      if (themeId !== NATIVE_THEME_ID && await deps.validateThemeSelection(themeId) !== true) {
+        throw new Error("theme selection is not installed or valid");
+      }
+      const updated = validateControlState(await deps.compareAndUpdate({
+        expectedRevision,
+        mutate: (current) => ({
+          ...current,
+          selectedThemeId: themeId,
+          ...(themeId === NATIVE_THEME_ID ? {} : { lastNonNativeThemeId: themeId }),
+        }),
+      }, lease));
+      lastKnownState = updated;
+      const session = sessionForState(updated, processIdentity, {
+        keepUntilProcessExit: !updated.persistenceEnabled,
+      });
+      try {
+        await deps.writeSession(session, lease);
+      } catch (error) {
+        // Studio state is authoritative. Reconciliation repairs this derived cache.
+        await safeLog(deps.logger, "warn", "theme_session_cache_write_failed", error);
+      }
+      return publicThemeState(updated);
+    });
+  };
+
   const pause = async () => deps.withLease("controller:pause", async (lease) => {
     const state = validateControlState(await deps.readState());
     lastKnownState = state;
@@ -1138,7 +1202,16 @@ export function createSkinController(input) {
     return { stopped: true };
   };
 
-  const api = Object.freeze({ start, tick, setPersistence: setPersistencePublic, pause, resume, restore, stop });
+  const api = Object.freeze({
+    start,
+    tick,
+    setPersistence: setPersistencePublic,
+    setThemeSelection: setThemeSelectionPublic,
+    pause,
+    resume,
+    restore,
+    stop,
+  });
   return api;
 }
 

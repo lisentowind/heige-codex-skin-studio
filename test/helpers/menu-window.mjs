@@ -58,13 +58,28 @@ export async function menuWindow({
     accent: "#19c9e5",
     css: "html { color: #123456; }",
   }],
-  fetch = async () => okResponse({
-    persistenceEnabled: !persistenceEnabled,
-    revision: revision + 1,
-  }),
+  fetch,
 } = {}) {
   const window = new Window({ url: "app://-/index.html" });
-  window.fetch = fetch;
+  let backendPersistence = persistenceEnabled;
+  let backendRevision = revision;
+  window.fetch = fetch ?? (async (url, options) => {
+    const body = JSON.parse(options.body);
+    backendRevision += 1;
+    if (String(url).endsWith("/v1/theme")) {
+      return jsonResponse(200, {
+        ok: true,
+        persistenceEnabled: backendPersistence,
+        revision: backendRevision,
+        themeId: body.themeId,
+      });
+    }
+    backendPersistence = body.persistenceEnabled;
+    return okResponse({
+      persistenceEnabled: backendPersistence,
+      revision: backendRevision,
+    });
+  });
   if (BroadcastChannelClass) window.BroadcastChannel = BroadcastChannelClass;
   const buildOptions = {
     styleId: "heige-codex-skin-style",
@@ -131,11 +146,11 @@ export async function menuWindow({
       await flushMicrotasks(window);
     },
     async pickTheme(id) {
-      window.__heigeCodexSkin.setTheme(id);
+      window.document.querySelector(`[data-heige-theme-id="${id}"]`).click();
       await flushMicrotasks(window);
     },
     async pickNative() {
-      window.__heigeCodexSkin.clearTheme();
+      window.document.querySelector('[data-heige-role="native-option"]').click();
       await flushMicrotasks(window);
     },
     async hideMenu() {

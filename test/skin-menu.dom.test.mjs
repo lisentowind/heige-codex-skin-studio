@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deferredResponse,
   errorResponse,
+  jsonResponse,
   menuWindow,
   okResponse,
   sequenceFetch,
@@ -245,7 +246,7 @@ test("menu actions use native buttons and expose selected theme state", async (t
     assert.equal(action?.tagName, "BUTTON", `${role} should be a native button`);
     assert.equal(action?.type, "button");
   }
-  themeButtons[1].click();
+  await page.pickTheme("night-city");
   assert.equal(page.themeId, "night-city");
   assert.equal(themeButtons[1].getAttribute("aria-pressed"), "true");
   assert.equal(page.document.activeElement, page.trigger);
@@ -769,6 +770,98 @@ test("theme native hidden and persistence ACK synchronize to a second renderer",
     "kind", "schemaVersion", "senderGeneration", "sequence", "value",
   ]);
   assert.doesNotMatch(JSON.stringify(persistenceMessage), /token|endpoint|43123/i);
+});
+
+test("a menu theme choice waits for the authoritative theme revision before applying", async (t) => {
+  const requests = [];
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    entries: [
+      {
+        id: "miku-488137",
+        name: "Miku 488137",
+        accent: "#19c9e5",
+        css: "html { color: #123456; }",
+      },
+      {
+        id: "night-city",
+        name: "Night City",
+        accent: "#4455aa",
+        css: "html { color: #eeeeee; }",
+      },
+    ],
+    fetch: async (url, options) => {
+      requests.push({ url: String(url), body: JSON.parse(options.body) });
+      return jsonResponse(200, {
+        ok: true,
+        persistenceEnabled: false,
+        revision: 8,
+        themeId: "night-city",
+      });
+    },
+  });
+  t.after(() => page.close());
+
+  await page.pickTheme("night-city");
+
+  assert.deepEqual(requests, [{
+    url: "http://127.0.0.1:43123/v1/theme",
+    body: { revision: 7, themeId: "night-city" },
+  }]);
+  assert.equal(page.themeId, "night-city");
+  assert.equal(page.controlRevision, 8);
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+});
+
+test("a rejected theme request leaves the renderer unchanged and refreshes its revision", async (t) => {
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+    fetch: async () => errorResponse(409, {
+      code: "REVISION_CONFLICT",
+      message: "状态已发生变化，请重试",
+      persistenceEnabled: false,
+      revision: 8,
+    }),
+  });
+  t.after(() => page.close());
+
+  await page.pickTheme("night-city");
+
+  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
+  assert.equal(page.controlRevision, 8);
+  assert.equal(page.alert.textContent, "状态已发生变化，请重试");
+  assert.equal(
+    page.document.querySelector('[data-heige-theme-id="night-city"]').disabled,
+    false,
+  );
+});
+
+test("an idempotent theme ACK can restore a formal theme over a local quick image", async (t) => {
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    fetch: async () => jsonResponse(200, {
+      ok: true,
+      persistenceEnabled: false,
+      revision: 7,
+      themeId: "miku-488137",
+    }),
+  });
+  t.after(() => page.close());
+  page.document.documentElement.dataset.heigeCodexSkin = "custom-upload";
+
+  await page.pickTheme("miku-488137");
+
+  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.controlRevision, 7);
+  assert.equal(page.alert.textContent, "主题选择已保存。");
 });
 
 test("broadcast protocol rejects loops stale sequences unknown fields and malformed values", async (t) => {

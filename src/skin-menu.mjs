@@ -325,10 +325,17 @@ export function buildSkinMenuScript({
     if (broadcast) publish("theme", data.nativeSel);
   };
 
+  let requestThemeSelection = async (id) => {
+    if (id === data.nativeSel) clearTheme();
+    else setTheme(id);
+    return true;
+  };
+
   for (const theme of data.themes) {
     const themeRow = row(theme.name, theme.accent, () => {
-      setTheme(theme.id);
-      setPanelOpen(false, { focusTrigger: true });
+      void requestThemeSelection(theme.id).then((applied) => {
+        if (applied) setPanelOpen(false, { focusTrigger: true });
+      });
     }, null, { role: "theme-option", selectable: true });
     themeRow.dataset.heigeThemeId = theme.id;
     rows.set(theme.id, themeRow);
@@ -721,7 +728,9 @@ export function buildSkinMenuScript({
         const persisted = saveCustom(theme);
         applyCustomTheme(theme);
         showUploadAlert(
-          persisted ? "自定义图片已应用并保存。" : "自定义图片本次已应用，但存储空间不足，重启后不会保留。",
+          persisted
+            ? "自定义图片已应用并保存。它是 Codex 本地快捷图片；皮肤启动器恢复最近正式主题，不把它记为最近主题。"
+            : "自定义图片本次已应用，但存储空间不足，重启后不会保留。",
           persisted ? "success" : "warning",
         );
         finish(resolve, theme.colors);
@@ -823,8 +832,9 @@ export function buildSkinMenuScript({
   uploadRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
 
   const native = row("\\u539f\\u751f\\u754c\\u9762", "rgba(0,0,0,.24)", () => {
-    clearTheme();
-    setPanelOpen(false, { focusTrigger: true });
+    void requestThemeSelection(data.nativeSel).then((applied) => {
+      if (applied) setPanelOpen(false, { focusTrigger: true });
+    });
   }, null, { role: "native-option", selectable: true });
   native.dataset.heigeThemeId = data.nativeSel;
   rows.set(null, native);
@@ -911,6 +921,8 @@ export function buildSkinMenuScript({
     let persistenceEnabled = data.control.persistenceEnabled;
     let controlRevision = data.control.revision;
     let pending = false;
+    let themePending = false;
+    const themeEndpoint = data.control.endpoint.slice(0, -"/v1/persistence".length) + "/v1/theme";
 
     const closeConfirmation = ({ restoreFocus = false } = {}) => {
       assertCurrent();
@@ -947,11 +959,90 @@ export function buildSkinMenuScript({
     const safeClientError = (error) => {
       if (error?.name === "AbortError") return "控制器请求超时，请重试";
       let detail = typeof error?.message === "string" ? error.message : "无法连接后台控制器";
-      detail = detail.split(data.control.token).join("[已隐去]").split(data.control.endpoint).join("本机控制端点");
+      detail = detail
+        .split(data.control.token).join("[已隐去]")
+        .split(data.control.endpoint).join("本机控制端点")
+        .split(themeEndpoint).join("本机主题端点");
       detail = detail.replace(/[\\r\\n\\t]+/g, " ").slice(0, 160);
       return detail.includes("控制器不可用") ? detail : "控制器不可用：" + detail;
     };
     const isRevision = (value) => Number.isSafeInteger(value) && value >= 0;
+    requestThemeSelection = async (themeId) => {
+      assertCurrent();
+      const currentThemeId = document.documentElement.dataset.heigeCodexSkin ?? data.nativeSel;
+      if (themePending || themeId === currentThemeId) return false;
+      if (
+        themeId !== data.nativeSel &&
+        !data.themes.some((theme) => theme.id === themeId)
+      ) return false;
+      const requestRevision = controlRevision;
+      themePending = true;
+      hideAlert();
+      for (const item of rows.values()) item.disabled = true;
+      const abortController = childController();
+      const timeoutId = later(() => abortController.abort(), 3000);
+      try {
+        const response = await fetch(themeEndpoint, {
+          method: "POST",
+          mode: "cors",
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          headers: {
+            "Content-Type": "application/json",
+            "X-HeiGe-Control-Token": data.control.token,
+          },
+          body: JSON.stringify({ revision: requestRevision, themeId }),
+          signal: abortController.signal,
+        });
+        assertCurrent();
+        const body = await response.json();
+        assertCurrent();
+        if (!response.ok) {
+          if (
+            body?.ok === false &&
+            body.persistenceEnabled === persistenceEnabled &&
+            isRevision(body.revision) &&
+            body.revision > controlRevision
+          ) {
+            controlRevision = body.revision;
+            publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
+          }
+          const message = typeof body?.message === "string" && body.message.length <= 160
+            ? body.message
+            : "后台拒绝了主题选择，界面未更改";
+          showAlert(message);
+          return false;
+        }
+        if (
+          body?.ok !== true ||
+          body.themeId !== themeId ||
+          body.persistenceEnabled !== persistenceEnabled ||
+          !isRevision(body.revision) ||
+          body.revision < requestRevision ||
+          body.revision < controlRevision
+        ) {
+          throw new Error("后台未确认主题选择，界面未更改");
+        }
+        controlRevision = body.revision;
+        publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
+        if (themeId === data.nativeSel) clearTheme(true, true);
+        else setTheme(themeId, true, true);
+        showAlert("主题选择已保存。", "success");
+        return true;
+      } catch (error) {
+        if (isCurrent()) showAlert(safeClientError(error));
+        return false;
+      } finally {
+        clearLater(timeoutId);
+        trackedControllers.delete(abortController);
+        if (isCurrent()) {
+          themePending = false;
+          for (const item of rows.values()) item.disabled = false;
+        }
+      }
+    };
     const requestPersistence = async (target, restoreFocus = false) => {
       assertCurrent();
       if (pending || target === persistenceEnabled) return;

@@ -104,6 +104,7 @@ async function startFixture(t, overrides = {}) {
     internalPath: "/Users/private/state.json",
   };
   const calls = [];
+  const themeCalls = [];
   const readState = overrides.readState ?? (async () => structuredClone(state));
   const setPersistence = overrides.setPersistence ?? (async (input) => {
     calls.push(input);
@@ -114,11 +115,24 @@ async function startFixture(t, overrides = {}) {
     };
     return structuredClone(state);
   });
+  const setThemeSelection = overrides.setThemeSelection ?? (async (input) => {
+    themeCalls.push(input);
+    state = {
+      ...state,
+      selectedThemeId: input.themeId,
+      lastNonNativeThemeId: input.themeId === "__heige_native__"
+        ? state.lastNonNativeThemeId
+        : input.themeId,
+      revision: input.expectedRevision + 1,
+    };
+    return structuredClone(state);
+  });
   const server = await startControlServer({
     token: CONTROL_TOKEN,
     allowedOrigins: new Set([APP_ORIGIN]),
     readState,
     setPersistence,
+    setThemeSelection,
     onPersistenceResponseFinished: overrides.onPersistenceResponseFinished,
     host: "127.0.0.1",
     port: 0,
@@ -128,8 +142,167 @@ async function startFixture(t, overrides = {}) {
     maxPendingRequests: overrides.maxPendingRequests ?? 8,
   });
   t.after(() => server.close());
-  return { server, calls, getState: () => structuredClone(state) };
+  return { server, calls, themeCalls, getState: () => structuredClone(state) };
 }
+
+test("accepts an exact theme selection request and returns an authoritative revision", async (t) => {
+  const fx = await startFixture(t, {
+    state: {
+      persistenceEnabled: false,
+      selectedThemeId: "miku-488137",
+      lastNonNativeThemeId: "miku-488137",
+      revision: 3,
+    },
+  });
+
+  const response = await request(fx.server, {
+    path: "/v1/theme",
+    body: { revision: 3, themeId: "genshin-night" },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(responseJson(response), {
+    ok: true,
+    persistenceEnabled: false,
+    revision: 4,
+    themeId: "genshin-night",
+  });
+  assert.equal(fx.themeCalls.length, 1);
+  assert.equal(fx.themeCalls[0].expectedRevision, 3);
+  assert.equal(fx.themeCalls[0].themeId, "genshin-night");
+  assert.ok(fx.themeCalls[0].signal instanceof AbortSignal);
+});
+
+test("accepts native theme exactly and preserves the last formal launcher theme", async (t) => {
+  const fx = await startFixture(t, {
+    state: {
+      persistenceEnabled: true,
+      selectedThemeId: "genshin-night",
+      lastNonNativeThemeId: "genshin-night",
+      revision: 6,
+    },
+  });
+
+  const response = await request(fx.server, {
+    path: "/v1/theme",
+    body: { revision: 6, themeId: "__heige_native__" },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(responseJson(response), {
+    ok: true,
+    persistenceEnabled: true,
+    revision: 7,
+    themeId: "__heige_native__",
+  });
+  assert.equal(fx.getState().lastNonNativeThemeId, "genshin-night");
+});
+
+test("rejects custom quick images and malformed theme protocol bodies", async (t) => {
+  const fx = await startFixture(t, {
+    state: {
+      persistenceEnabled: false,
+      selectedThemeId: "miku-488137",
+      lastNonNativeThemeId: "miku-488137",
+      revision: 3,
+    },
+  });
+  const invalidBodies = [
+    { revision: 3, themeId: "custom-upload" },
+    { revision: 3, themeId: "../miku" },
+    { revision: 3, themeId: "Miku" },
+    { revision: 3, themeId: "" },
+    { revision: 3, themeId: null },
+    { revision: 3, themeId: "miku-488137", extra: true },
+    { themeId: "miku-488137" },
+  ];
+
+  for (const body of invalidBodies) {
+    const response = await request(fx.server, { path: "/v1/theme", body });
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal(responseJson(response).code, "INVALID_REQUEST");
+  }
+  assert.equal(fx.themeCalls.length, 0);
+});
+
+test("returns a safe conflict for a stale different theme selection", async (t) => {
+  const fx = await startFixture(t, {
+    state: {
+      persistenceEnabled: false,
+      selectedThemeId: "miku-488137",
+      lastNonNativeThemeId: "miku-488137",
+      revision: 9,
+    },
+  });
+
+  const response = await request(fx.server, {
+    path: "/v1/theme",
+    body: { revision: 3, themeId: "genshin-night" },
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(responseJson(response), {
+    ok: false,
+    code: "REVISION_CONFLICT",
+    message: "状态已发生变化，请重试",
+    persistenceEnabled: false,
+    revision: 9,
+  });
+  assert.equal(fx.themeCalls.length, 0);
+});
+
+test("returns the authoritative revision for a stale same-theme retry", async (t) => {
+  const fx = await startFixture(t, {
+    state: {
+      persistenceEnabled: false,
+      selectedThemeId: "genshin-night",
+      lastNonNativeThemeId: "genshin-night",
+      revision: 9,
+    },
+  });
+
+  const response = await request(fx.server, {
+    path: "/v1/theme",
+    body: { revision: 3, themeId: "genshin-night" },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(responseJson(response), {
+    ok: true,
+    persistenceEnabled: false,
+    revision: 9,
+    themeId: "genshin-night",
+  });
+  assert.equal(fx.themeCalls.length, 0);
+});
+
+test("rejects a theme backend result that is not the exact next authoritative state", async (t) => {
+  const baseState = {
+    persistenceEnabled: false,
+    selectedThemeId: "miku-488137",
+    lastNonNativeThemeId: "miku-488137",
+    revision: 3,
+  };
+  const invalidResults = [
+    { ...baseState, selectedThemeId: "genshin-night", lastNonNativeThemeId: "genshin-night", revision: 5 },
+    { ...baseState, persistenceEnabled: true, selectedThemeId: "genshin-night", lastNonNativeThemeId: "genshin-night", revision: 4 },
+    { ...baseState, selectedThemeId: "genshin-night", lastNonNativeThemeId: "miku-488137", revision: 4 },
+  ];
+
+  for (const result of invalidResults) {
+    const fx = await startFixture(t, {
+      state: baseState,
+      setThemeSelection: async () => result,
+    });
+    const response = await request(fx.server, {
+      path: "/v1/theme",
+      body: { revision: 3, themeId: "genshin-night" },
+    });
+    assert.equal(response.status, 503, JSON.stringify(result));
+    assert.equal(responseJson(response).code, "THEME_UPDATE_FAILED");
+    await fx.server.close();
+  }
+});
 
 test("successful persistence callback runs only after the complete HTTP response finishes", async (t) => {
   const finished = [];

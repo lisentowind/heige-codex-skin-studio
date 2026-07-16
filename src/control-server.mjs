@@ -2,6 +2,10 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
 const CONTROL_PATH = "/v1/persistence";
+const THEME_CONTROL_PATH = "/v1/theme";
+const NATIVE_THEME_ID = "__heige_native__";
+const LOCAL_CUSTOM_THEME_ID = "custom-upload";
+const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AUDITED_ORIGIN = "app://-";
 const PREFLIGHT_METHOD = "POST";
 const PREFLIGHT_HEADERS = ["content-type", "x-heige-control-token"];
@@ -30,6 +34,7 @@ const SAFE_ERRORS = Object.freeze({
   CONTROL_BUSY: { status: 503, message: "控制服务繁忙，请稍后重试" },
   CONTROL_UNAVAILABLE: { status: 503, message: "控制服务暂时不可用，请重试" },
   PERSISTENCE_UPDATE_FAILED: { status: 503, message: "常驻设置失败，请重试" },
+  THEME_UPDATE_FAILED: { status: 503, message: "主题状态同步失败，请重试" },
   BACKGROUND_START_FAILED: {
     status: 503,
     message: "后台控制器启动失败，常驻仍为关闭",
@@ -181,6 +186,35 @@ function extractState(value) {
   };
 }
 
+function extractThemeState(value) {
+  const state = extractState(value);
+  if (state === null) return null;
+  let selectedThemeId;
+  let lastNonNativeThemeId;
+  try {
+    selectedThemeId = value.selectedThemeId;
+    lastNonNativeThemeId = value.lastNonNativeThemeId;
+  } catch {
+    return null;
+  }
+  if (
+    !(
+      selectedThemeId === NATIVE_THEME_ID ||
+      isFormalThemeId(selectedThemeId)
+    ) ||
+    !isFormalThemeId(lastNonNativeThemeId)
+  ) {
+    return null;
+  }
+  return { ...state, selectedThemeId, lastNonNativeThemeId };
+}
+
+function isFormalThemeId(value) {
+  return typeof value === "string" &&
+    value !== LOCAL_CUSTOM_THEME_ID &&
+    THEME_ID.test(value);
+}
+
 function extractErrorState(error) {
   if (error === null || typeof error !== "object") return null;
   try {
@@ -224,6 +258,24 @@ function exactRequestBody(value) {
   };
 }
 
+function exactThemeRequestBody(value) {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 2 ||
+    keys[0] !== "revision" ||
+    keys[1] !== "themeId" ||
+    !isNonNegativeInteger(value.revision) ||
+    !(
+      value.themeId === NATIVE_THEME_ID ||
+      isFormalThemeId(value.themeId)
+    )
+  ) {
+    return null;
+  }
+  return { revision: value.revision, themeId: value.themeId };
+}
+
 function safeBody(code, state = undefined) {
   const definition = SAFE_ERRORS[code] ?? SAFE_ERRORS.CONTROL_UNAVAILABLE;
   const body = {
@@ -246,6 +298,18 @@ function okBody(state) {
       ok: true,
       persistenceEnabled: state.persistenceEnabled,
       revision: state.revision,
+    },
+  };
+}
+
+function okThemeBody(state) {
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      persistenceEnabled: state.persistenceEnabled,
+      revision: state.revision,
+      themeId: state.selectedThemeId,
     },
   };
 }
@@ -577,8 +641,57 @@ async function applyPersistenceRequest(input, context, transaction) {
   };
 }
 
+async function applyThemeRequest(input, context, transaction) {
+  let current;
+  try {
+    current = extractThemeState(await transaction.waitPrecommit(context.readState()));
+  } catch {
+    transaction.assertPrecommit();
+    throw protocolError("CONTROL_UNAVAILABLE");
+  }
+  if (current === null) throw protocolError("CONTROL_UNAVAILABLE");
+  if (current.selectedThemeId === input.themeId) return okThemeBody(current);
+  if (current.revision !== input.revision) {
+    throw protocolError("REVISION_CONFLICT", current);
+  }
+
+  let updated;
+  try {
+    const commitSignal = transaction.enterCommit();
+    updated = extractThemeState(await context.setThemeSelection({
+      expectedRevision: input.revision,
+      themeId: input.themeId,
+      signal: commitSignal,
+    }));
+  } catch (error) {
+    let code;
+    try { code = error?.code; } catch { code = undefined; }
+    const authoritative = extractErrorState(error);
+    if (code === "REVISION_CONFLICT") {
+      throw protocolError("REVISION_CONFLICT", authoritative ?? undefined);
+    }
+    throw protocolError("THEME_UPDATE_FAILED", authoritative ?? undefined);
+  }
+  if (
+    updated === null ||
+    updated.persistenceEnabled !== current.persistenceEnabled ||
+    updated.selectedThemeId !== input.themeId ||
+    updated.revision !== current.revision + 1 ||
+    (
+      input.themeId === NATIVE_THEME_ID
+        ? updated.lastNonNativeThemeId !== current.lastNonNativeThemeId
+        : updated.lastNonNativeThemeId !== input.themeId
+    )
+  ) {
+    throw protocolError("THEME_UPDATE_FAILED");
+  }
+  return okThemeBody(updated);
+}
+
 async function routePersistenceRequest(request, context, signal, markCommitStarted) {
-  if (request.url !== CONTROL_PATH) throw protocolError("NOT_FOUND");
+  if (request.url !== CONTROL_PATH && request.url !== THEME_CONTROL_PATH) {
+    throw protocolError("NOT_FOUND");
+  }
   if (request.method !== "POST" && request.method !== "OPTIONS") {
     throw protocolError("METHOD_NOT_ALLOWED");
   }
@@ -622,13 +735,16 @@ async function routePersistenceRequest(request, context, signal, markCommitStart
   } catch {
     throw protocolError("INVALID_JSON");
   }
-  const input = exactRequestBody(parsed);
+  const themeRequest = request.url === THEME_CONTROL_PATH;
+  const input = themeRequest ? exactThemeRequestBody(parsed) : exactRequestBody(parsed);
   if (input === null) throw protocolError("INVALID_REQUEST");
 
   return context.persistenceCoordinator.run(
     signal,
     markCommitStarted,
-    (transaction) => applyPersistenceRequest(input, context, transaction),
+    (transaction) => themeRequest
+      ? applyThemeRequest(input, context, transaction)
+      : applyPersistenceRequest(input, context, transaction),
   );
 }
 
@@ -896,6 +1012,7 @@ export async function startControlServer({
   allowedOrigins,
   readState,
   setPersistence,
+  setThemeSelection,
   onPersistenceResponseFinished,
   host = "127.0.0.1",
   port = 0,
@@ -909,6 +1026,7 @@ export async function startControlServer({
   const origins = normalizeAllowedOrigins(allowedOrigins);
   const safeReadState = requireFunction(readState, "readState");
   const safeSetPersistence = requireFunction(setPersistence, "setPersistence");
+  const safeSetThemeSelection = requireFunction(setThemeSelection, "setThemeSelection");
   const safeResponseFinished = onPersistenceResponseFinished === undefined
     ? null
     : requireFunction(onPersistenceResponseFinished, "onPersistenceResponseFinished");
@@ -923,6 +1041,7 @@ export async function startControlServer({
     allowedOrigins: origins,
     readState: safeReadState,
     setPersistence: safeSetPersistence,
+    setThemeSelection: safeSetThemeSelection,
     onPersistenceResponseFinished: safeResponseFinished,
     maxBodyBytes: bodyLimit,
     requestTimeoutMs: timeoutMs,

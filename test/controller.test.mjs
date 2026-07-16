@@ -283,7 +283,10 @@ function fixture(overrides = {}) {
         return overrides.logFailure ? false : true;
       },
       info: async () => true,
-      warn: async () => true,
+      warn: async (event, error) => {
+        calls.logs.push({ event, message: error?.message });
+        return true;
+      },
     },
     launcherName: "HeiGe 皮肤启动器",
   };
@@ -693,6 +696,108 @@ test("a unanimous native menu choice preserves the last non-native launcher them
   assert.equal(fx.session.mode, "native");
   assert.equal(fx.session.activeThemeId, null);
   assert.equal(fx.calls.inject.at(-1).themeId, NATIVE_THEME_ID);
+});
+
+test("the menu theme endpoint commits a verified selection before acknowledging it", async () => {
+  const selected = "genshin-night";
+  const fx = fixture({
+    validateThemeSelection: async (themeId) => themeId === selected,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  const changed = await fx.calls.server[0].setThemeSelection({
+    expectedRevision: 1,
+    themeId: selected,
+  });
+
+  assert.deepEqual(changed, {
+    persistenceEnabled: true,
+    revision: 2,
+    selectedThemeId: selected,
+    lastNonNativeThemeId: selected,
+  });
+  assert.equal(fx.state.selectedThemeId, selected);
+  assert.equal(fx.state.lastNonNativeThemeId, selected);
+  assert.equal(fx.session.activeThemeId, selected);
+});
+
+test("the menu native endpoint preserves the last formal launcher theme", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  const changed = await fx.calls.server[0].setThemeSelection({
+    expectedRevision: 1,
+    themeId: NATIVE_THEME_ID,
+  });
+
+  assert.equal(changed.selectedThemeId, NATIVE_THEME_ID);
+  assert.equal(changed.lastNonNativeThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.lastNonNativeThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.session.mode, "native");
+  assert.equal(fx.session.activeThemeId, null);
+});
+
+test("the menu theme endpoint rejects the local quick-image sentinel", async () => {
+  const fx = fixture({ validateThemeSelection: async () => true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  await assert.rejects(
+    fx.calls.server[0].setThemeSelection({
+      expectedRevision: 1,
+      themeId: "custom-upload",
+    }),
+    /themeId is invalid/,
+  );
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+});
+
+test("a committed theme remains authoritative when its derived session cache write fails", async () => {
+  const selected = "genshin-night";
+  const fx = fixture({
+    validateThemeSelection: async (themeId) => themeId === selected,
+  });
+  const originalWriteSession = fx.deps.writeSession;
+  fx.deps.writeSession = async (...args) => {
+    if (fx.state.revision > 1) throw new Error("session cache unavailable");
+    return originalWriteSession(...args);
+  };
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  const changed = await fx.calls.server[0].setThemeSelection({
+    expectedRevision: 1,
+    themeId: selected,
+  });
+
+  assert.equal(changed.selectedThemeId, selected);
+  assert.equal(fx.state.selectedThemeId, selected);
+  assert.equal(fx.calls.logs.at(-1).event, "theme_session_cache_write_failed");
+});
+
+test("a quick local custom image is healthy without impersonating a durable launcher theme", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const injectsBefore = fx.calls.inject.length;
+  fx.setHealth({
+    statuses: [rendererStatus({ themeId: "custom-upload" })],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value: rendererStatus({ themeId: "custom-upload" }) }],
+      failed: [],
+      skipped: [],
+    },
+  });
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.calls.inject.length, injectsBefore);
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.lastNonNativeThemeId, DEFAULT_THEME_ID);
 });
 
 test("tick repairs only missing stale or divergent renderer targets", async () => {
