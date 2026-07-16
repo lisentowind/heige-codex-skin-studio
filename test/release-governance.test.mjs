@@ -168,9 +168,21 @@ test("CI has independent Node macOS Windows and package gates", async () => {
   );
   assert.match(
     workflow,
-    /node:\s[\s\S]*?actions\/checkout@v6\s*\n\s*with:\s*\n\s*fetch-depth: 0/,
+    /node:\s[\s\S]*?actions\/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10[^\n]*\n\s*with:\s*\n\s*fetch-depth: 0/,
     "the full Node suite needs public migration history such as 79b03dc",
   );
+  assert.equal(
+    (workflow.match(/actions\/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10/g) ?? []).length,
+    4,
+  );
+  assert.equal(
+    (workflow.match(/actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38/g) ?? []).length,
+    4,
+  );
+  assert.equal((workflow.match(/node-version: "22\.22\.3"/g) ?? []).length, 4);
+  for (const runner of ["ubuntu-24.04", "macos-15", "windows-2025"]) {
+    assert.match(workflow, new RegExp(`runs-on: ${runner.replace(".", "\\.")}`));
+  }
   assert.ok((workflow.match(/git status --porcelain/g) ?? []).length >= 4);
   assert.doesNotMatch(workflow, /^  push:/m);
   assert.doesNotMatch(workflow, /actions\/[^\s]*release|gh release|upload-artifact|git push/i);
