@@ -56,6 +56,11 @@ if heige_codex_flagged; then
   echo "Codex 已带调试参数启动，但端口 ${PORT} 未开放：当前 Codex 版本可能禁用了本机调试端口。" >&2
 else
   echo "Codex 未能以调试模式启动。" >&2
+  # 我们刚把用户的 Codex 关掉却没能重开：兜底还给用户一个普通实例，别让应用凭空消失
+  if ! heige_codex_running; then
+    echo "正在还原一个普通 Codex 实例……" >&2
+    open -a "$HEIGE_CODEX_APP" >/dev/null 2>&1 || true
+  fi
 fi
 echo "请运行 doctor（node src/cli.mjs doctor）并把输出贴到 https://github.com/HeiGeAi/heige-codex-skin-studio/issues 反馈。" >&2
 return 1
