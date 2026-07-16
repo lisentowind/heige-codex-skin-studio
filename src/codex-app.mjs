@@ -102,10 +102,23 @@ export async function resolveCodexApp({
   throw new Error(`Codex app was not found in: ${candidates.join(", ")}`);
 }
 
+function isValidProcessIdentity(identity) {
+  return identity !== null &&
+    typeof identity === "object" &&
+    Number.isInteger(identity.pid) &&
+    identity.pid > 0 &&
+    typeof identity.executablePath === "string" &&
+    identity.executablePath.length > 0 &&
+    typeof identity.startedAt === "string" &&
+    identity.startedAt.length > 0;
+}
+
 export function sameProcessIdentity(left, right) {
-  return left?.pid === right?.pid &&
-    left?.executablePath === right?.executablePath &&
-    left?.startedAt === right?.startedAt;
+  return isValidProcessIdentity(left) &&
+    isValidProcessIdentity(right) &&
+    left.pid === right.pid &&
+    left.executablePath === right.executablePath &&
+    left.startedAt === right.startedAt;
 }
 
 export function parseMacPsTable(output) {

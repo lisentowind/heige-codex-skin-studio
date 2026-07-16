@@ -96,7 +96,7 @@ test("codex installation preserves windows bundled-node candidate semantics", ()
   });
 });
 
-test("process identity requires pid, executable, and start time to match", () => {
+test("process identity matches only when all fields are exactly equal", () => {
   const identity = {
     pid: 42,
     executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
@@ -106,7 +106,40 @@ test("process identity requires pid, executable, and start time to match", () =>
   assert.equal(sameProcessIdentity(identity, { ...identity }), true);
   assert.equal(sameProcessIdentity(identity, { ...identity, pid: 43 }), false);
   assert.equal(sameProcessIdentity(identity, { ...identity, executablePath: "/other" }), false);
+  assert.equal(sameProcessIdentity(identity, { ...identity, executablePath: `${identity.executablePath} ` }), false);
   assert.equal(sameProcessIdentity(identity, { ...identity, startedAt: "Thu Jul 16 16:49:25 2026" }), false);
+  assert.equal(sameProcessIdentity(identity, { ...identity, startedAt: `${identity.startedAt} ` }), false);
+});
+
+test("process identity rejects missing or invalid required fields", async (t) => {
+  const identity = {
+    pid: 42,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Thu Jul 16 16:49:24 2026",
+  };
+  const cases = [
+    ["both identities are null", null, null],
+    ["left identity is null", null, identity],
+    ["right identity is null", identity, null],
+    ["identities are not objects", "identity", "identity"],
+    ["both identities are empty objects", {}, {}],
+    ["pid is zero", { ...identity, pid: 0 }, { ...identity, pid: 0 }],
+    ["pid is negative", { ...identity, pid: -1 }, { ...identity, pid: -1 }],
+    ["pid is fractional", { ...identity, pid: 1.5 }, { ...identity, pid: 1.5 }],
+    ["pid is not a number", { ...identity, pid: "42" }, { ...identity, pid: "42" }],
+    ["executable path is missing", { pid: identity.pid, startedAt: identity.startedAt }, { pid: identity.pid, startedAt: identity.startedAt }],
+    ["executable path is empty", { ...identity, executablePath: "" }, { ...identity, executablePath: "" }],
+    ["executable path is not a string", { ...identity, executablePath: 1 }, { ...identity, executablePath: 1 }],
+    ["start time is missing", { pid: identity.pid, executablePath: identity.executablePath }, { pid: identity.pid, executablePath: identity.executablePath }],
+    ["start time is empty", { ...identity, startedAt: "" }, { ...identity, startedAt: "" }],
+    ["start time is not a string", { ...identity, startedAt: 1 }, { ...identity, startedAt: 1 }],
+  ];
+
+  for (const [name, left, right] of cases) {
+    await t.test(name, () => {
+      assert.equal(sameProcessIdentity(left, right), false);
+    });
+  }
 });
 
 test("the real ps command shape yields a stable process identity", () => {
