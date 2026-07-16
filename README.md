@@ -58,6 +58,10 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 
 注意：Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。
 
+### Windows（新增，待实机验收）
+
+Windows 适配已随本版本提供：双击 `scripts\windows\install.bat` 安装并默认应用 Miku 预设，日常切换同样走右上角 🎨 菜单；`pause.bat` 暂停，`customize.bat` 选图做皮肤。实现完整、单测覆盖，作者手头暂无 Windows 实机，欢迎第一批 Windows 用户开 Issue 反馈。
+
 ## 交给 Codex 使用
 
 把 `output/heige-codex-skin-studio.skill` 交给 Codex，可以直接说：
@@ -122,7 +126,7 @@ node src/cli.mjs doctor
 
 ## 设计边界
 
-这是一个轻量工具。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。当前版本只保证 macOS，CDP 只绑定本机回环地址 `127.0.0.1`。
+这是一个轻量工具。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。macOS 已实机验证；Windows 适配为新增能力，等待社区实机反馈。CDP 只绑定本机回环地址 `127.0.0.1`。
 
 本仓库前身是走 ASAR 修改路线的 codex-miku-theme，旧实现保存在历史提交中（tag `v5-asar-legacy`），已由当前 CDP 注入方案取代。
 
@@ -137,7 +141,13 @@ npm run doctor
 
 **HeiGe Codex Skin Studio** reskins the Codex Desktop app on macOS through loopback-only CDP injection. It never touches `app.asar` or the code signature. Any single image becomes a theme (palette + backdrop); after applying once, a 🎨 menu in the top-right corner of Codex switches between every installed theme and the native look instantly. Nine presets ship built in: the fully customized `Miku 488137` showcase plus eight lightweight game-inspired themes. Hand the bundled `.skill` to Codex and it can even generate theme artwork with its own image tools, then install the result deterministically.
 
-Quick start: run `scripts/install.command`, then switch themes from the in-app menu. Pause anytime with `scripts/pause.command`; a normal Codex restart always returns to stock.
+Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\install.bat` on Windows (new, pending live acceptance), then switch themes from the in-app menu. Pause anytime with `scripts/pause.command`; a normal Codex restart always returns to stock.
+
+## 交流群
+
+扫码进微信群「Codex 皮肤共创交流」：纯技术交流，非盈利，互相学习。分享你做的主题、聊实现、提问题都欢迎。二维码过期了就开个 Issue，我会换新的。
+
+<img src="docs/images/wechat-group-qr.png" width="340" alt="Codex 皮肤共创交流微信群二维码">
 
 ## 许可证与素材
 
