@@ -1,18 +1,35 @@
 ﻿# HeiGe Codex Skin Studio 公共函数（Windows）
 $ErrorActionPreference = "Stop"
 
+# 64 位真身 Program Files：32 位宿主里 $env:ProgramFiles 会是 (x86)，用它拼 WindowsApps 会失配
+$script:ProgramFiles64 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+
 function Get-CodexStorePackage {
-    # 商店版（MSIX）探测：按包名关键字找 Appx 包
+    # 商店版（MSIX）探测：收窄到 OpenAI 发布的非框架包，避免抓到名字沾边的套壳/框架包
     Get-AppxPackage -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "ChatGPT|Codex|OpenAI" } |
+        Where-Object { -not $_.IsFramework -and ($_.Name -match "^OpenAI\." -or $_.Name -match "ChatGPT|Codex") } |
+        Sort-Object { $_.Publisher -match "OpenAI" } -Descending |
         Select-Object -First 1
 }
 
 function Get-CodexAumid {
     param($Package)
     $manifest = Get-AppxPackageManifest -Package $Package.PackageFullName
-    $appId = @($manifest.Package.Applications.Application)[0].Id
-    return "$($Package.PackageFamilyName)!$appId"
+    $apps = @($manifest.Package.Applications.Application)
+    # 主入口优先：Id=App 或 Executable 指向 ChatGPT/Codex 的那个，兜底再取第 0 个
+    $app = $apps | Where-Object { $_.Id -eq "App" -or $_.Executable -match "ChatGPT|Codex" } | Select-Object -First 1
+    if (-not $app) { $app = $apps[0] }
+    return "$($Package.PackageFamilyName)!$($app.Id)"
+}
+
+function Invoke-SkinCli {
+    # 统一调 node cli：把多行 stdout 合并返回，退出码非零即抛（PS 对原生命令非零码不会自动抛）
+    param([string]$Node, [string[]]$CliArgs)
+    $out = & $Node @CliArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "皮肤命令执行失败（退出码 $LASTEXITCODE）：`n$($out -join "`n")"
+    }
+    return ($out -join "`n")
 }
 
 function Start-CodexViaActivation {
@@ -65,7 +82,7 @@ function Resolve-CodexLaunchTarget {
     param([string]$AppPath)
     # 微软商店（MSIX）版的包内 exe 禁止按原始路径启动，Start-Process 会报「拒绝访问」。
     # 优先走应用执行别名；包没声明别名时返回 aumid: 标记，由启动函数改走系统激活接口
-    $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
+    $windowsApps = Join-Path $script:ProgramFiles64 "WindowsApps"
     if (-not $AppPath.StartsWith($windowsApps, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $AppPath
     }
@@ -85,9 +102,10 @@ function Resolve-CodexLaunchTarget {
 }
 
 function Get-CodexApp {
-    # 用户显式指定的路径优先，装在非默认位置时用这个兜底
+    # 用户显式指定的路径优先，装在非默认位置时用这个兜底。
+    # 也要过 Resolve：商店版用户按报错填了 WindowsApps 包内路径时，翻译成别名/aumid，否则直启必被拒
     if ($env:HEIGE_CODEX_APP) {
-        if (Test-Path $env:HEIGE_CODEX_APP) { return $env:HEIGE_CODEX_APP }
+        if (Test-Path $env:HEIGE_CODEX_APP) { return Resolve-CodexLaunchTarget -AppPath $env:HEIGE_CODEX_APP }
         throw "环境变量 HEIGE_CODEX_APP 指向的文件不存在：$($env:HEIGE_CODEX_APP)"
     }
 
@@ -117,8 +135,12 @@ function Get-CodexApp {
             if (Test-Path $direct) { return $direct }
         }
         if (Test-Path $root) {
+            # 按版本号排序，不能用字符串序（否则 app-1.9.0 会排在 app-1.10.0 前面选到旧版）
             $appDirs = Get-ChildItem $root -Directory -Filter "app-*" -ErrorAction SilentlyContinue |
-                Sort-Object Name -Descending
+                Sort-Object {
+                    $v = $null
+                    if ([version]::TryParse(($_.Name -replace '^app-', ''), [ref]$v)) { $v } else { [version]"0.0" }
+                } -Descending
             foreach ($dir in $appDirs) {
                 foreach ($name in $exeNames) {
                     $nested = Join-Path $dir.FullName $name
@@ -234,6 +256,14 @@ function Start-CodexWithCdp {
         for ($i = 0; $i -lt 60; $i++) {
             if (-not (Get-RunningCodex -AppPath $app)) { break }
             Start-Sleep -Milliseconds 250
+        }
+        # 复查：托盘驻留/隐藏窗口时 CloseMainWindow 无效，此时盲启第二实例只会被单实例锁转发、
+        # 参数丢失、白等 20 秒。仍在运行就明确报错，别进注定失败的启动分支
+        if (Get-RunningCodex -AppPath $app) {
+            throw @"
+Codex 仍在运行，无法自动退出（可能最小化到了托盘，或有任务正在进行）。
+请手动彻底退出 Codex（托盘图标右键退出，或任务管理器结束 ChatGPT/Codex 进程），再重新运行本脚本。
+"@
         }
     }
 
