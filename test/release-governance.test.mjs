@@ -147,5 +147,7 @@ test("line endings are fixed and every tracked PowerShell file retains its UTF-8
   for (const path of powershell) {
     const bytes = await readFile(new URL(`../${path}`, import.meta.url));
     assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], `${path} must retain UTF-8 BOM`);
+    const bareLf = bytes.findIndex((byte, index) => byte === 0x0a && bytes[index - 1] !== 0x0d);
+    assert.equal(bareLf, -1, `${path} must not contain bare LF line endings`);
   }
 });

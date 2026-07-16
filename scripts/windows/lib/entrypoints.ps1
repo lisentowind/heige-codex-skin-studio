@@ -308,12 +308,15 @@ function Invoke-HeiGeApplyWithContext {
 function Invoke-HeiGeApplyFlow {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Theme,
+        [AllowNull()][string]$Theme,
         [ValidateRange(1024, 65535)][int]$Port = 9341,
         [scriptblock]$ContextProvider,
         [scriptblock]$StartCdpProvider,
         [scriptblock]$CliProvider
     )
+    if ($PSBoundParameters.ContainsKey("Theme") -and [string]::IsNullOrWhiteSpace($Theme)) {
+        throw "Theme 显式传入时不能为空。"
+    }
     $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
     $applied = Invoke-HeiGeApplyWithContext -Context $context -Theme $Theme -Port $Port `
         -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider
@@ -326,6 +329,11 @@ function Invoke-HeiGeApplyFlow {
         PersistenceEnabled = [bool]$applied.persistenceEnabled
         PersistenceChanged = $false
         Theme = $Theme
+        ThemeSelection = if ($PSBoundParameters.ContainsKey("Theme")) {
+            "explicit"
+        } else {
+            "stored-or-default"
+        }
         Completion = "complete"
     }
 }

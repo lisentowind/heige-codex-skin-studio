@@ -259,6 +259,27 @@ function Get-HeiGeShortcutObservation {
     }
 }
 
+function Get-HeiGeOwnedStartMenuShortcutObservation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [scriptblock]$ReadShortcutProvider
+    )
+    $workingDirectory = Join-Path $InstallRoot "scripts\windows"
+    $currentTarget = Join-Path $workingDirectory "apply.bat"
+    try {
+        return Get-HeiGeShortcutObservation -Path $Path -ExpectedTarget $currentTarget `
+            -ExpectedWorkingDirectory $workingDirectory `
+            -ReadShortcutProvider $ReadShortcutProvider
+    } catch {
+        if ($_.Exception.Message -cnotmatch "shortcut target path mismatch") { throw }
+    }
+    $legacyTarget = Join-Path $workingDirectory "enable-skin.bat"
+    return Get-HeiGeShortcutObservation -Path $Path -ExpectedTarget $legacyTarget `
+        -ExpectedWorkingDirectory $workingDirectory `
+        -ReadShortcutProvider $ReadShortcutProvider
+}
+
 function Get-HeiGeStartMenuTransactionPaths {
     param(
         [Parameter(Mandatory = $true)][string]$ShortcutPath,
@@ -319,7 +340,13 @@ function Assert-HeiGeStartMenuParticipant {
     }
     $shortcutPath = Join-Path $startMenuRoot "HeiGe Codex Skin Studio\HeiGe 皮肤启动器.lnk"
     $folderPath = Split-Path $shortcutPath -Parent
-    $targetPath = Join-Path $installRoot "scripts\windows\enable-skin.bat"
+    $currentTargetPath = Join-Path $installRoot "scripts\windows\apply.bat"
+    $legacyTargetPath = Join-Path $installRoot "scripts\windows\enable-skin.bat"
+    $targetPath = [string]$Participant.TargetPath
+    if (-not (Test-HeiGeSamePath -Left $targetPath -Right $currentTargetPath) -and
+        -not (Test-HeiGeSamePath -Left $targetPath -Right $legacyTargetPath)) {
+        throw "Start Menu participant 目标不是当前或受信旧版启动器。"
+    }
     $workingDirectory = Split-Path $targetPath -Parent
     $transactionPaths = Get-HeiGeStartMenuTransactionPaths `
         -ShortcutPath $shortcutPath -TransactionId ($transactionGuid.ToString("D"))
@@ -442,7 +469,7 @@ function Prepare-HeiGeStartMenuShortcut {
     if (-not (Test-Path -LiteralPath $resolvedValidationRoot -PathType Container)) {
         throw "验证目录不存在：$resolvedValidationRoot"
     }
-    $validationTarget = Join-Path $resolvedValidationRoot "scripts\windows\enable-skin.bat"
+    $validationTarget = Join-Path $resolvedValidationRoot "scripts\windows\apply.bat"
     Assert-HeiGeNoReparsePathComponents -Path $validationTarget -Description "快捷方式验证目标" | Out-Null
     if (-not (Test-Path -LiteralPath $validationTarget -PathType Leaf)) {
         throw "快捷方式验证目标不存在：$validationTarget"
@@ -451,7 +478,7 @@ function Prepare-HeiGeStartMenuShortcut {
     if (($validationTargetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "快捷方式验证目标不能是 reparse point：$validationTarget"
     }
-    $target = Join-Path $resolvedInstallRoot "scripts\windows\enable-skin.bat"
+    $target = Join-Path $resolvedInstallRoot "scripts\windows\apply.bat"
     Assert-HeiGeNoReparsePathComponents -Path $target -Description "快捷方式最终目标" | Out-Null
 
     if (-not $TransactionId) { $TransactionId = [guid]::NewGuid().ToString("D") }
@@ -491,8 +518,8 @@ function Prepare-HeiGeStartMenuShortcut {
     $priorExisted = Test-Path -LiteralPath $shortcutPath
     $beforeSha256 = $null
     if ($priorExisted) {
-        $before = Get-HeiGeShortcutObservation -Path $shortcutPath -ExpectedTarget $target `
-            -ExpectedWorkingDirectory $workingDirectory -ReadShortcutProvider $ReadShortcutProvider
+        $before = Get-HeiGeOwnedStartMenuShortcutObservation -Path $shortcutPath `
+            -InstallRoot $resolvedInstallRoot -ReadShortcutProvider $ReadShortcutProvider
         $beforeSha256 = $before.Sha256
     }
 
@@ -580,18 +607,14 @@ function Publish-HeiGeStartMenuShortcut {
         throw "Start Menu backup path already exists"
     }
     if ($participant.PriorExisted) {
-        $before = Get-HeiGeShortcutObservation -Path $participant.ShortcutPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $before = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.ShortcutPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($before.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu existing shortcut changed after prepare"
         }
         Move-Item -LiteralPath $participant.ShortcutPath -Destination $participant.BackupPath
-        $backedUp = Get-HeiGeShortcutObservation -Path $participant.BackupPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $backedUp = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.BackupPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($backedUp.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu backup changed during publication"
         }
@@ -627,10 +650,8 @@ function Rollback-HeiGeStartMenuShortcut {
         if (-not $participant.PriorExisted) {
             throw "Start Menu rollback found an impossible backup"
         }
-        $backup = Get-HeiGeShortcutObservation -Path $participant.BackupPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $backup = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.BackupPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($backup.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu rollback backup digest mismatch"
         }
@@ -645,10 +666,8 @@ function Rollback-HeiGeStartMenuShortcut {
             Remove-Item -LiteralPath $participant.ShortcutPath -Force
         }
         Move-Item -LiteralPath $participant.BackupPath -Destination $participant.ShortcutPath
-        $restored = Get-HeiGeShortcutObservation -Path $participant.ShortcutPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $restored = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.ShortcutPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($restored.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu rollback could not restore the prior shortcut"
         }
@@ -656,10 +675,8 @@ function Rollback-HeiGeStartMenuShortcut {
         if (-not $destinationExists) {
             throw "Start Menu rollback cannot find the prior shortcut or its backup"
         }
-        $untouched = Get-HeiGeShortcutObservation -Path $participant.ShortcutPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $untouched = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.ShortcutPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($untouched.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu rollback refuses a changed prior shortcut"
         }
@@ -725,10 +742,8 @@ function Finalize-HeiGeStartMenuShortcut {
     }
     if (Test-Path -LiteralPath $participant.BackupPath) {
         if (-not $participant.PriorExisted) { throw "Start Menu finalize found an impossible backup" }
-        $backup = Get-HeiGeShortcutObservation -Path $participant.BackupPath `
-            -ExpectedTarget $participant.TargetPath `
-            -ExpectedWorkingDirectory $participant.WorkingDirectory `
-            -ReadShortcutProvider $ReadShortcutProvider
+        $backup = Get-HeiGeOwnedStartMenuShortcutObservation -Path $participant.BackupPath `
+            -InstallRoot $participant.InstallRoot -ReadShortcutProvider $ReadShortcutProvider
         if ($backup.Sha256 -cne [string]$participant.BeforeSha256) {
             throw "Start Menu finalize refuses a foreign backup shortcut"
         }
@@ -757,11 +772,8 @@ function Remove-HeiGeStartMenuShortcut {
         return [pscustomobject][ordered]@{ PriorExisted = $false; Removed = $false; VerifiedAbsent = $true }
     }
     Assert-HeiGeNoReparsePathComponents -Path $shortcutPath -Description "开始菜单快捷方式" | Out-Null
-    $target = Join-Path $resolvedInstallRoot "scripts\windows\enable-skin.bat"
-    $workingDirectory = Split-Path $target -Parent
-    Get-HeiGeShortcutObservation -Path $shortcutPath -ExpectedTarget $target `
-        -ExpectedWorkingDirectory $workingDirectory `
-        -ReadShortcutProvider $ReadShortcutProvider | Out-Null
+    Get-HeiGeOwnedStartMenuShortcutObservation -Path $shortcutPath `
+        -InstallRoot $resolvedInstallRoot -ReadShortcutProvider $ReadShortcutProvider | Out-Null
     Remove-Item -LiteralPath $shortcutPath -Force
     if (Test-Path -LiteralPath $shortcutPath) { throw "快捷方式删除后仍存在：$shortcutPath" }
     return [pscustomobject][ordered]@{ PriorExisted = $true; Removed = $true; VerifiedAbsent = $true }

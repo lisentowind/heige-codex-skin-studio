@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   classifyWindowsPreflightSnapshot,
+  decodeWindowsAppIdentityToken,
   queryWindowsRuntimeSnapshot,
 } from "../src/windows-runtime.mjs";
 import { createWindowsSecurityAdapter } from "../src/windows-secure-fs.mjs";
@@ -166,6 +167,22 @@ test("Windows runtime binds every query to the immutable PowerShell app identity
       stderr: "",
     }),
   }), /process path|belong|identity|app/i);
+});
+
+test("Windows identity token rejects duplicate and unknown JSON fields", () => {
+  const canonical = Buffer.from(appIdentityToken(), "base64url").toString("utf8");
+  const duplicate = canonical.replace(
+    '"schemaVersion":1',
+    '"schemaVersion":1,"schemaVersion":1',
+  );
+  const unknown = canonical.replace(
+    '"product":"heige-codex-skin-studio"',
+    '"product":"heige-codex-skin-studio","unknown":true',
+  );
+  for (const document of [duplicate, unknown]) {
+    const token = Buffer.from(document, "utf8").toString("base64url");
+    assert.throws(() => decodeWindowsAppIdentityToken(token), /canonical|schema|unknown|identity/i);
+  }
 });
 
 test("Windows ACL adapter protects files explicitly and bounds trusted PowerShell", async () => {

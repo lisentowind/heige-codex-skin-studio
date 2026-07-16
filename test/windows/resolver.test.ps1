@@ -1,6 +1,7 @@
 ﻿$ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "TestHelpers.ps1")
-. (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "scripts\windows\lib\common.ps1")
+$script:RepositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $script:RepositoryRoot "scripts\windows\lib\common.ps1")
 
 $script:OriginalLocalAppData = $env:LOCALAPPDATA
 $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ("HeiGe Windows 中文 " + [guid]::NewGuid().ToString("N"))
@@ -115,6 +116,30 @@ try {
             ($decoded | ConvertTo-Json -Depth 8 -Compress)
         $bound = Resolve-HeiGeBoundCodexApp -IdentityToken $token -Packages @()
         Assert-Equal $app.ExecutablePath $bound.ExecutablePath
+    }
+
+    Test-Case "PowerShell and Node share one canonical identity token for non-ASCII user paths" {
+        $unicodeExe = Join-Path $script:Root "用户 空格\Codex.exe"
+        New-Item -ItemType Directory -Path (Split-Path $unicodeExe -Parent) -Force | Out-Null
+        New-Item -ItemType File -Path $unicodeExe -Force | Out-Null
+        $app = Resolve-CodexApp -OverridePath $unicodeExe -Packages @() -ProcessProvider { @() }
+        $token = ConvertTo-HeiGeCodexAppIdentityToken -App $app
+        $nodePath = [string](Get-Command node -CommandType Application -ErrorAction Stop).Path
+        $runtimeModule = Join-Path $script:RepositoryRoot "src\windows-runtime.mjs"
+        $nodeScript = @'
+import { pathToFileURL } from "node:url";
+const { decodeWindowsAppIdentityToken } = await import(pathToFileURL(process.argv[1]).href);
+const app = decodeWindowsAppIdentityToken(process.argv[2]);
+process.stdout.write(JSON.stringify(app));
+'@
+        $json = & $nodePath --input-type=module -e $nodeScript $runtimeModule $token 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Node rejected the canonical PowerShell identity token: $($json -join "`n")"
+        }
+        $decoded = ($json -join "`n") | ConvertFrom-Json
+        Assert-Equal "Win32" $decoded.kind
+        Assert-Equal $unicodeExe $decoded.executablePath
+        Assert-Equal (Split-Path $unicodeExe -Parent) $decoded.installPath
     }
 
     Test-Case "Immutable app identity rebinds an exact custom closed Win32 install" {

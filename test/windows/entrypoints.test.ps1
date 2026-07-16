@@ -12,13 +12,17 @@ $script:StartMenuRoot = Join-Path $script:Root "Start Menu Programs"
 $script:FakeNode = Join-Path $script:InstallRoot "runtime\node.exe"
 $script:FakeCli = Join-Path $script:InstallRoot "src\cli.mjs"
 $script:FakeController = Join-Path $script:InstallRoot "scripts\windows\controller.ps1"
+$script:ApplyBat = Join-Path $script:InstallRoot "scripts\windows\apply.bat"
 $script:EnableBat = Join-Path $script:InstallRoot "scripts\windows\enable-skin.bat"
 $script:SkillRoot = Join-Path $script:RepositoryRoot "skill\heige-codex-skin-studio"
 $script:SkillInstallPs1 = Join-Path $script:SkillRoot "scripts\install.ps1"
 $script:SkillInstallBat = Join-Path $script:SkillRoot "scripts\install.bat"
 $script:SkillInstructions = Join-Path $script:SkillRoot "SKILL.md"
 $script:SkillReadme = Join-Path $script:SkillRoot "README.md"
-foreach ($path in @($script:FakeNode, $script:FakeCli, $script:FakeController, $script:EnableBat)) {
+foreach ($path in @(
+    $script:FakeNode, $script:FakeCli, $script:FakeController,
+    $script:ApplyBat, $script:EnableBat
+)) {
     New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
     New-Item -ItemType File -Path $path -Force | Out-Null
 }
@@ -129,6 +133,23 @@ try {
         Assert-Equal "active" $result.Mode
         Assert-False $result.PersistenceEnabled
         Assert-False $result.PersistenceChanged
+    }
+
+    Test-Case "Launcher apply restores the stored theme without changing persistence" {
+        $script:CliCalls = @()
+        $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -StartCdpProvider { param($Context, $Port) } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:CliCalls += ,@($Arguments)
+                [pscustomobject]@{ mode = "active"; persistenceEnabled = $false }
+            }
+        Assert-ExactCliCall -Actual $script:CliCalls[0] `
+            -Expected @("apply", "--prefer-stored", "--port", "9341")
+        Assert-False $result.PersistenceEnabled
+        Assert-False $result.PersistenceChanged
+        Assert-Equal "stored-or-default" $result.ThemeSelection
     }
 
     Test-Case "Enable applies this session then enables next-launch persistence" {
@@ -531,7 +552,7 @@ try {
         Assert-Equal @("preflight") $script:Events
     }
 
-    Test-Case "Start Menu shortcut targets the stable current-user enable BAT" {
+    Test-Case "Start Menu launcher targets session-only apply BAT" {
         $script:ShortcutTarget = $null
         $result = Install-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
             -StartMenuRoot $script:StartMenuRoot `
@@ -545,20 +566,48 @@ try {
                 New-TestShortcutObservation -TargetPath $script:ShortcutTarget `
                     -WorkingDirectory (Split-Path $script:ShortcutTarget -Parent)
             }
-        Assert-Equal $script:EnableBat $script:ShortcutTarget
+        Assert-Equal $script:ApplyBat $script:ShortcutTarget
         Assert-Equal (Join-Path $script:StartMenuRoot "HeiGe Codex Skin Studio\HeiGe 皮肤启动器.lnk") $result.ShortcutPath
         Assert-True $result.Verified
+    }
+
+    Test-Case "Start Menu safely migrates the owned legacy enable launcher to session-only apply" {
+        $migrationRoot = Join-Path $script:Root "Legacy Launcher Start Menu"
+        $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $migrationRoot
+        New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
+        [System.IO.File]::WriteAllText($shortcutPath, "legacy launcher")
+        $readProvider = {
+            param($Path)
+            $content = [System.IO.File]::ReadAllText($Path)
+            $target = if ($content -ceq "legacy launcher") {
+                $script:EnableBat
+            } else {
+                $script:ApplyBat
+            }
+            New-TestShortcutObservation -TargetPath $target `
+                -WorkingDirectory (Split-Path $target -Parent)
+        }
+        $result = Install-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
+            -StartMenuRoot $migrationRoot `
+            -CreateShortcutProvider {
+                param($Path, $Target, $WorkingDirectory, $Description)
+                Assert-Equal $script:ApplyBat $Target
+                [System.IO.File]::WriteAllText($Path, "session launcher")
+            } `
+            -ReadShortcutProvider $readProvider
+        Assert-True $result.Verified
+        Assert-Equal "session launcher" ([System.IO.File]::ReadAllText($shortcutPath))
     }
 
     Test-Case "Default WScript shortcut round-trips the complete generated schema" {
         $shortcutPath = Join-Path $script:Root "WScript Schema\HeiGe 皮肤启动器.lnk"
         New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
-        New-DefaultHeiGeShortcut -Path $shortcutPath -Target $script:EnableBat `
-            -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+        New-DefaultHeiGeShortcut -Path $shortcutPath -Target $script:ApplyBat `
+            -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
             -Description $script:ShortcutDescription
         $observed = Read-DefaultHeiGeShortcut -Path $shortcutPath
-        Assert-Equal $script:EnableBat $observed.TargetPath
-        Assert-Equal (Split-Path $script:EnableBat -Parent) $observed.WorkingDirectory
+        Assert-Equal $script:ApplyBat $observed.TargetPath
+        Assert-Equal (Split-Path $script:ApplyBat -Parent) $observed.WorkingDirectory
         Assert-Equal $script:ShortcutDescription $observed.Description
         Assert-Equal "" $observed.Arguments
         Assert-Equal 1 $observed.WindowStyle
@@ -592,8 +641,8 @@ try {
         $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $transactionMenuRoot
         New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
         [System.IO.File]::WriteAllText($shortcutPath, "old shortcut bytes")
-        $script:TransactionalTarget = $script:EnableBat
-        $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
+        $script:TransactionalTarget = $script:ApplyBat
+        $script:TransactionalWorking = Split-Path $script:ApplyBat -Parent
         $readProvider = {
             param($Path)
             New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
@@ -623,8 +672,8 @@ try {
         $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $finalizeMenuRoot
         New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
         [System.IO.File]::WriteAllText($shortcutPath, "prior version")
-        $script:TransactionalTarget = $script:EnableBat
-        $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
+        $script:TransactionalTarget = $script:ApplyBat
+        $script:TransactionalWorking = Split-Path $script:ApplyBat -Parent
         $readProvider = {
             param($Path)
             New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
@@ -648,8 +697,8 @@ try {
 
     Test-Case "Fresh Start Menu participant rollback restores folder absence" {
         $freshMenuRoot = Join-Path $script:Root "Fresh Rollback Start Menu"
-        $script:TransactionalTarget = $script:EnableBat
-        $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
+        $script:TransactionalTarget = $script:ApplyBat
+        $script:TransactionalWorking = Split-Path $script:ApplyBat -Parent
         $readProvider = {
             param($Path)
             New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
@@ -703,8 +752,8 @@ try {
                 -StartMenuRoot $foreignMenuRoot `
                 -ReadShortcutProvider {
                     param($Path)
-                    New-TestShortcutObservation -TargetPath $script:EnableBat `
-                        -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+                    New-TestShortcutObservation -TargetPath $script:ApplyBat `
+                        -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
                         -Description "Foreign launcher"
                 } | Out-Null
         } "shortcut description marker mismatch"
@@ -721,8 +770,8 @@ try {
                 -StartMenuRoot $foreignMenuRoot `
                 -ReadShortcutProvider {
                     param($Path)
-                    New-TestShortcutObservation -TargetPath $script:EnableBat `
-                        -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+                    New-TestShortcutObservation -TargetPath $script:ApplyBat `
+                        -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
                         -Arguments "--theme foreign"
                 } | Out-Null
         } "shortcut arguments mismatch"
@@ -763,7 +812,7 @@ try {
                 New-TestShortcutObservation -TargetPath $script:ShortcutTarget `
                     -WorkingDirectory $script:ShortcutWorking
             }
-        Assert-Equal (Join-Path $futureInstallRoot "scripts\windows\enable-skin.bat") $participant.TargetPath
+        Assert-Equal (Join-Path $futureInstallRoot "scripts\windows\apply.bat") $participant.TargetPath
         Assert-Equal $futureInstallRoot $participant.InstallRoot
         Assert-False (Test-Path -LiteralPath $futureInstallRoot)
         Rollback-HeiGeStartMenuShortcut -Participant $participant `
@@ -848,6 +897,19 @@ try {
         Assert-False ($source -match '\$Theme\s*=\s*"miku-488137"')
         Assert-Match 'PSBoundParameters\.ContainsKey\("Theme"\)' $source
         Assert-Match 'ThemeSelection' $source
+    }
+
+    Test-Case "Windows Start Menu apply wrapper restores stored theme while enable remains explicit" {
+        $applySource = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\apply.ps1")
+        )
+        $enableSource = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\enable-skin.ps1")
+        )
+        Assert-False ($applySource -match '\$Theme\s*=\s*"miku-488137"')
+        Assert-Match 'PSBoundParameters\.ContainsKey\("Theme"\)' $applySource
+        Assert-Match 'Invoke-HeiGeApplyFlow\s+@arguments' $applySource
+        Assert-Match 'Invoke-HeiGeEnableSkinFlow' $enableSource
     }
 
     Test-Case "Windows restore has an offline path and truthful closed native messages" {

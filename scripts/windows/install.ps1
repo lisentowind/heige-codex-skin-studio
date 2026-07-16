@@ -192,7 +192,7 @@ function New-HeiGeStartMenuIntent {
     $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $StartMenuRoot
     $folderPath = Split-Path $shortcutPath -Parent
     $paths = Get-HeiGeStartMenuTransactionPaths -ShortcutPath $shortcutPath -TransactionId $TransactionId
-    $targetPath = Join-Path $InstallRoot "scripts\windows\enable-skin.bat"
+    $targetPath = Join-Path $InstallRoot "scripts\windows\apply.bat"
     return [pscustomobject][ordered]@{
         StartMenuRoot = $StartMenuRoot
         StartMenuRootPriorExisted = [bool](Test-Path -LiteralPath $StartMenuRoot)
@@ -249,7 +249,9 @@ function Assert-HeiGeInstallJournalBindings {
     $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $menuRoot
     $menuPaths = Get-HeiGeStartMenuTransactionPaths -ShortcutPath $shortcutPath `
         -TransactionId $transactionId
-    $targetPath = Join-Path $target "scripts\windows\enable-skin.bat"
+    $currentTargetPath = Join-Path $target "scripts\windows\apply.bat"
+    $legacyTargetPath = Join-Path $target "scripts\windows\enable-skin.bat"
+    $targetPath = [string]$menu.TargetPath
     $folderPath = Split-Path $shortcutPath -Parent
     if ([string]$menu.TransactionId -cne $transactionId -or
         -not ([string]$menu.StartMenuRoot).Equals($menuRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -257,7 +259,8 @@ function Assert-HeiGeInstallJournalBindings {
         -not ([string]$menu.ShortcutPath).Equals($shortcutPath, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not ([string]$menu.StagePath).Equals($menuPaths.StagePath, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not ([string]$menu.BackupPath).Equals($menuPaths.BackupPath, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not ([string]$menu.TargetPath).Equals($targetPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+        (-not $targetPath.Equals($currentTargetPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not $targetPath.Equals($legacyTargetPath, [System.StringComparison]::OrdinalIgnoreCase)) -or
         -not ([string]$menu.WorkingDirectory).Equals((Split-Path $targetPath -Parent), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Windows Start Menu intent paths are invalid"
     }
