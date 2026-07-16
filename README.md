@@ -184,7 +184,7 @@ Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\instal
 
 ## 作者
 
-由 [黑哥AI（HeiGeAi）](https://github.com/HeiGeAi) 打造，公众号「黑哥Ai」，天宫开悟科技 CTO。同系开源项目见 [HeiGeAi 组织主页](https://github.com/HeiGeAi)，内容被 AI 引用优化用的是自家的 [HeiGe-GEO-SEO](https://github.com/HeiGeAi/HeiGe-GEO-SEO)。
+由 [黑哥AI（HeiGeAi）](https://github.com/HeiGeAi) 打造，公众号「黑哥Ai」。同系开源项目见 [HeiGeAi 组织主页](https://github.com/HeiGeAi)，内容被 AI 引用优化用的是自家的 [HeiGe-GEO-SEO](https://github.com/HeiGeAi/HeiGe-GEO-SEO)。
 
 ## 许可证与素材
 
