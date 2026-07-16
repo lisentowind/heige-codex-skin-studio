@@ -582,6 +582,38 @@ test("the executable transaction entry works from a path containing non-ASCII ch
   assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "src\n");
 });
 
+test("the executable participant protocol never makes its own commit decision", async (t) => {
+  const { sourceRoot, targetRoot } = await sourceFixture(t);
+  const transactionId = "123e4567-e89b-42d3-a456-426614174000";
+  const prepared = await execFileAsync(process.execPath, [
+    installModule,
+    "participant-prepare",
+    "--source", sourceRoot,
+    "--target", targetRoot,
+    "--transaction-id", transactionId,
+  ], { encoding: "utf8" });
+  const participant = JSON.parse(prepared.stdout);
+  assert.equal(participant.transactionId, transactionId);
+  await assert.rejects(lstat(targetRoot), /ENOENT/);
+
+  await execFileAsync(process.execPath, [
+    installModule,
+    "participant-publish",
+    "--participant-json", JSON.stringify(participant),
+  ]);
+  assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "src\n");
+  assert.equal((await lstat(participant.intentPath)).isFile(), true);
+
+  await execFileAsync(process.execPath, [
+    installModule,
+    "participant-rollback",
+    "--participant-json", JSON.stringify(participant),
+  ]);
+  await assert.rejects(lstat(targetRoot), /ENOENT/);
+  await assert.rejects(lstat(participant.intentPath), /ENOENT/);
+  await assert.rejects(lstat(`${targetRoot}.install-journal.json`), /ENOENT/);
+});
+
 test("all install wrappers delegate stable-tree mutation to the same Node transaction", async () => {
   for (const relativePath of [
     "scripts/install.command",
@@ -602,7 +634,8 @@ test("all install wrappers delegate stable-tree mutation to the same Node transa
   assert.equal(windowsBytes[2], 0xbf);
   const windows = windowsBytes.subarray(3).toString("utf8");
   assert.match(windows, /src[\\/]install-transaction\.mjs/);
-  assert.match(windows, /\binstall\b[\s\S]*--source[\s\S]*--target/);
+  assert.match(windows, /participant-prepare[\s\S]*--source[\s\S]*--target/);
   assert.match(windows, /HEIGE_SKIP_APPLY/);
-  assert.doesNotMatch(windows, /\b(?:Copy-Item|Remove-Item|Move-Item)\b/i);
+  assert.doesNotMatch(windows, /\bCopy-Item\b/i);
+  assert.doesNotMatch(windows, /\b(?:Remove-Item|Move-Item)\b[^\r\n]*(?:\$target|\$InstallRoot)/i);
 });

@@ -1461,12 +1461,23 @@ async function cli(argv) {
   }
   const command = argv[0] ?? "install";
   const options = {};
+  const allowedByCommand = {
+    install: new Set(["source", "target"]),
+    recover: new Set(["target"]),
+    "participant-prepare": new Set(["source", "target", "transaction-id"]),
+    "participant-publish": new Set(["participant-json"]),
+    "participant-rollback": new Set(["participant-json"]),
+    "participant-finalize": new Set(["participant-json"]),
+    "participant-recover-prepare": new Set(["target"]),
+  };
+  const allowed = allowedByCommand[command];
+  if (allowed === undefined) throw new Error(`unknown install transaction command: ${command}`);
   for (let index = 1; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!flag?.startsWith("--") || value === undefined) throw new Error("invalid install arguments");
     const name = flag.slice(2);
-    if (!new Set(["source", "target"]).has(name) || Object.hasOwn(options, name)) {
+    if (!allowed.has(name) || Object.hasOwn(options, name)) {
       throw new Error(`unknown or duplicate install option: ${flag}`);
     }
     options[name] = value;
@@ -1476,9 +1487,39 @@ async function cli(argv) {
     return installTree({ sourceRoot: options.source, targetRoot: options.target });
   }
   if (command === "recover") {
-    if (options.source || !options.target) throw new Error("recover requires only --target");
+    if (!options.target) throw new Error("recover requires only --target");
     return recoverInstallTree({ targetRoot: options.target });
   }
+  if (command === "participant-prepare") {
+    if (!options.source || !options.target || !options["transaction-id"]) {
+      throw new Error("participant-prepare requires --source --target and --transaction-id");
+    }
+    return prepareInstallTree({
+      sourceRoot: options.source,
+      targetRoot: options.target,
+      transactionId: options["transaction-id"],
+    });
+  }
+  if (command === "participant-recover-prepare") {
+    if (!options.target) throw new Error("participant-recover-prepare requires --target");
+    return recoverInstallTree({ targetRoot: options.target });
+  }
+  const participant = (() => {
+    if (!options["participant-json"]) {
+      throw new Error(`${command} requires --participant-json`);
+    }
+    if (Buffer.byteLength(options["participant-json"], "utf8") > MAX_JOURNAL_BYTES) {
+      throw new Error("participant JSON exceeds the install bound");
+    }
+    try {
+      return JSON.parse(options["participant-json"]);
+    } catch (cause) {
+      throw new Error("participant JSON is invalid", { cause });
+    }
+  })();
+  if (command === "participant-publish") return publishInstallTree(participant);
+  if (command === "participant-rollback") return rollbackInstallTree(participant);
+  if (command === "participant-finalize") return finalizeInstallTree(participant);
   throw new Error(`unknown install transaction command: ${command}`);
 }
 
