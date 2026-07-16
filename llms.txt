@@ -1,0 +1,8 @@
+# HeiGe Codex Skin Studio
+
+> 给 OpenAI Codex Desktop 一键换肤的开源工具：一张图片就是一个主题，右上角菜单即时切换，CDP 注入不修改应用文件，macOS 与 Windows 适配。
+
+## 核心页面
+- [项目主页](https://github.com/HeiGeAi/heige-codex-skin-studio): 安装说明、9 个内置主题预览、FAQ
+- [README 原文](https://raw.githubusercontent.com/HeiGeAi/heige-codex-skin-studio/main/README.md): 完整使用文档与常见问题
+- [发布下载](https://github.com/HeiGeAi/heige-codex-skin-studio/releases): 打包好的 .skill 与源码
