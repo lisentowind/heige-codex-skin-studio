@@ -214,7 +214,7 @@ async function createFreshInstall(input, deps, launcherLock) {
 
     const state = await deps.prepareState({
       transactionId: journal.transactionId,
-      legacyAgentLoaded: services.legacyLoaded === true || services.controllerLoaded === true,
+      legacyAgentLoaded: services.legacyLoaded === true,
     });
     journal = await update(deps, journal, {
       phase: "state-prepared",

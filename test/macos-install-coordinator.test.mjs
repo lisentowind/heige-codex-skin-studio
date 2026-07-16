@@ -220,16 +220,21 @@ test("ordinary non-persistent install never activates a controller and migrates 
   assert.equal(fx.events.indexOf("tree-recover-under-lock") > fx.events.indexOf("coordinator-lock"), true);
 });
 
-test("an already loaded controller preserves persistence intent even without a legacy watchdog", async () => {
+test("a residual new controller without state fails closed instead of impersonating legacy intent", async () => {
   const fx = fixture({
-    persistenceEnabled: true,
+    persistenceEnabled: false,
     services: { controllerLoaded: true, controllerPresent: true },
   });
-  await coordinateMacosInstall(INPUT, fx.deps);
-  assert.equal(
-    fx.events.find((entry) => Array.isArray(entry) && entry[0] === "state-prepare")[1]
-      .legacyAgentLoaded,
-    true,
+  const result = await coordinateMacosInstall(INPUT, fx.deps);
+  assert.equal(result.persistenceEnabled, false);
+  assert.deepEqual(
+    fx.events.find((entry) => Array.isArray(entry) && entry[0] === "state-prepare")[1],
+    { transactionId: "123e4567-e89b-42d3-a456-426614174000", legacyAgentLoaded: false },
+  );
+  assert.equal(fx.events.some((entry) => Array.isArray(entry) && entry[0] === "ready"), false);
+  assert.deepEqual(
+    fx.events.find((entry) => Array.isArray(entry) && entry[0] === "freeze-finalize")[1],
+    { removeFrozenServices: true },
   );
 });
 
