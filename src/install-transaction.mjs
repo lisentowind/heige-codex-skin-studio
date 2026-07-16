@@ -17,10 +17,14 @@ import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { readProcessIdentity, sameProcessIdentity } from "./process-identity.mjs";
+
 export const INSTALL_MARKER_NAME = ".heige-install.json";
 export const INSTALL_PRODUCT = "heige-codex-skin-studio";
 export const MAX_INSTALL_SOURCE_FILE_BYTES = 16 * 1024 * 1024;
 export const MAX_INSTALL_SOURCE_TREE_BYTES = 32 * 1024 * 1024;
+export const MAX_INSTALL_SOURCE_TREE_ENTRIES = 4096;
+export const MAX_INSTALL_SOURCE_TREE_DEPTH = 32;
 
 const SOURCE_ENTRIES = Object.freeze([
   { name: "package.json", type: "file" },
@@ -133,6 +137,29 @@ function reserveBudget(budget, bytes) {
   budget.totalBytes = Number(next);
 }
 
+function reserveTreeEntry(budget, relativePath) {
+  if (budget === null) return;
+  const depth = relativePath.split(/[\\/]+/u).filter(Boolean).length;
+  if (depth > budget.maxDepth) {
+    throw new RangeError(`${budget.label} exceeds the ${budget.maxDepth} level depth limit`);
+  }
+  budget.totalEntries += 1;
+  if (budget.totalEntries > budget.maxEntries) {
+    throw new RangeError(`${budget.label} exceeds the ${budget.maxEntries} entry limit`);
+  }
+}
+
+function treeBudget(label, maxBytes = MAX_INSTALL_SOURCE_TREE_BYTES) {
+  return {
+    totalBytes: 0,
+    maxBytes,
+    totalEntries: 0,
+    maxEntries: MAX_INSTALL_SOURCE_TREE_ENTRIES,
+    maxDepth: MAX_INSTALL_SOURCE_TREE_DEPTH,
+    label,
+  };
+}
+
 async function readStableFile(path, label, {
   maxBytes = MAX_INSTALL_SOURCE_FILE_BYTES,
   budget = null,
@@ -227,6 +254,7 @@ async function scanOwnedDirectory(root, relativePath, entries, budget) {
     throw new Error(`owned tree contains an untrusted directory: ${relativePath || "."}`);
   }
   if (relativePath !== "") {
+    reserveTreeEntry(budget, relativePath);
     if (!modeMatches(directoryInfo, 0o755)) {
       throw new Error(`owned tree directory mode is invalid: ${relativePath}`);
     }
@@ -236,7 +264,10 @@ async function scanOwnedDirectory(root, relativePath, entries, budget) {
   children.sort((left, right) => left.name.localeCompare(right.name, "en"));
   for (const child of children) {
     const childRelative = relativePath === "" ? child.name : join(relativePath, child.name);
-    if (childRelative === INSTALL_MARKER_NAME) continue;
+    if (childRelative === INSTALL_MARKER_NAME) {
+      reserveTreeEntry(budget, childRelative);
+      continue;
+    }
     const childPath = join(root, childRelative);
     const childInfo = await lstat(childPath);
     if (childInfo.isSymbolicLink()) throw new Error(`owned tree symlink is forbidden: ${childRelative}`);
@@ -245,6 +276,7 @@ async function scanOwnedDirectory(root, relativePath, entries, budget) {
       continue;
     }
     if (!childInfo.isFile()) throw new Error(`owned tree entry is unsupported: ${childRelative}`);
+    reserveTreeEntry(budget, childRelative);
     const file = await readStableFile(childPath, `owned tree file ${childRelative}`, { budget });
     if (!modeMatches(childInfo, file.mode)) {
       throw new Error(`owned tree file mode is invalid: ${childRelative}`);
@@ -295,11 +327,7 @@ async function validateOwnedTree(root, expectedManifestSha256 = null) {
     throw new Error("owned tree contains unexpected top-level content");
   }
   const entries = [];
-  const budget = {
-    totalBytes: 0,
-    maxBytes: MAX_INSTALL_SOURCE_TREE_BYTES,
-    label: "owned tree",
-  };
+  const budget = treeBudget("owned tree");
   await scanOwnedDirectory(root, "", entries, budget);
   entries.sort((left, right) => left.path.localeCompare(right.path, "en"));
   const manifestSha256 = manifestDigest(entries);
@@ -420,11 +448,7 @@ async function validateLegacyTree(root, {
   }
 
   const entries = [];
-  const budget = {
-    totalBytes: 0,
-    maxBytes: MAX_INSTALL_SOURCE_TREE_BYTES,
-    label: "legacy tree",
-  };
+  const budget = treeBudget("legacy tree");
   await scanOwnedDirectory(root, "", entries, budget);
   entries.sort((left, right) => left.path.localeCompare(right.path, "en"));
   const manifestSha256 = manifestDigest(entries);
@@ -451,6 +475,7 @@ async function copyDirectory(sourceRoot, destinationRoot, relativePath, entries,
   const label = `source directory ${relativePath || "."}`;
   const sourceIdentity = await captureDirectoryIdentity(source, label);
   if (relativePath !== "") {
+    reserveTreeEntry(budget, relativePath);
     await mkdir(destination, { mode: 0o755 });
     await chmod(destination, 0o755);
     entries.push({ path: relativePath, type: "directory", mode: 0o755 });
@@ -471,6 +496,7 @@ async function copyDirectory(sourceRoot, destinationRoot, relativePath, entries,
       continue;
     }
     if (!childInfo.isFile()) throw new Error(`unsupported source entry: ${childRelative}`);
+    reserveTreeEntry(budget, childRelative);
     const file = await readStableFile(childSource, `source file ${childRelative}`, {
       budget,
       afterOpenStat: hooks.afterSourceFileOpened,
@@ -534,11 +560,8 @@ async function stageSourceTree({ sourceRoot, sourceIdentity, stagePath, hooks = 
   await syncDirectory(dirname(stagePath));
   await hooks.afterStageCreated?.({ stagePath });
   const entries = [];
-  const budget = {
-    totalBytes: 0,
-    maxBytes: MAX_INSTALL_SOURCE_TREE_BYTES,
-    label: "source tree",
-  };
+  const budget = treeBudget("source tree");
+  reserveTreeEntry(budget, INSTALL_MARKER_NAME);
   for (const entry of SOURCE_ENTRIES) {
     await assertDirectoryIdentity(sourceRoot, sourceIdentity, "sourceRoot");
     if (entry.type === "directory") {
@@ -546,6 +569,7 @@ async function stageSourceTree({ sourceRoot, sourceIdentity, stagePath, hooks = 
       continue;
     }
     const sourcePath = join(sourceRoot, entry.name);
+    reserveTreeEntry(budget, entry.name);
     const file = await readStableFile(sourcePath, `source file ${entry.name}`, {
       budget,
       afterOpenStat: hooks.afterSourceFileOpened,
@@ -752,6 +776,7 @@ async function validatePartialStageDirectory(root, relativePath, budget) {
     || !info.isDirectory()
     || (process.platform !== "win32" && (info.mode & 0o022) !== 0)
   ) throw new Error(`partial install stage contains an unsafe directory: ${relativePath || "."}`);
+  if (relativePath !== "") reserveTreeEntry(budget, relativePath);
   const children = await readdir(path, { withFileTypes: true });
   children.sort((left, right) => left.name.localeCompare(right.name, "en"));
   for (const child of children) {
@@ -770,6 +795,7 @@ async function validatePartialStageDirectory(root, relativePath, budget) {
       || childInfo.size > MAX_INSTALL_SOURCE_FILE_BYTES
       || (process.platform !== "win32" && (childInfo.mode & 0o022) !== 0)
     ) throw new Error(`partial install stage contains an unsafe file: ${childRelative}`);
+    reserveTreeEntry(budget, childRelative);
     reserveBudget(budget, BigInt(childInfo.size));
   }
 }
@@ -796,11 +822,11 @@ async function validatePartialPreparationStage(intent) {
       || (expectedType === "file" ? !info.isFile() : !info.isDirectory())
     ) throw new Error(`partial install stage top-level type is invalid: ${name}`);
   }
-  await validatePartialStageDirectory(intent.stagePath, "", {
-    totalBytes: 0,
-    maxBytes: MAX_INSTALL_SOURCE_TREE_BYTES + MAX_JOURNAL_BYTES,
-    label: "partial install stage",
-  });
+  await validatePartialStageDirectory(
+    intent.stagePath,
+    "",
+    treeBudget("partial install stage", MAX_INSTALL_SOURCE_TREE_BYTES + MAX_JOURNAL_BYTES),
+  );
 }
 
 async function recoverPreparationIntentUnderLock(targetRoot) {
@@ -881,7 +907,9 @@ function validateJournal(value, targetRoot) {
     !UUID_PATTERN.test(value.nonce) ||
     !(value.previousNonce === null || UUID_PATTERN.test(value.previousNonce)) ||
     typeof value.createdAt !== "string" ||
-    Number.isNaN(Date.parse(value.createdAt))
+    Number.isNaN(Date.parse(value.createdAt)) ||
+    (value.decision === "commit") !== (value.phase === "commit-decided") ||
+    (value.decision === "rollback") !== (value.phase === "rollback-decided")
   ) {
     throw new Error("install journal fields are invalid");
   }
@@ -906,10 +934,16 @@ async function readJournal(targetRoot) {
     throw new Error("install journal is not a private regular file");
   }
   let value;
+  const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+    (await readStableFile(path, "install journal")).bytes,
+  );
   try {
-    value = JSON.parse((await readStableFile(path, "install journal")).bytes.toString("utf8"));
+    value = JSON.parse(decoded);
   } catch (cause) {
     throw new Error("install journal is not valid JSON", { cause });
+  }
+  if (decoded !== `${JSON.stringify(value)}\n`) {
+    throw new Error("install journal JSON is not canonical");
   }
   return validateJournal(value, targetRoot);
 }
@@ -959,17 +993,6 @@ async function clearJournal(targetRoot) {
   await syncDirectory(dirname(path));
 }
 
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "EPERM") return true;
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
 async function validateLock(lockPath) {
   const info = await lstat(lockPath);
   if (
@@ -996,12 +1019,14 @@ async function validateLock(lockPath) {
   }
   const owner = JSON.parse((await readStableFile(ownerPath, "install lock owner")).bytes.toString("utf8"));
   if (
-    !exactKeys(owner, ["createdAt", "nonce", "pid", "schemaVersion"]) ||
-    owner.schemaVersion !== 1 ||
+    !exactKeys(owner, ["createdAt", "nonce", "pid", "schemaVersion", "startedAt"]) ||
+    owner.schemaVersion !== 2 ||
     !Number.isSafeInteger(owner.pid) ||
     owner.pid <= 0 ||
     typeof owner.nonce !== "string" ||
     !UUID_PATTERN.test(owner.nonce) ||
+    typeof owner.startedAt !== "string" ||
+    owner.startedAt.length === 0 ||
     typeof owner.createdAt !== "string" ||
     Number.isNaN(Date.parse(owner.createdAt))
   ) {
@@ -1010,16 +1035,25 @@ async function validateLock(lockPath) {
   return owner;
 }
 
-async function acquireInstallLock(targetRoot, isAlive = processIsAlive) {
+async function acquireInstallLock(targetRoot, identityReader = readProcessIdentity) {
   const parent = await ensureTargetParent(targetRoot);
   const lockPath = lockPathFor(targetRoot);
+  const identity = await identityReader(process.pid);
+  if (
+    identity?.pid !== process.pid ||
+    typeof identity.startedAt !== "string" ||
+    identity.startedAt.length === 0
+  ) {
+    throw new Error("cannot establish the stable tree installer process identity");
+  }
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       await mkdir(lockPath, { mode: 0o700 });
       await chmod(lockPath, 0o700);
       const owner = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         pid: process.pid,
+        startedAt: identity.startedAt,
         nonce: randomUUID(),
         createdAt: new Date().toISOString(),
       };
@@ -1035,7 +1069,11 @@ async function acquireInstallLock(targetRoot, isAlive = processIsAlive) {
       }
       return async () => {
         const current = await validateLock(lockPath);
-        if (current.pid !== owner.pid || current.nonce !== owner.nonce) {
+        if (
+          current.pid !== owner.pid ||
+          current.startedAt !== owner.startedAt ||
+          current.nonce !== owner.nonce
+        ) {
           throw new Error("install lock ownership changed before release");
         }
         await rm(lockPath, { recursive: true, force: false });
@@ -1045,7 +1083,10 @@ async function acquireInstallLock(targetRoot, isAlive = processIsAlive) {
       if (error?.code !== "EEXIST") throw error;
     }
     const owner = await validateLock(lockPath);
-    if (await isAlive(owner.pid)) throw new Error("another stable tree installation is still running");
+    const current = await identityReader(owner.pid);
+    if (sameProcessIdentity(current, owner)) {
+      throw new Error("another stable tree installation is still running");
+    }
     const stalePath = `${lockPath}.stale.${randomUUID()}`;
     try {
       await rename(lockPath, stalePath);
@@ -1062,10 +1103,10 @@ async function acquireInstallLock(targetRoot, isAlive = processIsAlive) {
 
 export async function acquireInstallTreeParticipantLock({
   targetRoot,
-  isProcessAlive,
+  readProcessIdentity: identityReader,
 } = {}) {
   targetRoot = await canonicalizeTargetRoot(targetRoot);
-  const release = await acquireInstallLock(targetRoot, isProcessAlive);
+  const release = await acquireInstallLock(targetRoot, identityReader);
   return Object.freeze({ targetRoot, release });
 }
 
@@ -1292,9 +1333,9 @@ export async function recoverInstallTreeUnderLock({ targetRoot, testMode } = {})
   return recoverJournalUnderLock(targetRoot, { testMode });
 }
 
-export async function recoverInstallTree({ targetRoot, isProcessAlive, testMode } = {}) {
+export async function recoverInstallTree({ targetRoot, readProcessIdentity: identityReader, testMode } = {}) {
   targetRoot = await canonicalizeTargetRoot(targetRoot);
-  const releaseLock = await acquireInstallLock(targetRoot, isProcessAlive);
+  const releaseLock = await acquireInstallLock(targetRoot, identityReader);
   let operationError = null;
   try {
     return await recoverJournalUnderLock(targetRoot, { testMode });
@@ -1321,11 +1362,11 @@ export async function installTree({
   targetRoot,
   faultAt,
   hooks = {},
-  isProcessAlive,
+  readProcessIdentity: identityReader,
   testMode,
 } = {}) {
   targetRoot = await canonicalizeTargetRoot(targetRoot);
-  const releaseLock = await acquireInstallLock(targetRoot, isProcessAlive);
+  const releaseLock = await acquireInstallLock(targetRoot, identityReader);
   let operationError = null;
   try {
     const recovery = await recoverJournalUnderLock(targetRoot, { testMode });

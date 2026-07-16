@@ -378,6 +378,27 @@ test("serializes concurrent installers with an owned cross-process lock", async 
   await first;
 });
 
+test("launcher lock reclaims a reused live PID with a different start identity", async (t) => {
+  const { home } = await fixture(t);
+  const applications = join(home, "Applications");
+  const lockPath = join(applications, ".heige-codex-skin-launcher-install.lock");
+  await mkdir(lockPath, { recursive: true, mode: 0o700 });
+  await writeFile(join(lockPath, "owner.json"), `${JSON.stringify({
+    schemaVersion: 2,
+    pid: process.pid,
+    startedAt: "old-process-start",
+    nonce: "123e4567-e89b-42d3-a456-426614174000",
+  })}\n`, { mode: 0o600 });
+  const current = { pid: process.pid, startedAt: "new-process-start" };
+
+  const lock = await acquireMacosLauncherInstallLock({
+    home,
+    readProcessIdentity: async () => current,
+  });
+  await lock.release();
+  await assert.rejects(lstat(lockPath), /ENOENT/);
+});
+
 test("recovers a backed-up launcher and stale lock after the installer is SIGKILLed", async (t) => {
   const { root, home, installRoot } = await fixture(t);
   const initial = await installMacosLauncher({ home, installRoot });

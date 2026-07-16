@@ -95,11 +95,15 @@ async function update(deps, journal, changes) {
 async function finishCommittedInstall(deps, journal) {
   const persistent = journal.stateParticipant.afterState.persistenceEnabled === true;
   await deps.finalizeState(journal.stateParticipant);
+  await deps.checkpoint("state-finalized", journal);
   await deps.finalizeLauncher(journal.launcherParticipant);
+  await deps.checkpoint("launcher-finalized", journal);
   await deps.finalizeTree(journal.treeParticipant);
+  await deps.checkpoint("tree-finalized", journal);
   await deps.finalizeFreeze(journal.freezeParticipant, {
     removeFrozenServices: !persistent,
   });
+  await deps.checkpoint("freeze-finalized", journal);
   await deps.clearJournal(journal);
   return { recovered: true, decision: "commit" };
 }
@@ -153,6 +157,7 @@ async function createFreshInstall(input, deps, launcherLock) {
     stateRoot: input.stateRoot,
   });
   try {
+    await deps.checkpoint("skeleton", journal);
     const services = await deps.inspectServices();
     const tree = await deps.prepareTree({
       sourceRoot: input.sourceRoot,
@@ -180,7 +185,7 @@ async function createFreshInstall(input, deps, launcherLock) {
 
     const state = await deps.prepareState({
       transactionId: journal.transactionId,
-      legacyAgentLoaded: services.legacyLoaded === true,
+      legacyAgentLoaded: services.legacyLoaded === true || services.controllerLoaded === true,
     });
     journal = await update(deps, journal, {
       phase: "state-prepared",
@@ -197,6 +202,7 @@ async function createFreshInstall(input, deps, launcherLock) {
       phase: "freeze-intent",
       freezeParticipant: freezeDescriptor,
     });
+    await deps.checkpoint("freeze-intent", journal);
     const frozen = await deps.prepareFreeze({ outerTransaction });
     if (
       frozen?.transaction !== null &&
@@ -222,11 +228,13 @@ async function createFreshInstall(input, deps, launcherLock) {
         activation: "none",
         phase: "activation-skipped",
       });
+      await deps.checkpoint("activation-skipped", journal);
     } else {
       journal = await update(deps, journal, {
         activation: "controller",
         phase: "activation-planned",
       });
+      await deps.checkpoint("activation-planned", journal);
       const ready = await deps.awaitExactReady({
         expectedState: state.afterState,
         outerTransaction,
@@ -237,6 +245,7 @@ async function createFreshInstall(input, deps, launcherLock) {
         ready?.revision !== state.afterState.revision
       ) throw new Error("macOS install did not receive the exact controller readiness ACK");
       journal = await update(deps, journal, { phase: "service-prepared" });
+      await deps.checkpoint("service-prepared", journal);
       journal = await update(deps, journal, {
         ack: {
           persistenceEnabled: true,

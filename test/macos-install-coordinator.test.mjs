@@ -25,9 +25,12 @@ function fixture({
   services = {},
   checkpoint = null,
   ready = null,
+  crashAt = null,
+  actionCrashAt = null,
 } = {}) {
   const events = [];
   let journal = null;
+  let crashInjected = false;
   const transactionId = "123e4567-e89b-42d3-a456-426614174000";
   const tree = { transactionId, kind: "tree" };
   const launcher = { transactionId, kind: "launcher" };
@@ -43,6 +46,12 @@ function fixture({
   const freeze = { transactionId, operation: "freeze-stable-services" };
   const mark = (name, value) => {
     events.push(value === undefined ? name : [name, value]);
+  };
+  const crashAfter = (name) => {
+    if (actionCrashAt === name && !crashInjected) {
+      crashInjected = true;
+      throw hardCrash(`action crash at ${name}`);
+    }
   };
   const deps = {
     journalPath: "/Users/tester/Library/Application Support/HeiGeCodexSkinStudio/macos-install.json",
@@ -85,6 +94,10 @@ function fixture({
     },
     clearJournal: async () => {
       mark("journal-clear");
+      if (crashAt === "journal-clear" && !crashInjected) {
+        crashInjected = true;
+        throw hardCrash("crash at journal-clear");
+      }
       journal = null;
     },
     recoverStandaloneTree: async () => mark("tree-recover-under-lock"),
@@ -97,33 +110,60 @@ function fixture({
       legacyPresent: false,
       ...services,
     }),
-    prepareTree: async () => (mark("tree-prepare"), tree),
-    publishTree: async () => mark("tree-publish"),
+    prepareTree: async () => {
+      mark("tree-prepare");
+      crashAfter("tree-prepare");
+      return tree;
+    },
+    publishTree: async () => {
+      mark("tree-publish");
+      crashAfter("tree-publish");
+    },
     rollbackTree: async () => mark("tree-rollback"),
     finalizeTree: async () => mark("tree-finalize"),
-    prepareLauncher: async () => (mark("launcher-prepare"), launcher),
-    publishLauncher: async () => mark("launcher-publish"),
+    prepareLauncher: async () => {
+      mark("launcher-prepare");
+      crashAfter("launcher-prepare");
+      return launcher;
+    },
+    publishLauncher: async () => {
+      mark("launcher-publish");
+      crashAfter("launcher-publish");
+    },
     rollbackLauncher: async () => mark("launcher-rollback"),
     finalizeLauncher: async () => mark("launcher-finalize"),
-    prepareState: async (input) => (mark("state-prepare", input), state),
-    publishState: async () => mark("state-publish"),
+    prepareState: async (input) => {
+      mark("state-prepare", input);
+      crashAfter("state-prepare");
+      return state;
+    },
+    publishState: async () => {
+      mark("state-publish");
+      crashAfter("state-publish");
+    },
     rollbackState: async () => mark("state-rollback"),
     finalizeState: async () => mark("state-finalize"),
     createFreezeDescriptor: async () => (mark("freeze-intent"), freeze),
-    prepareFreeze: async () => (mark("freeze-prepare"), {
-      servicesFound: true,
-      transaction: freeze,
-    }),
+    prepareFreeze: async () => {
+      mark("freeze-prepare");
+      crashAfter("freeze-prepare");
+      return { servicesFound: true, transaction: freeze };
+    },
     stopFreezeForRollback: async () => mark("freeze-stop"),
     rollbackFreeze: async () => mark("freeze-rollback"),
     finalizeFreeze: async (_descriptor, options) => mark("freeze-finalize", options),
     awaitExactReady: async (input) => {
       mark("ready", input.outerTransaction);
+      crashAfter("ready");
       if (ready) return ready(input);
       return { persistenceEnabled: true, revision: state.afterState.revision };
     },
     checkpoint: async (phase) => {
       mark("checkpoint", phase);
+      if (phase === crashAt && !crashInjected) {
+        crashInjected = true;
+        throw hardCrash(`crash at ${phase}`);
+      }
       return checkpoint?.(phase);
     },
   };
@@ -145,6 +185,28 @@ test("ordinary non-persistent install never activates a controller and migrates 
     { removeFrozenServices: true },
   );
   assert.equal(fx.events.indexOf("tree-recover-under-lock") > fx.events.indexOf("coordinator-lock"), true);
+});
+
+test("an already loaded controller preserves persistence intent even without a legacy watchdog", async () => {
+  const fx = fixture({
+    persistenceEnabled: true,
+    services: { controllerLoaded: true, controllerPresent: true },
+  });
+  await coordinateMacosInstall(INPUT, fx.deps);
+  assert.equal(
+    fx.events.find((entry) => Array.isArray(entry) && entry[0] === "state-prepare")[1]
+      .legacyAgentLoaded,
+    true,
+  );
+});
+
+test("non-persistent activation-skipped crash rolls back without starting a controller", async () => {
+  const fx = fixture({ crashAt: "activation-skipped" });
+  await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /crash at/);
+  await recoverMacosInstallTransaction(fx.deps);
+  assert.equal(fx.journal, null);
+  assert.equal(fx.events.some((entry) => Array.isArray(entry) && entry[0] === "ready"), false);
+  assert.equal(fx.events.includes("freeze-stop"), false);
 });
 
 test("readiness failure durably decides rollback and reverses state launcher tree then freeze", async () => {
@@ -193,3 +255,70 @@ test("a crash after the global commit decision only rolls participants forward",
     ["state-finalize", "launcher-finalize", "tree-finalize"],
   );
 });
+
+for (const phase of [
+  "skeleton",
+  "tree-prepared",
+  "launcher-prepared",
+  "state-prepared",
+  "freeze-intent",
+  "services-frozen",
+  "tree-published",
+  "launcher-published",
+  "state-published",
+  "activation-planned",
+  "service-prepared",
+  "ready-acked",
+]) {
+  test(`precommit hard crash at ${phase} is recovered only by rollback`, async () => {
+    const fx = fixture({ persistenceEnabled: true, crashAt: phase });
+    await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /crash at/);
+    await recoverMacosInstallTransaction(fx.deps);
+    assert.equal(fx.journal, null);
+    assert.equal(fx.events.includes("tree-finalize"), false);
+    if (["activation-planned", "service-prepared", "ready-acked"].includes(phase)) {
+      assert.equal(fx.events.includes("freeze-stop"), true);
+    }
+  });
+}
+
+for (const action of [
+  "tree-prepare",
+  "launcher-prepare",
+  "state-prepare",
+  "freeze-prepare",
+  "tree-publish",
+  "launcher-publish",
+  "state-publish",
+  "ready",
+]) {
+  test(`hard crash inside ${action} is recovered from the last durable outer phase`, async () => {
+    const fx = fixture({ persistenceEnabled: true, actionCrashAt: action });
+    await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /action crash/);
+    await recoverMacosInstallTransaction(fx.deps);
+    assert.equal(fx.journal, null);
+    assert.equal(fx.events.includes("tree-finalize"), false);
+    if (action === "tree-prepare") assert.equal(fx.events.includes("tree-preparation-recover"), true);
+    if (action === "launcher-prepare") {
+      assert.equal(fx.events.includes("launcher-preparation-recover"), true);
+    }
+    if (action === "ready") assert.equal(fx.events.includes("freeze-stop"), true);
+  });
+}
+
+for (const phase of [
+  "state-finalized",
+  "launcher-finalized",
+  "tree-finalized",
+  "freeze-finalized",
+  "journal-clear",
+]) {
+  test(`postcommit hard crash at ${phase} is recovered only by roll-forward`, async () => {
+    const fx = fixture({ crashAt: phase });
+    await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /crash at/);
+    assert.equal(fx.journal.decision, "commit");
+    await recoverMacosInstallTransaction(fx.deps);
+    assert.equal(fx.journal, null);
+    assert.equal(fx.events.includes("state-rollback"), false);
+  });
+}

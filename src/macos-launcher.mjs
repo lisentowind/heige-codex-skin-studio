@@ -17,6 +17,8 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
+import { readProcessIdentity, sameProcessIdentity } from "./process-identity.mjs";
+
 export const MACOS_LAUNCHER_NAME = "HeiGe 皮肤启动器";
 export const MACOS_LAUNCHER_BUNDLE_ID = "com.heige.codex-skin-launcher";
 export const MACOS_LAUNCHER_SCHEMA_VERSION = 1;
@@ -684,19 +686,14 @@ async function recoverTransaction({ appPath, journalPath }) {
   return true;
 }
 
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "EPERM") return true;
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-async function acquireInstallLock(applications, isAlive = processIsAlive) {
+async function acquireInstallLock(applications, identityReader = readProcessIdentity) {
   const lockPath = join(applications, LOCK_DIRECTORY);
+  const identity = await identityReader(process.pid);
+  if (
+    identity?.pid !== process.pid ||
+    typeof identity.startedAt !== "string" ||
+    identity.startedAt.length === 0
+  ) throw new Error("launcher installer process identity is unavailable");
   for (let attempt = 0; attempt < 8; attempt += 1) {
     let created = false;
     try {
@@ -710,7 +707,8 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
       const owner = {
         nonce: randomUUID(),
         pid: process.pid,
-        schemaVersion: 1,
+        schemaVersion: 2,
+        startedAt: identity.startedAt,
       };
       try {
         await writeDurableJson(join(lockPath, "owner.json"), owner);
@@ -742,9 +740,10 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
         } catch (cause) {
           throw new Error("launcher install lock 无法安全释放", { cause });
         }
-        if (!exactKeys(current, ["nonce", "pid", "schemaVersion"])
+        if (!exactKeys(current, ["nonce", "pid", "schemaVersion", "startedAt"])
           || current.nonce !== owner.nonce
           || current.pid !== owner.pid
+          || current.startedAt !== owner.startedAt
           || current.schemaVersion !== owner.schemaVersion) {
           throw new Error("launcher install lock ownership 已变化，拒绝删除");
         }
@@ -774,14 +773,18 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
       }
       owner = JSON.parse(await readFile(ownerPath, "utf8"));
       if (
-        !exactKeys(owner, ["nonce", "pid", "schemaVersion"])
-        || owner.schemaVersion !== 1
+        !exactKeys(owner, ["nonce", "pid", "schemaVersion", "startedAt"])
+        || owner.schemaVersion !== 2
         || !Number.isSafeInteger(owner.pid)
         || owner.pid <= 0
         || typeof owner.nonce !== "string"
         || !UUID_PATTERN.test(owner.nonce)
+        || typeof owner.startedAt !== "string"
+        || owner.startedAt.length === 0
       ) throw new Error("launcher install lock owner schema 无效");
-      if (await isAlive(owner.pid)) throw new Error("另一个 HeiGe 皮肤启动器安装仍在进行");
+      if (sameProcessIdentity(await identityReader(owner.pid), owner)) {
+        throw new Error("另一个 HeiGe 皮肤启动器安装仍在进行");
+      }
       const stale = `${lockPath}.stale.${randomUUID()}`;
       try { await rename(lockPath, stale); } catch (failure) {
         if (failure?.code === "ENOENT") continue;
@@ -800,7 +803,7 @@ async function acquireInstallLock(applications, isAlive = processIsAlive) {
 
 export async function acquireMacosLauncherInstallLock({
   home,
-  isProcessAlive,
+  readProcessIdentity: identityReader,
   recover = true,
 } = {}) {
   home = assertAbsolutePath(home, "home");
@@ -819,7 +822,7 @@ export async function acquireMacosLauncherInstallLock({
   if (canonicalApplications !== join(canonicalHome, "Applications")) {
     throw new Error("Applications 必须位于用户 home 内");
   }
-  const releaseLock = await acquireInstallLock(applications, isProcessAlive);
+  const releaseLock = await acquireInstallLock(applications, identityReader);
   let removeApplicationsAfterRelease = !applicationsPriorExisted;
   try {
     if (recover) {
@@ -1191,11 +1194,19 @@ export async function finalizeMacosLauncher(value) {
   };
 }
 
-export async function installMacosLauncher({ home, installRoot, hooks = {}, isProcessAlive } = {}) {
+export async function installMacosLauncher({
+  home,
+  installRoot,
+  hooks = {},
+  readProcessIdentity: identityReader,
+} = {}) {
   home = assertAbsolutePath(home, "home");
   installRoot = assertAbsolutePath(installRoot, "installRoot");
   const entrypoint = await requireStableEntrypoint(installRoot);
-  const launcherLock = await acquireMacosLauncherInstallLock({ home, isProcessAlive });
+  const launcherLock = await acquireMacosLauncherInstallLock({
+    home,
+    readProcessIdentity: identityReader,
+  });
   const { applications } = launcherLock;
 
   const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);

@@ -21,10 +21,13 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  acquireInstallTreeParticipantLock,
   finalizeInstallTree,
   INSTALL_MARKER_NAME,
   MAX_INSTALL_SOURCE_FILE_BYTES,
+  MAX_INSTALL_SOURCE_TREE_DEPTH,
   MAX_INSTALL_SOURCE_TREE_BYTES,
+  MAX_INSTALL_SOURCE_TREE_ENTRIES,
   installTree,
   prepareInstallTree,
   publishInstallTree,
@@ -193,6 +196,11 @@ test("rejects an oversized source file before reading it into memory", async (t)
   );
 
   await assert.rejects(lstat(targetRoot), /ENOENT/);
+  const leftovers = await readdir(join(targetRoot, ".."));
+  assert.equal(
+    leftovers.some((name) => name.includes(".staged.") || name.endsWith(".install-prepare.json")),
+    false,
+  );
 });
 
 test("rejects a source tree whose bounded aggregate exceeds the install budget", async (t) => {
@@ -210,6 +218,47 @@ test("rejects a source tree whose bounded aggregate exceeds the install budget",
     /source tree.*limit|aggregate.*bytes/i,
   );
 
+  await assert.rejects(lstat(targetRoot), /ENOENT/);
+});
+
+test("rejects a zero-byte source tree that exceeds the inode entry budget", async (t) => {
+  const { sourceRoot, targetRoot } = await sourceFixture(t);
+  const directory = join(sourceRoot, "themes", "many-empty-files");
+  await mkdir(directory);
+  for (let offset = 0; offset <= MAX_INSTALL_SOURCE_TREE_ENTRIES; offset += 128) {
+    await Promise.all(
+      Array.from(
+        { length: Math.min(128, MAX_INSTALL_SOURCE_TREE_ENTRIES + 1 - offset) },
+        (_, index) => writeFile(join(directory, `empty-${offset + index}`), ""),
+      ),
+    );
+  }
+
+  await assert.rejects(
+    installTree({ sourceRoot, targetRoot }),
+    /entry limit/i,
+  );
+  await assert.rejects(lstat(targetRoot), /ENOENT/);
+  const leftovers = await readdir(join(targetRoot, ".."));
+  assert.equal(
+    leftovers.some((name) => name.includes(".staged.") || name.endsWith(".install-prepare.json")),
+    false,
+  );
+});
+
+test("rejects source nesting beyond the bounded traversal depth", async (t) => {
+  const { sourceRoot, targetRoot } = await sourceFixture(t);
+  let directory = join(sourceRoot, "themes");
+  for (let depth = 0; depth <= MAX_INSTALL_SOURCE_TREE_DEPTH; depth += 1) {
+    directory = join(directory, `d${depth}`);
+    await mkdir(directory);
+  }
+  await writeFile(join(directory, "empty"), "");
+
+  await assert.rejects(
+    installTree({ sourceRoot, targetRoot }),
+    /depth limit/i,
+  );
   await assert.rejects(lstat(targetRoot), /ENOENT/);
 });
 
@@ -477,6 +526,40 @@ test("a failure after the commit journal write cannot reverse the durable decisi
   );
 });
 
+test("standalone recovery rejects a commit decision paired with a nonterminal phase", async (t) => {
+  const { sourceRoot, targetRoot } = await sourceFixture(t);
+  await installTree({ sourceRoot, targetRoot });
+  await writeFile(join(sourceRoot, "src", "src.txt"), "tampered-v2\n");
+  await assert.rejects(
+    installTree({ sourceRoot, targetRoot, faultAt: "after-commit-journal-write" }),
+    /INJECTED_INSTALL_FAILURE/,
+  );
+  const path = `${targetRoot}.install-journal.json`;
+  const journal = JSON.parse(await readFile(path, "utf8"));
+  journal.phase = "target-published";
+  await writeFile(path, `${JSON.stringify(journal)}\n`);
+
+  await assert.rejects(recoverInstallTree({ targetRoot }), /journal fields/i);
+  assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "tampered-v2\n");
+  assert.equal((await lstat(path)).isFile(), true);
+});
+
+test("standalone recovery rejects duplicate-key noncanonical journals", async (t) => {
+  const { sourceRoot, targetRoot } = await sourceFixture(t);
+  await installTree({ sourceRoot, targetRoot });
+  await writeFile(join(sourceRoot, "src", "src.txt"), "duplicate-v2\n");
+  await assert.rejects(
+    installTree({ sourceRoot, targetRoot, faultAt: "after-commit-journal-write" }),
+    /INJECTED_INSTALL_FAILURE/,
+  );
+  const path = `${targetRoot}.install-journal.json`;
+  const canonical = await readFile(path, "utf8");
+  await writeFile(path, canonical.replace('{', '{"decision":"rollback",'));
+
+  await assert.rejects(recoverInstallTree({ targetRoot }), /canonical/i);
+  assert.equal((await lstat(path)).isFile(), true);
+});
+
 test("a live install lock excludes a concurrent stable tree writer and uses private modes", async (t) => {
   const { sourceRoot, targetRoot } = await sourceFixture(t);
   let enterBoundary;
@@ -507,6 +590,28 @@ test("a live install lock excludes a concurrent stable tree writer and uses priv
 
   releaseBoundary();
   await first;
+});
+
+test("stable tree lock reclaims a reused live PID with a different start identity", async (t) => {
+  const { targetRoot } = await sourceFixture(t);
+  await mkdir(join(targetRoot, ".."), { recursive: true });
+  const lockPath = `${targetRoot}.install.lock`;
+  await mkdir(lockPath, { mode: 0o700 });
+  await writeFile(join(lockPath, "owner.json"), `${JSON.stringify({
+    schemaVersion: 2,
+    pid: process.pid,
+    startedAt: "old-process-start",
+    nonce: "123e4567-e89b-42d3-a456-426614174000",
+    createdAt: new Date().toISOString(),
+  })}\n`, { mode: 0o600 });
+  const current = { pid: process.pid, startedAt: "new-process-start" };
+
+  const lock = await acquireInstallTreeParticipantLock({
+    targetRoot,
+    readProcessIdentity: async () => current,
+  });
+  await lock.release();
+  await assert.rejects(lstat(lockPath), /ENOENT/);
 });
 
 test("rejects source and target symlinks without following their sentinels", async (t) => {

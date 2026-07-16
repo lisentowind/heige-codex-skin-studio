@@ -1394,6 +1394,7 @@ test("stable service freeze finalize never revives the old watchdog after outer 
   });
   await outer.bind(frozen.transaction);
   await registerControllerAgent(deps);
+  deps.commands.length = 0;
   await outer.decide("commit");
   await finalizeStableServiceFreeze(
     JSON.parse(JSON.stringify(frozen.transaction)),
@@ -1401,6 +1402,11 @@ test("stable service freeze finalize never revives the old watchdog after outer 
   );
   assert.equal(deps.loaded.has(deps.label), true, "the committed new controller remains running");
   assert.equal(deps.loaded.has(deps.oldLabel), false, "the old watchdog is never revived");
+  assert.equal(
+    deps.commands.some((command) => command[1] === "bootout" && command[2].endsWith(`/${deps.label}`)),
+    false,
+    "finalize must preserve the ACKed controller process",
+  );
   assert.equal(await pathExists(join(deps.stateDir, "stable-service-freeze.json")), false);
 });
 
@@ -1494,6 +1500,74 @@ test("freeze rollback is idempotent when no pre-existing service journal exists"
   assert.equal(await pathExists(deps.controllerPlistPath), false);
   assert.equal(deps.loaded.has(deps.label), false);
 });
+
+for (const prestate of ["both", "watchdog-only", "controller-only", "none"]) {
+  test(`stable service freeze preserves the exact ${prestate} prestate on rollback`, async (t) => {
+    const deps = await fixture(t);
+    let controller = null;
+    if (["both", "controller-only"].includes(prestate)) {
+      controller = await installKnownHermesController(deps, { mode: 0o640 });
+    }
+    if (["controller-only", "none"].includes(prestate)) {
+      deps.loaded.delete(deps.oldLabel);
+      await rm(deps.oldPlistPath);
+    }
+    const outer = await outerMacosInstallJournal(deps);
+    const descriptor = await createStableServiceFreezeDescriptor({
+      ...deps,
+      outerTransaction: outer.outerTransaction,
+    });
+    await outer.bind(descriptor);
+    await prepareStableServiceFreeze({
+      ...deps,
+      outerTransaction: outer.outerTransaction,
+    });
+    assert.equal(await pathExists(deps.controllerPlistPath), false);
+    assert.equal(await pathExists(deps.oldPlistPath), false);
+    assert.equal(deps.loaded.size, 0);
+
+    await outer.decide("rollback");
+    await rollbackStableServiceFreeze(descriptor, deps);
+
+    assert.equal(await pathExists(deps.controllerPlistPath), controller !== null);
+    assert.equal(await pathExists(deps.oldPlistPath), ["both", "watchdog-only"].includes(prestate));
+    assert.equal(deps.loaded.has(deps.label), controller !== null);
+    assert.equal(deps.loaded.has(deps.oldLabel), ["both", "watchdog-only"].includes(prestate));
+    if (controller !== null) {
+      assert.deepEqual(await readFile(deps.controllerPlistPath), controller.bytes);
+      assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
+    }
+  });
+
+  test(`persistent commit replaces the exact ${prestate} prestate with one controller`, async (t) => {
+    const deps = await fixture(t);
+    if (["both", "controller-only"].includes(prestate)) {
+      await installKnownHermesController(deps, { mode: 0o640 });
+    }
+    if (["controller-only", "none"].includes(prestate)) {
+      deps.loaded.delete(deps.oldLabel);
+      await rm(deps.oldPlistPath);
+    }
+    const outer = await outerMacosInstallJournal(deps);
+    const descriptor = await createStableServiceFreezeDescriptor({
+      ...deps,
+      outerTransaction: outer.outerTransaction,
+    });
+    await outer.bind(descriptor);
+    await prepareStableServiceFreeze({
+      ...deps,
+      outerTransaction: outer.outerTransaction,
+    });
+    await registerControllerAgent(deps);
+    await outer.decide("commit");
+    await finalizeStableServiceFreeze(descriptor, deps);
+
+    assert.equal(await pathExists(deps.controllerPlistPath), true);
+    assert.equal(await pathExists(deps.oldPlistPath), false);
+    assert.equal(deps.loaded.has(deps.label), true);
+    assert.equal(deps.loaded.has(deps.oldLabel), false);
+  });
+}
 
 test("stable service freeze refuses a foreign loaded controller before stopping either job", async (t) => {
   const deps = await fixture(t);

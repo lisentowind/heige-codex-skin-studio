@@ -2709,11 +2709,9 @@ export async function finalizeStableServiceFreeze(transaction, input = {}) {
       );
       assertControllerPlistAttribution(context.options, plist, programArguments);
       const current = await inspectLoadedJob(context.options, descriptor.controllerLabel);
-      if (current.loaded) {
-        await bootout(context.options, descriptor.controllerLabel, { knownLoaded: true });
-        await waitForFrozenPidExit(context.options, current.pid);
+      if (!current.loaded) {
+        throw new Error("committed persistent controller is not loaded");
       }
-      await bootstrap(context.options, descriptor.controllerLabel, descriptor.controllerPlistPath);
     }
     return { committed: true };
   }
@@ -2738,10 +2736,6 @@ export async function finalizeStableServiceFreeze(transaction, input = {}) {
   }
 
   const controllerCurrent = await inspectLoadedJob(context.options, descriptor.controllerLabel);
-  if (controllerCurrent.loaded) {
-    await bootout(context.options, descriptor.controllerLabel, { knownLoaded: true });
-    await waitForFrozenPidExit(context.options, controllerCurrent.pid);
-  }
   const controllerSnapshot = await snapshotFile(context.options.fs, descriptor.controllerPlistPath);
   if (persistent) {
     if (controllerSnapshot === null) {
@@ -2754,8 +2748,14 @@ export async function finalizeStableServiceFreeze(transaction, input = {}) {
       controllerSnapshot,
     );
     assertControllerPlistAttribution(context.options, plist, programArguments);
-    await bootstrap(context.options, descriptor.controllerLabel, descriptor.controllerPlistPath);
+    if (!controllerCurrent.loaded) {
+      throw new Error("committed persistent controller is not loaded");
+    }
   } else {
+    if (controllerCurrent.loaded) {
+      await bootout(context.options, descriptor.controllerLabel, { knownLoaded: true });
+      await waitForFrozenPidExit(context.options, controllerCurrent.pid);
+    }
     const accepted = controllerBackup.existed
       ? [{ bytes: controllerBackup.bytes, mode: controllerBackup.mode }]
       : [];
