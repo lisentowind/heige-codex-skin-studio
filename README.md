@@ -76,7 +76,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 open "$HOME/.codex/heige-codex-skin-studio/scripts/enable-persist.command"
 ```
 
-开启后一个每 15 秒巡逻的 launchd 看门狗会自动兜底：界面重载了补注入，普通方式启动的 Codex 自动带调试端口重开一次再上皮肤（带 10 分钟冷却，绝不循环重启），Codex 没在运行时什么都不做。皮肤和顶部 🎨 菜单从此常驻。关闭：
+开启后一个每 15 秒巡逻的 launchd 看门狗会自动兜底：界面重载了补注入并恢复你上次在菜单里选的主题，普通方式启动的 Codex 自动带调试端口重开一次再上皮肤（带 10 分钟冷却），Codex 没在运行时什么都不做。皮肤和顶部 🎨 菜单从此常驻。若连续三次重开后端口仍起不来（多见于某些 Codex 版本禁用了本机调试端口），看门狗会自动关闭常驻并弹系统通知，绝不无限重启你的 Codex。关闭：
 
 ```bash
 open "$HOME/.codex/heige-codex-skin-studio/scripts/disable-persist.command"
