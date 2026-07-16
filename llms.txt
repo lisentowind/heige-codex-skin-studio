@@ -1,8 +1,20 @@
 # HeiGe Codex Skin Studio
 
-> 给 OpenAI Codex Desktop 一键换肤的开源工具：一张图片就是一个主题，顶部中间菜单即时切换，CDP 注入不修改应用文件，macOS 与 Windows 适配。
+> OpenAI Codex Desktop 本机换肤工具：一张图片生成一个主题，顶部菜单即时切换，并由用户明确控制下次启动是否继续启用。
+
+## 已验证产品契约
+
+- 通过本机回环 CDP 注入，不修改 `app.asar`、应用二进制或签名资源。
+- 常驻开关采用方案 1：关闭后本次继续使用；下次启动恢复原生界面。
+- 重新启用可打开「HeiGe 皮肤启动器」，也可向 Codex 说「启用 HeiGe 皮肤」。
+- `apply`、`enable-skin`、`pause`、`resume`、`restore` 与只读 `status`、`doctor` 语义分离。
+- macOS 有自动化与日期化真机证据；Windows 有 Windows PowerShell 5.1、PowerShell 7、32 位解析和隔离任务自动化，Microsoft Store/MSIX 真机待验证。
+- 使用系统 Node 时要求 Node.js 22 或更新版本。生产安装不含 npm 运行时依赖；开发依赖仅用于测试与确定性打包。
+- CDP 即使绑定 `127.0.0.1` 仍无认证，本机同权限进程属于威胁边界。未来 Codex Desktop 变化仍可能要求兼容适配。
 
 ## 核心页面
-- [项目主页](https://github.com/HeiGeAi/heige-codex-skin-studio): 安装说明、10 个内置主题预览、FAQ
-- [README 原文](https://raw.githubusercontent.com/HeiGeAi/heige-codex-skin-studio/main/README.md): 完整使用文档与常见问题
-- [发布下载](https://github.com/HeiGeAi/heige-codex-skin-studio/releases): 打包好的 .skill 与源码
+
+- [项目主页](https://github.com/HeiGeAi/heige-codex-skin-studio)：安装、使用、支持矩阵与 FAQ。
+- [安全边界](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/SECURITY.md)：CDP、控制接口与漏洞报告方式。
+- [素材来源](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/ASSET_PROVENANCE.md)：逐文件来源和授权核验状态。
+- [发布下载](https://github.com/HeiGeAi/heige-codex-skin-studio/releases)：`.skill` 与源码发布。

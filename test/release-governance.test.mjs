@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+
+import { updateReleaseHash } from "../scripts/update-release-hash.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = new URL("../", import.meta.url);
@@ -50,6 +55,57 @@ test("notice does not pretend a disclaimer grants redistribution rights", async 
   assert.match(text, /发布风险|release risk/is);
 });
 
+test("remote disposition records the read-only snapshot and one package hash marker", async () => {
+  const text = await readFile(
+    new URL("../docs/release/2026-07-16-audit-hardening-disposition.md", import.meta.url),
+    "utf8",
+  );
+  const markers = text.match(/^<!-- heige-package-sha256 --> Package SHA-256: (?:pending final build|[a-f0-9]{64})$/gm) ?? [];
+  assert.equal(markers.length, 1);
+  for (const fact of [
+    "fdf374e2123e3b47183ff86af62aded8f69c0096",
+    "4a8283276db8f7ec999ce49ca489113c2ac82888cab93cce00b232540e54e537",
+    "976e107e5cecfdb3f02de3caf3a113521181056f",
+    "Private vulnerability reporting",
+    "mergeable: false",
+    "codex 已解决",
+  ]) assert.match(text, new RegExp(escapeRegExp(fact), "i"));
+  assert.match(text, /建议.*不.*直接修改|本轮不直接修改/s);
+});
+
+test("release hash updater replaces exactly one marker atomically and rejects aliases", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "heige-release-hash-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifact = join(root, "candidate.skill");
+  const disposition = join(root, "disposition.md");
+  const bytes = Buffer.from("deterministic candidate\n");
+  await writeFile(artifact, bytes, { mode: 0o644 });
+  await writeFile(
+    disposition,
+    "# Release\n\n<!-- heige-package-sha256 --> Package SHA-256: pending final build\n",
+    { mode: 0o640 },
+  );
+  const expected = createHash("sha256").update(bytes).digest("hex");
+  assert.equal(await updateReleaseHash({ artifact, disposition }), expected);
+  assert.match(await readFile(disposition, "utf8"), new RegExp(`${expected}$`, "m"));
+  assert.equal((await lstat(disposition)).mode & 0o777, 0o640);
+  assert.equal(await updateReleaseHash({ artifact, disposition }), expected, "idempotent refresh");
+
+  const duplicate = join(root, "duplicate.md");
+  const line = "<!-- heige-package-sha256 --> Package SHA-256: pending final build\n";
+  await writeFile(duplicate, `${line}${line}`);
+  await assert.rejects(updateReleaseHash({ artifact, disposition: duplicate }), /恰好包含一个/);
+
+  const linked = join(root, "linked.md");
+  await symlink(disposition, linked);
+  await assert.rejects(updateReleaseHash({ artifact, disposition: linked }), /符号链接/);
+  assert.equal(await readFile(disposition, "utf8"), `# Release\n\n${MARKER_FOR_TEST(expected)}\n`);
+});
+
+function MARKER_FOR_TEST(digest) {
+  return `<!-- heige-package-sha256 --> Package SHA-256: ${digest}`;
+}
+
 test("CI has independent Node macOS Windows and package gates", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.match(workflow, /^on:\s*$/m);
@@ -64,6 +120,11 @@ test("CI has independent Node macOS Windows and package gates", async () => {
   assert.match(workflow, /pwsh.*run-tests\.ps1/s);
   assert.match(workflow, /SysWOW64.*resolver\.test\.ps1/s);
   assert.match(workflow, /scheduled-task\.test\.ps1.*-Integration/s);
+  assert.match(
+    workflow,
+    /node:\s[\s\S]*?actions\/checkout@v6\s*\n\s*with:\s*\n\s*fetch-depth: 0/,
+    "the full Node suite needs public migration history such as 79b03dc",
+  );
   assert.ok((workflow.match(/git status --porcelain/g) ?? []).length >= 4);
   assert.doesNotMatch(workflow, /^  push:/m);
   assert.doesNotMatch(workflow, /actions\/[^\s]*release|gh release|upload-artifact|git push/i);

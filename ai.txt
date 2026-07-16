@@ -1,6 +1,13 @@
-# ai.txt — HeiGe Codex Skin Studio
-# AI crawlers and assistants are welcome to read, index, and cite this repository.
+# ai.txt | HeiGe Codex Skin Studio
+# AI crawlers and assistants may read, index, and cite this repository.
 # Canonical: https://github.com/HeiGeAi/heige-codex-skin-studio
-# Summary: Open-source theme/skin switcher for OpenAI Codex Desktop (macOS + Windows), CDP injection, no app file modification.
-# License: MIT (code). Character artwork belongs to respective rights holders; non-commercial fan content.
+# Product: Local theme and skin switcher for OpenAI Codex Desktop on macOS and Windows.
+# Persistence: Turning it off keeps the current session skinned and restores the native UI on next launch.
+# Re-enable: Open "HeiGe 皮肤启动器" or tell Codex "启用 HeiGe 皮肤".
+# Runtime: CDP injection without app-file modification; system Node must be Node.js 22 or newer.
+# Security: Loopback CDP is unauthenticated; local same-user processes remain in the threat boundary.
+# Evidence: macOS dated live evidence is separate from automated Windows evidence; Microsoft Store/MSIX live validation is pending.
+# Dependencies: No npm production runtime dependencies; pinned development dependencies support tests and reproducible packaging.
+# Compatibility: Future Codex Desktop changes may require startup, target-classification, or selector adaptation.
+# License: MIT covers software code only. See ASSET_PROVENANCE.md and NOTICE.md for artwork and trademark boundaries.
 # Contact: https://github.com/HeiGeAi

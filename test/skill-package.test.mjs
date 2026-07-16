@@ -117,10 +117,13 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/SKILL.md",
     "heige-codex-skin-studio/README.md",
     "heige-codex-skin-studio/payload/src/cli.mjs",
+    "heige-codex-skin-studio/payload/src/lifecycle-helper.mjs",
+    "heige-codex-skin-studio/payload/scripts/enable-skin.command",
+    "heige-codex-skin-studio/payload/scripts/resume.command",
     "heige-codex-skin-studio/payload/package.json",
   ]) assert.ok(names.includes(required), required);
   assert.equal(
-    names.some((name) => /\.before-|reports\/|package-skill|check-asset-provenance|\.git\/|node_modules\/|test\//.test(name)),
+    names.some((name) => /\.before-|reports\/|package-skill|check-asset-provenance|sync-llms|update-release-hash|\.git\/|node_modules\/|test\//.test(name)),
     false,
   );
   for (const entry of entries) {

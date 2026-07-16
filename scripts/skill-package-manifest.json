@@ -45,7 +45,9 @@
         "check-asset-provenance.mjs",
         "package-skill.command",
         "package-skill.mjs",
-        "skill-package-manifest.json"
+        "skill-package-manifest.json",
+        "sync-llms.mjs",
+        "update-release-hash.mjs"
       ]
     },
     {
