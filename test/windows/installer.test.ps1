@@ -66,12 +66,40 @@ try {
         Assert-True ($prepare -gt $skeleton) "participant preparation precedes the durable skeleton"
     }
 
-    Test-Case "Installer has one artifact commit decision and write-through replacement" {
+    Test-Case "Installer has one artifact commit decision, write-through staging, and native replacement" {
         $commits = [regex]::Matches($script:InstallerSource, '-Decision\s+"commit"')
         Assert-Equal 1 $commits.Count
         Assert-Match '\$stream\.Flush\(\$true\)' $script:InstallerSource
         Assert-Match '\[System\.IO\.FileOptions\]::WriteThrough' $script:InstallerSource
-        Assert-Match '\[System\.IO\.File\]::Replace' $script:InstallerSource
+        Assert-Match 'ReplaceFileW' $script:InstallerSource
+        Assert-Match 'ReplaceFileWithoutBackup' $script:InstallerSource
+        Assert-Match '0x00000000' $script:InstallerSource
+        Assert-False ($script:InstallerSource -match 'MoveFileExW')
+        Assert-False ($script:InstallerSource -match '\[System\.IO\.File\]::Replace\([^)]*\$null')
+    }
+
+    Test-Case "Journal replacement works without an empty backup path" {
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) `
+            ("heige journal 替换 " + [guid]::NewGuid().ToString("N"))
+        $path = Join-Path $root "install.json"
+        try {
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            Write-HeiGeInstallJournal -Path $path -Document ([ordered]@{ Revision = 1 }) -Exclusive
+            Write-HeiGeInstallJournal -Path $path -Document ([ordered]@{ Revision = 2 })
+            Write-HeiGeInstallJournal -Path $path -Document ([ordered]@{ Revision = 3 })
+            $document = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+            Assert-Equal 3 ([int]$document.Revision)
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $root -Filter "*.next.*").Count
+
+            $source = Join-Path $root "missing-destination.next"
+            $missing = Join-Path $root "missing-destination.json"
+            [System.IO.File]::WriteAllText($source, "{}")
+            Assert-Throws {
+                Replace-HeiGeInstallJournalAtomic -Source $source -Destination $missing
+            } "Win32 error"
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Test-Case "Abandoned mutex notification retains acquired ownership" {

@@ -15,6 +15,59 @@ $ErrorActionPreference = "Stop"
 $script:HeiGeInstallProduct = "heige-codex-skin-studio"
 $script:HeiGeInstallJournalLimit = 131072
 
+if (-not ("HeiGeInstallNativeMethodsV1" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+
+public static class HeiGeInstallNativeMethodsV1
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReplaceFileW(
+        string replacedFileName,
+        string replacementFileName,
+        string backupFileName,
+        uint replaceFlags,
+        System.IntPtr exclude,
+        System.IntPtr reserved
+    );
+
+    public static bool ReplaceFileWithoutBackup(
+        string replacedFileName,
+        string replacementFileName,
+        uint replaceFlags
+    )
+    {
+        return ReplaceFileW(
+            replacedFileName,
+            replacementFileName,
+            null,
+            replaceFlags,
+            System.IntPtr.Zero,
+            System.IntPtr.Zero
+        );
+    }
+}
+'@ | Out-Null
+}
+
+function Replace-HeiGeInstallJournalAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $flags = [uint32]0x00000000
+    if (-not [HeiGeInstallNativeMethodsV1]::ReplaceFileWithoutBackup(
+        $Destination,
+        $Source,
+        $flags
+    )) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $message = (New-Object System.ComponentModel.Win32Exception -ArgumentList $code).Message
+        throw "Windows install journal atomic replacement failed with Win32 error $code`: $message"
+    }
+}
+
 function Get-HeiGeInstallAbsolutePath {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -90,7 +143,7 @@ function Write-HeiGeInstallJournal {
             if (-not [System.IO.File]::Exists($Path)) {
                 throw "Windows install journal disappeared before atomic update"
             }
-            [System.IO.File]::Replace($temporary, $Path, $null, $true)
+            Replace-HeiGeInstallJournalAtomic -Source $temporary -Destination $Path
         }
     } finally {
         if ($stream) { $stream.Dispose() }

@@ -51,7 +51,11 @@ test("Windows artifact journal precedes every stage and owns the only commit dec
   assert.equal(installer.match(/-Decision\s+"commit"/g)?.length, 1);
   assert.match(installer, /FileOptions\]::WriteThrough/);
   assert.match(installer, /\.Flush\(\$true\)/);
-  assert.match(installer, /\[System\.IO\.File\]::Replace/);
+  assert.match(installer, /ReplaceFileW/);
+  assert.match(installer, /ReplaceFileWithoutBackup/);
+  assert.match(installer, /0x00000000/);
+  assert.doesNotMatch(installer, /MoveFileExW/);
+  assert.doesNotMatch(installer, /\[System\.IO\.File\]::Replace\([^)]*\$null/);
 });
 
 test("Windows recovery is reverse before commit and roll-forward after commit", async () => {
