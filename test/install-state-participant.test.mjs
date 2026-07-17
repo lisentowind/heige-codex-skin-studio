@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { DEFAULT_THEME_ID } from "../src/constants.mjs";
+import { DEFAULT_THEME_ID, NATIVE_THEME_ID } from "../src/constants.mjs";
 import { acquireOperationLock } from "../src/operation-lock.mjs";
 import {
   finalizeInstallStateParticipant,
@@ -107,6 +107,106 @@ test("loaded legacy watchdog is prepared as persistent without early publication
   assert.equal(participant.afterState.selectedThemeId, "miku-488137");
   assert.equal(participant.afterState.persistenceEnabled, true);
   assert.equal(participant.afterState.revision, 1);
+});
+
+test("loaded legacy watchdog migrates the unanimous active renderer theme over the stale file", async (t) => {
+  const { lease, statePath, legacyThemePath } = await fixture(t);
+  await writeFile(legacyThemePath, "miku-488137\n", { mode: 0o600 });
+  const participant = await prepareInstallStateParticipant({
+    transactionId: TRANSACTION_ID,
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: true,
+    observedLegacyThemeId: "dalao-dianyan",
+    themeExists: async (themeId) => (
+      themeId === "miku-488137" || themeId === "dalao-dianyan"
+    ),
+    randomBytes: () => Buffer.alloc(32, 17),
+  });
+
+  assert.equal(await readStudioState(statePath), null);
+  assert.equal(participant.afterState.persistenceEnabled, true);
+  assert.equal(participant.afterState.selectedThemeId, "dalao-dianyan");
+  assert.equal(participant.afterState.lastNonNativeThemeId, "dalao-dianyan");
+});
+
+test("loaded legacy watchdog preserves unanimous native while retaining the file as last non-native", async (t) => {
+  const { lease, statePath, legacyThemePath } = await fixture(t);
+  await writeFile(legacyThemePath, "miku-488137\n", { mode: 0o600 });
+  const participant = await prepareInstallStateParticipant({
+    transactionId: TRANSACTION_ID,
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: true,
+    observedLegacyThemeId: NATIVE_THEME_ID,
+    themeExists: async (themeId) => themeId === "miku-488137",
+    randomBytes: () => Buffer.alloc(32, 18),
+  });
+
+  assert.equal(await readStudioState(statePath), null);
+  assert.equal(participant.afterState.persistenceEnabled, true);
+  assert.equal(participant.afterState.selectedThemeId, NATIVE_THEME_ID);
+  assert.equal(participant.afterState.lastNonNativeThemeId, "miku-488137");
+});
+
+test("observed formal renderer selection applies without enabling persistence when no watchdog is loaded", async (t) => {
+  const { lease, statePath, legacyThemePath } = await fixture(t);
+  const participant = await prepareInstallStateParticipant({
+    transactionId: TRANSACTION_ID,
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: false,
+    observedLegacyThemeId: "dalao-dianyan",
+    themeExists: async (themeId) => (
+      themeId === DEFAULT_THEME_ID || themeId === "dalao-dianyan"
+    ),
+    randomBytes: () => Buffer.alloc(32, 19),
+  });
+
+  assert.equal(participant.afterState.persistenceEnabled, false);
+  assert.equal(participant.afterState.revision, 0);
+  assert.equal(participant.afterState.selectedThemeId, "dalao-dianyan");
+  assert.equal(participant.afterState.lastNonNativeThemeId, "dalao-dianyan");
+});
+
+test("trusted formal renderer selection does not require a readable legacy theme file", async (t) => {
+  const { lease, statePath, legacyThemePath } = await fixture(t);
+  const participant = await prepareInstallStateParticipant({
+    transactionId: TRANSACTION_ID,
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: true,
+    observedLegacyThemeId: "dalao-dianyan",
+    themeExists: async (themeId) => themeId === "dalao-dianyan",
+    randomBytes: () => Buffer.alloc(32, 20),
+  });
+
+  assert.equal(participant.afterState.persistenceEnabled, true);
+  assert.equal(participant.afterState.selectedThemeId, "dalao-dianyan");
+  assert.equal(participant.afterState.lastNonNativeThemeId, "dalao-dianyan");
+});
+
+test("trusted native renderer selection falls back to the default last non-native when legacy file is unusable", async (t) => {
+  const { lease, statePath, legacyThemePath } = await fixture(t);
+  await writeFile(legacyThemePath, "not a valid theme id!\n", { mode: 0o600 });
+  const participant = await prepareInstallStateParticipant({
+    transactionId: TRANSACTION_ID,
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: true,
+    observedLegacyThemeId: NATIVE_THEME_ID,
+    themeExists: async (themeId) => themeId === DEFAULT_THEME_ID,
+    randomBytes: () => Buffer.alloc(32, 21),
+  });
+
+  assert.equal(participant.afterState.persistenceEnabled, true);
+  assert.equal(participant.afterState.selectedThemeId, NATIVE_THEME_ID);
+  assert.equal(participant.afterState.lastNonNativeThemeId, DEFAULT_THEME_ID);
 });
 
 test("install state descriptor rejects unknown fields and path rebinding", async (t) => {

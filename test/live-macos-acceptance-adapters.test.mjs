@@ -17,10 +17,14 @@ import {
   quiesceCodexForAppRepair,
   readLiveAcceptanceJournal,
   recordPreMutationFailure,
+  revalidatedInitialChoice,
+  resolveRecoveryTheme,
   runAppRepairRollbackThenClean,
   runCrashRecoveryCycle,
   runInstallerRollbackThenClean,
   runOptionOneLifecycle,
+  runProductionRollbackThenClean,
+  safeFailure,
   selectOfficialStage,
   setPersistenceViaMenu,
   snapshotKnownInstallArtifacts,
@@ -59,6 +63,63 @@ function identity(overrides = {}) {
   };
 }
 
+function legacyLivePreflight(overrides = {}) {
+  const appIdentity = identity();
+  return {
+    app: {
+      stage: {
+        path: "/Applications/.ChatGPT.app.heige-official-stage-a",
+        identity: appIdentity,
+      },
+    },
+    legacy: { loaded: true },
+    existingController: {
+      present: true,
+      loaded: true,
+      attribution: "legacy-hermes",
+      running: false,
+    },
+    legacyTheme: { themeId: "miku-488137" },
+    schema2: { present: false },
+    rendererSelection: {
+      kind: "formal",
+      mode: "active",
+      themeId: "genshin-night",
+      selectedThemeId: "genshin-night",
+      targetIds: ["main-1"],
+    },
+    ...overrides,
+  };
+}
+
+async function captureInstallerInitialChoice(preflight) {
+  const marker = new Error("captured installer choice");
+  let captured;
+  await assert.rejects(
+    runProductionRollbackThenClean({
+      preflight,
+      home: "/Users/example",
+      adapters: {
+        appPhase: async () => ({ status: "PASS" }),
+        launchOfficialCdp: async () => ({
+          appIdentity: preflight.app.stage.identity,
+          process: {
+            pid: 4242,
+            executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+            startedAt: "Fri Jul 17 09:00:00 2026",
+          },
+        }),
+        installerPhase: async (input) => {
+          captured = input;
+          throw marker;
+        },
+      },
+    }),
+    (error) => error === marker,
+  );
+  return captured;
+}
+
 test("live mutation needs both the opt-in and exact sequence", () => {
   assert.equal(parseLiveConfiguration({}).enabled, false);
   assert.equal(parseLiveConfiguration({ HEIGE_RUN_LIVE_MACOS: "1", HEIGE_LIVE_PREFLIGHT_ONLY: "1" }).mode, "preflight");
@@ -71,6 +132,159 @@ test("live mutation needs both the opt-in and exact sequence", () => {
     HEIGE_LIVE_SEQUENCE: "rollback-then-clean",
   });
   assert.equal(config.mode, "mutation");
+});
+
+test("legacy migration follows the unanimous formal renderer instead of a stale legacy theme file", async () => {
+  const captured = await captureInstallerInitialChoice(legacyLivePreflight());
+  assert.equal(captured.initialThemeId, "genshin-night");
+});
+
+test("schema 2 remains authoritative over a divergent renderer observation", () => {
+  const choice = revalidatedInitialChoice(legacyLivePreflight({
+    schema2: {
+      present: true,
+      persistenceEnabled: true,
+      selectedThemeId: "miku-488137",
+      lastNonNativeThemeId: "miku-488137",
+    },
+  }));
+  assert.deepEqual(choice, {
+    persistenceEnabled: true,
+    themeId: "miku-488137",
+    lastNonNativeThemeId: "miku-488137",
+  });
+});
+
+test("a native renderer fails before the formal-theme lifecycle can mutate", () => {
+  assert.throws(() => revalidatedInitialChoice(legacyLivePreflight({
+    rendererSelection: {
+      kind: "native",
+      mode: "native",
+      themeId: null,
+      selectedThemeId: "__heige_native__",
+      targetIds: ["main-1"],
+    },
+  })), /active formal renderer/);
+});
+
+test("renderer preflight audit accepts only complete unanimous formal or native observations", async () => {
+  const live = await import("./live-macos-acceptance.mjs");
+  assert.equal(typeof live.auditRendererPreflight, "function");
+  const targets = [{ id: "main-1" }, { id: "main-2" }];
+  const formal = (id) => ({
+    id,
+    origin: "app://-",
+    generation: null,
+    menuPresent: true,
+    stylePresent: true,
+    mode: "active",
+    runtimeThemeId: "genshin-night",
+    datasetThemeId: "genshin-night",
+    storedThemeId: "genshin-night",
+  });
+  assert.deepEqual(live.auditRendererPreflight({
+    mainTargets: targets,
+    observations: targets.map(({ id }) => formal(id)),
+    formalThemeIds: ["miku-488137", "genshin-night"],
+  }).rendererSelection, {
+    kind: "formal",
+    mode: "active",
+    themeId: "genshin-night",
+    selectedThemeId: "genshin-night",
+    targetIds: ["main-1", "main-2"],
+  });
+  const native = (id) => ({
+    id,
+    origin: "app://-",
+    generation: "a".repeat(32),
+    menuPresent: true,
+    stylePresent: false,
+    mode: "native",
+    runtimeThemeId: null,
+    datasetThemeId: null,
+    storedThemeId: "__heige_native__",
+  });
+  assert.equal(live.auditRendererPreflight({
+    mainTargets: targets,
+    observations: targets.map(({ id }) => native(id)),
+    formalThemeIds: ["miku-488137", "genshin-night"],
+  }).rendererSelection.selectedThemeId, "__heige_native__");
+  assert.throws(() => live.auditRendererPreflight({
+    mainTargets: targets,
+    observations: [formal("main-1")],
+    formalThemeIds: ["genshin-night"],
+  }), /partial|完整|数量/);
+  assert.throws(() => live.auditRendererPreflight({
+    mainTargets: targets,
+    observations: [formal("main-1"), native("main-2")],
+    formalThemeIds: ["genshin-night"],
+  }), /一致/);
+  assert.deepEqual(live.auditRendererPreflight({
+    mainTargets: targets,
+    observations: [
+      formal("main-1"),
+      { ...formal("main-2"), generation: "a".repeat(32) },
+    ],
+    formalThemeIds: ["genshin-night"],
+  }).rendererGenerations, {
+    "main-1": null,
+    "main-2": "a".repeat(32),
+  });
+  for (const invalidThemeId of ["__heige_custom__", "unknown-theme"]) {
+    assert.throws(() => live.auditRendererPreflight({
+      mainTargets: [{ id: "main-1" }],
+      observations: [{
+        ...formal("main-1"),
+        runtimeThemeId: invalidThemeId,
+        datasetThemeId: invalidThemeId,
+        storedThemeId: invalidThemeId,
+      }],
+      formalThemeIds: ["genshin-night"],
+    }), /formal|主题/);
+  }
+});
+
+test("schema 1 recovery uses the verified live renderer when its journal theme is stale", () => {
+  assert.deepEqual(resolveRecoveryTheme({
+    journalThemeId: "miku-488137",
+    state: null,
+    rendererSelection: {
+      kind: "formal",
+      mode: "active",
+      themeId: "genshin-night",
+      selectedThemeId: "genshin-night",
+      targetIds: ["main-1"],
+    },
+  }), {
+    source: "renderer",
+    journalThemeId: "miku-488137",
+    effectiveThemeId: "genshin-night",
+    diverged: true,
+  });
+  assert.deepEqual(resolveRecoveryTheme({
+    journalThemeId: "miku-488137",
+    state: { selectedThemeId: "dalao-dianyan" },
+    rendererSelection: null,
+  }), {
+    source: "state",
+    journalThemeId: "miku-488137",
+    effectiveThemeId: "dalao-dianyan",
+    diverged: true,
+  });
+});
+
+test("failure evidence keeps bounded nested aggregate causes", () => {
+  const leaf = Object.assign(new Error("exact post-rollback verifier failed"), {
+    code: "POST_ROLLBACK_VERIFY_FAILED",
+  });
+  const failure = safeFailure(new AggregateError(
+    [new Error("worker exited"), new AggregateError([leaf], "restore failed")],
+    "macOS installer crash recovery did not finish",
+  ));
+  assert.equal(failure.message, "macOS installer crash recovery did not finish");
+  assert.equal(failure.causes.length, 2);
+  assert.equal(failure.causes[1].causes[0].code, "POST_ROLLBACK_VERIFY_FAILED");
+  assert.equal(failure.causes[1].causes[0].message, "exact post-rollback verifier failed");
 });
 
 test("Codex launches with a fixed environment that cannot inherit live test gates", () => {
@@ -485,7 +699,11 @@ test("installer crash cycle revalidates the exact non-running legacy controller 
       spawnCrashWorker: async () => { calls.push("worker"); return { code: null, signal: "SIGKILL" }; },
       recover: async () => { calls.push("recover"); return { recovered: true, decision: "rollback" }; },
       inspectProcess: async () => ({ process }),
-      inspectRenderer: async () => ({ menuPresent: true, themeId: "miku-488137" }),
+      inspectRenderer: async () => ({
+        menuPresent: true,
+        stylePresent: true,
+        themeId: "miku-488137",
+      }),
       install: async () => { calls.push("install"); return { decision: "commit" }; },
     },
   });
@@ -818,6 +1036,9 @@ test("durable live journal preserves the initial choice for parent hard-crash re
   await writeFile(path, `${JSON.stringify(journal)}\n`, { mode: 0o600 });
   await chmod(path, 0o600);
   assert.deepEqual(await readLiveAcceptanceJournal({ home }), journal);
+  const nativeJournal = { ...journal, initialThemeId: "__heige_native__" };
+  await writeFile(path, `${JSON.stringify(nativeJournal)}\n`, { mode: 0o600 });
+  assert.deepEqual(await readLiveAcceptanceJournal({ home }), nativeJournal);
   await chmod(path, 0o644);
   await assert.rejects(readLiveAcceptanceJournal({ home }), /mode 0600/);
 });

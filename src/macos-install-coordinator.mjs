@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { DEFAULT_CDP_PORT, resolveStudioPaths } from "./constants.mjs";
+import { resolveCodexApp, sameProcessIdentity } from "./codex-app.mjs";
+import { DEFAULT_CDP_PORT, NATIVE_THEME_ID, resolveStudioPaths } from "./constants.mjs";
+import { skinStatus } from "./injector.mjs";
 import {
   acquireInstallTreeParticipantLock,
   finalizeInstallTree,
@@ -32,6 +34,7 @@ import {
   recoverMacosLauncherPreparationUnderLock,
   rollbackMacosLauncher,
 } from "./macos-launcher.mjs";
+import { readMacCdpProcess } from "./lifecycle-helper.mjs";
 import { withOperationLock } from "./operation-lock.mjs";
 import {
   finalizeInstallStateParticipant,
@@ -39,12 +42,117 @@ import {
   publishInstallStateParticipant,
   rollbackInstallStateParticipant,
 } from "./state-store.mjs";
+import { loadTheme } from "./theme-schema.mjs";
 import { listThemes } from "./theme-store.mjs";
 
 const execFile = promisify(execFileCallback);
+const RENDERER_GENERATION = /^[0-9a-f]{32}$/;
+const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function exactObject(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function rendererObservation(status) {
+  try {
+    const statuses = status?.statuses;
+    const failed = status?.failed;
+    const succeeded = status?.results?.succeeded;
+    const resultFailed = status?.results?.failed;
+    if (
+      !Array.isArray(statuses)
+      || statuses.length === 0
+      || !Array.isArray(failed)
+      || failed.length !== 0
+      || !Array.isArray(succeeded)
+      || succeeded.length !== statuses.length
+      || !Array.isArray(resultFailed)
+      || resultFailed.length !== 0
+    ) return null;
+    const ids = new Set();
+    const renderers = [];
+    const selections = [];
+    for (let index = 0; index < succeeded.length; index += 1) {
+      const entry = succeeded[index];
+      const value = entry?.value;
+      if (
+        entry?.kind !== "main"
+        || entry?.url !== "app://-/index.html"
+        || typeof entry?.id !== "string"
+        || entry.id.length === 0
+        || entry.id.length > 512
+        || ids.has(entry.id)
+        || !exactObject(value, statuses[index])
+        || value?.installed !== true
+        || value?.menu !== true
+        || typeof value?.persistenceEnabled !== "boolean"
+        || !Number.isSafeInteger(value?.revision)
+        || value.revision < 0
+        || !(
+          value.generation === null
+          || (typeof value.generation === "string" && RENDERER_GENERATION.test(value.generation))
+        )
+      ) return null;
+      let selection;
+      if (
+        value.mode === "native"
+        && (value.themeId === null || value.themeId === NATIVE_THEME_ID)
+      ) {
+        selection = NATIVE_THEME_ID;
+      } else if (
+        value.mode === "active"
+        && typeof value.themeId === "string"
+        && THEME_ID.test(value.themeId)
+      ) {
+        selection = value.themeId;
+      } else {
+        return null;
+      }
+      ids.add(entry.id);
+      renderers.push({ id: entry.id, generation: value.generation });
+      selections.push(selection);
+    }
+    if (
+      !selections.every((selection) => selection === selections[0])
+    ) return null;
+    renderers.sort((left, right) => left.id.localeCompare(right.id));
+    return { renderers, selection: selections[0] };
+  } catch {
+    return null;
+  }
+}
+
+export async function observeLegacyRendererSelection({
+  readProcess,
+  readStatus,
+  validateThemeSelection,
+} = {}) {
+  if (
+    typeof readProcess !== "function"
+    || typeof readStatus !== "function"
+    || typeof validateThemeSelection !== "function"
+  ) {
+    throw new TypeError("legacy renderer observation dependencies are required");
+  }
+  try {
+    const before = await readProcess();
+    const first = rendererObservation(await readStatus());
+    const second = rendererObservation(await readStatus());
+    const after = await readProcess();
+    if (
+      first === null
+      || second === null
+      || !sameProcessIdentity(before, after)
+      || !exactObject(first, second)
+    ) return null;
+    if (
+      first.selection !== NATIVE_THEME_ID
+      && await validateThemeSelection(first.selection) !== true
+    ) return null;
+    return first.selection;
+  } catch {
+    return null;
+  }
 }
 
 function assertDependencies(dependencies) {
@@ -61,6 +169,7 @@ function assertDependencies(dependencies) {
     "finalizeLauncher",
     "finalizeState",
     "finalizeTree",
+    "inspectRendererSelection",
     "inspectServices",
     "prepareFreeze",
     "prepareLauncher",
@@ -188,6 +297,13 @@ async function createFreshInstall(input, deps, launcherLock) {
   try {
     await deps.checkpoint("skeleton", journal);
     const services = await deps.inspectServices();
+    const inspectRendererSelection = async () => {
+      try {
+        return await deps.inspectRendererSelection({ port: input.port });
+      } catch {
+        return null;
+      }
+    };
     const tree = await deps.prepareTree({
       sourceRoot: input.sourceRoot,
       targetRoot: input.targetRoot,
@@ -212,9 +328,13 @@ async function createFreshInstall(input, deps, launcherLock) {
     });
     await deps.checkpoint("launcher-prepared", journal);
 
+    const observedLegacyThemeId = await inspectRendererSelection();
     const state = await deps.prepareState({
       transactionId: journal.transactionId,
       legacyAgentLoaded: services.legacyLoaded === true,
+      ...(observedLegacyThemeId !== null || services.legacyLoaded === true
+        ? { observedLegacyThemeId }
+        : {}),
     });
     journal = await update(deps, journal, {
       phase: "state-prepared",
@@ -237,6 +357,14 @@ async function createFreshInstall(input, deps, launcherLock) {
       frozen?.transaction !== null &&
       !exactObject(frozen?.transaction, freezeDescriptor)
     ) throw new Error("stable service freeze returned a mismatched transaction descriptor");
+    if (
+      typeof frozen?.legacyLoadedBefore === "boolean"
+      && frozen.legacyLoadedBefore !== (services.legacyLoaded === true)
+    ) throw new Error("legacy watchdog loaded state changed before service freeze");
+    const frozenRendererSelection = await inspectRendererSelection();
+    if (frozenRendererSelection !== observedLegacyThemeId) {
+      throw new Error("renderer selection changed before service freeze completed");
+    }
     journal = await update(deps, journal, { phase: "services-frozen" });
     await deps.checkpoint("services-frozen", journal);
 
@@ -401,6 +529,16 @@ export async function productionMacosInstallDependencies({
   const themes = async () => listThemes({
     roots: [join(sourceRoot, "themes"), join(stateRoot, "themes")],
   });
+  const fullyValidatedThemeExists = async (themeId) => {
+    const selected = (await themes()).find((theme) => theme.id === themeId);
+    if (selected === undefined) return false;
+    try {
+      const loaded = await loadTheme(selected.path);
+      return loaded.manifest.id === themeId;
+    } catch {
+      return false;
+    }
+  };
   const dependencies = {
     journalPath,
     randomUUID,
@@ -445,7 +583,7 @@ export async function productionMacosInstallDependencies({
         statePath,
         lease,
         legacyThemePath: join(home, ".codex", "heige-codex-skin-persist", "theme"),
-        themeExists: async (themeId) => (await themes()).some((theme) => theme.id === themeId),
+        themeExists: fullyValidatedThemeExists,
       }),
     ),
     publishState: (participant) => withStateLease(
@@ -472,6 +610,14 @@ export async function productionMacosInstallDependencies({
         legacyPresent: legacy.plistExists === true,
       };
     },
+    inspectRendererSelection: ({ port }) => observeLegacyRendererSelection({
+      readProcess: async () => {
+        const app = await resolveCodexApp({ home, platform: "darwin" });
+        return readMacCdpProcess({ appPath: app.appPath, port });
+      },
+      readStatus: () => skinStatus({ port }),
+      validateThemeSelection: fullyValidatedThemeExists,
+    }),
     createFreezeDescriptor: launchAgent.createStableServiceFreezeDescriptor,
     prepareFreeze: launchAgent.prepareStableServiceFreeze,
     stopFreezeForRollback: async (descriptor) => {

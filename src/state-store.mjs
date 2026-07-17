@@ -584,56 +584,89 @@ function generateControlToken(randomBytes) {
   return Buffer.from(entropy).toString("base64url");
 }
 
+async function readLegacyThemeId(legacyThemePath, themeExists) {
+  let legacyTheme;
+  try {
+    await verifyDirectoryAncestors(dirname(legacyThemePath));
+    const snapshot = await readBoundedFile(legacyThemePath, {
+      maxBytes: MAX_LEGACY_THEME_BYTES,
+      label: "旧版主题记录",
+    });
+    legacyTheme = UTF8_DECODER.decode(snapshot.bytes);
+  } catch (cause) {
+    throw new Error(
+      `旧版主题状态无效：主题文件必须是不超过 ${MAX_LEGACY_THEME_BYTES} bytes 的普通文件且不得是符号链接`,
+      { cause },
+    );
+  }
+  const themeId = legacyTheme.trim();
+  try {
+    validateThemeId(themeId, { field: "旧版主题 ID" });
+  } catch (cause) {
+    throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
+  }
+  if (await themeExists(themeId) !== true) {
+    throw new Error("旧版主题状态无效：主题不存在");
+  }
+  return themeId;
+}
+
+async function requiredDefaultThemeId(defaultThemeId, themeExists) {
+  validateThemeId(defaultThemeId, { field: "默认主题 ID" });
+  if (await themeExists(defaultThemeId) !== true) {
+    throw new Error("默认主题不存在，拒绝创建状态");
+  }
+  return defaultThemeId;
+}
+
 async function legacyStateCandidate({
   legacyThemePath,
   legacyAgentLoaded,
+  observedLegacyThemeId = null,
   themeExists,
   defaultThemeId,
   randomBytes,
 }) {
-  let themeId = defaultThemeId;
-  let persistenceEnabled = false;
-  let migratedFrom = null;
-  if (legacyAgentLoaded) {
-    let legacyTheme;
+  let observed = null;
+  if (observedLegacyThemeId !== null) {
+    const candidate = validateThemeId(observedLegacyThemeId, {
+      allowNative: true,
+      field: "旧版 renderer 主题 ID",
+    });
+    if (candidate === NATIVE_THEME_ID || await themeExists(candidate) === true) {
+      observed = candidate;
+    }
+  }
+
+  let selectedThemeId;
+  let lastNonNativeThemeId;
+  if (observed !== null && observed !== NATIVE_THEME_ID) {
+    selectedThemeId = observed;
+    lastNonNativeThemeId = observed;
+  } else if (observed === NATIVE_THEME_ID) {
+    selectedThemeId = NATIVE_THEME_ID;
     try {
-      await verifyDirectoryAncestors(dirname(legacyThemePath));
-      const snapshot = await readBoundedFile(legacyThemePath, {
-        maxBytes: MAX_LEGACY_THEME_BYTES,
-        label: "旧版主题记录",
-      });
-      legacyTheme = UTF8_DECODER.decode(snapshot.bytes);
-    } catch (cause) {
-      throw new Error(
-        `旧版主题状态无效：主题文件必须是不超过 ${MAX_LEGACY_THEME_BYTES} bytes 的普通文件且不得是符号链接`,
-        { cause },
-      );
+      lastNonNativeThemeId = await readLegacyThemeId(legacyThemePath, themeExists);
+    } catch {
+      lastNonNativeThemeId = await requiredDefaultThemeId(defaultThemeId, themeExists);
     }
-    themeId = legacyTheme.trim();
-    try {
-      validateThemeId(themeId, { field: "旧版主题 ID" });
-    } catch (cause) {
-      throw new Error("旧版主题状态无效：主题 ID 格式错误", { cause });
-    }
-    if (await themeExists(themeId) !== true) {
-      throw new Error("旧版主题状态无效：主题不存在");
-    }
-    persistenceEnabled = true;
-    migratedFrom = "watchdog";
+  } else if (legacyAgentLoaded) {
+    selectedThemeId = await readLegacyThemeId(legacyThemePath, themeExists);
+    lastNonNativeThemeId = selectedThemeId;
   } else {
-    validateThemeId(themeId, { field: "默认主题 ID" });
-    if (await themeExists(themeId) !== true) {
-      throw new Error("默认主题不存在，拒绝创建状态");
-    }
+    selectedThemeId = await requiredDefaultThemeId(defaultThemeId, themeExists);
+    lastNonNativeThemeId = selectedThemeId;
   }
 
   const token = generateControlToken(randomBytes);
   return {
-    migratedFrom,
+    migratedFrom: legacyAgentLoaded ? "watchdog" : null,
     state: validateStudioState({
-      ...createDefaultStudioState({ themeId, token }),
-      persistenceEnabled,
-      revision: persistenceEnabled ? 1 : 0,
+      ...createDefaultStudioState({ themeId: lastNonNativeThemeId, token }),
+      selectedThemeId,
+      lastNonNativeThemeId,
+      persistenceEnabled: legacyAgentLoaded,
+      revision: legacyAgentLoaded ? 1 : 0,
     }),
   };
 }
@@ -693,6 +726,7 @@ export async function prepareInstallStateParticipant({
   lease,
   legacyThemePath,
   legacyAgentLoaded,
+  observedLegacyThemeId = null,
   themeExists,
   defaultThemeId = DEFAULT_THEME_ID,
   randomBytes = cryptoRandomBytes,
@@ -710,6 +744,7 @@ export async function prepareInstallStateParticipant({
     ? await legacyStateCandidate({
       legacyThemePath,
       legacyAgentLoaded,
+      observedLegacyThemeId,
       themeExists,
       defaultThemeId,
       randomBytes,
@@ -776,6 +811,7 @@ export async function migrateLegacyState({
   lease,
   legacyThemePath,
   legacyAgentLoaded,
+  observedLegacyThemeId = null,
   themeExists,
   defaultThemeId = DEFAULT_THEME_ID,
   randomBytes = cryptoRandomBytes,
@@ -795,6 +831,7 @@ export async function migrateLegacyState({
     const { state, migratedFrom } = await legacyStateCandidate({
       legacyThemePath,
       legacyAgentLoaded,
+      observedLegacyThemeId,
       themeExists,
       defaultThemeId,
       randomBytes,

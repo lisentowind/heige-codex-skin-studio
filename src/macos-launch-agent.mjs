@@ -2911,7 +2911,13 @@ export async function prepareStableServiceFreeze(input = {}) {
     await assertLegacyAttribution(options, watchdogPlistPath, plist, watchdogLabel);
   }
   if (controllerSnapshot === null && watchdogSnapshot === null) {
-    return { servicesFound: false, servicesFrozen: 0, transaction: null };
+    return {
+      controllerLoadedBefore: false,
+      legacyLoadedBefore: false,
+      servicesFound: false,
+      servicesFrozen: 0,
+      transaction: null,
+    };
   }
   await assertSnapshotCurrent(options.fs, controllerPlistPath, controllerSnapshot);
   await assertSnapshotCurrent(options.fs, watchdogPlistPath, watchdogSnapshot);
@@ -2981,6 +2987,8 @@ export async function prepareStableServiceFreeze(input = {}) {
       inject(options, phase);
     }
     return {
+      controllerLoadedBefore: controllerJob.loaded,
+      legacyLoadedBefore: watchdogJob.loaded,
       servicesFound: true,
       servicesFrozen: frozen.length,
       transaction: freezeDescriptor({

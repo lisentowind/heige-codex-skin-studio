@@ -39,7 +39,7 @@ import {
   runProductionMacosInstall,
   runProductionMacosInstallRecovery,
 } from "../src/macos-install-coordinator.mjs";
-import { resolveStudioPaths } from "../src/constants.mjs";
+import { NATIVE_THEME_ID, resolveStudioPaths } from "../src/constants.mjs";
 import {
   readMacCdpProcess,
   requestNormalQuit,
@@ -59,6 +59,7 @@ import { readProcessIdentity as readPosixProcessIdentity } from "../src/process-
 import { withOperationLock } from "../src/operation-lock.mjs";
 import { readStudioState } from "../src/state-store.mjs";
 import { classifyCodexTargets } from "../src/target-classifier.mjs";
+import { loadTheme } from "../src/theme-schema.mjs";
 import { listThemes } from "../src/theme-store.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -82,6 +83,8 @@ const MAX_WORKER_REQUEST_BYTES = 16 * 1024;
 const TRANSACTION_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const TRANSACTION_UUID_RE = new RegExp(`^${TRANSACTION_UUID}$`);
 const LIVE_JOURNAL_PHASES = new Set(["prepared", "running"]);
+const RENDERER_GENERATION = /^[0-9a-f]{32}$/;
+const FORMAL_THEME_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export function validateLiveWorkerRequest(value, {
   home = userInfo().homedir,
@@ -498,6 +501,12 @@ function markdownReport(result) {
     lines.push("", "## Recovery", "", `- status: ${result.recovery.status ?? "UNKNOWN"}`);
     for (const [name, action] of Object.entries(result.recovery.actions ?? {})) {
       lines.push(`- ${name}: ${action?.status ?? "UNKNOWN"}`);
+      if (name === "functionalMode" && action?.result?.themeRecovery?.diverged === true) {
+        lines.push(
+          `- journal theme: ${action.result.themeRecovery.journalThemeId}`,
+          `- effective renderer theme: ${action.result.themeRecovery.effectiveThemeId}`,
+        );
+      }
     }
     for (const failure of result.recovery.failures ?? []) {
       lines.push(`- failure ${failure.code ?? "UNKNOWN"}: ${failure.message ?? "unknown"}`);
@@ -533,11 +542,36 @@ export async function writeAcceptanceEvidence({
   };
 }
 
-function safeFailure(error) {
-  return {
+export function safeFailure(error, {
+  depth = 0,
+  seen = new Set(),
+} = {}) {
+  const message = typeof error?.message === "string" ? error.message : String(error);
+  const failure = {
     code: typeof error?.code === "string" ? error.code : "LIVE_ACCEPTANCE_FAILED",
-    message: typeof error?.message === "string" ? error.message : String(error),
+    message: message.slice(0, 1024),
   };
+  if (
+    error === null
+    || (typeof error !== "object" && typeof error !== "function")
+    || seen.has(error)
+    || depth >= 2
+  ) return failure;
+  const nextSeen = new Set(seen);
+  nextSeen.add(error);
+  let nested = [];
+  if (error instanceof AggregateError && Array.isArray(error.errors)) {
+    nested = error.errors;
+  } else if (error.cause !== undefined) {
+    nested = [error.cause];
+  }
+  if (nested.length > 0) {
+    failure.causes = nested.slice(0, 4).map((cause) => safeFailure(cause, {
+      depth: depth + 1,
+      seen: nextSeen,
+    }));
+  }
+  return failure;
 }
 
 export async function executeLiveAcceptance({
@@ -690,7 +724,7 @@ function validateLiveAcceptanceJournal(value) {
     || !LIVE_JOURNAL_PHASES.has(value.phase)
     || value.initialPersistenceEnabled !== true
     || typeof value.initialThemeId !== "string"
-    || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(value.initialThemeId)
+    || !(FORMAL_THEME_ID.test(value.initialThemeId) || value.initialThemeId === NATIVE_THEME_ID)
     || !Number.isFinite(Date.parse(value.createdAt))
     || !Number.isFinite(Date.parse(value.updatedAt))
   ) throw new Error("live acceptance durable journal is invalid");
@@ -1079,7 +1113,7 @@ async function waitForPersistenceMenu({
     try { return await inspectPersistenceMenu(session); } finally { session.close(); }
   }, (snapshot) => (
     snapshot.checked === persistenceEnabled
-    && snapshot.themeId === themeId
+    && (themeId === NATIVE_THEME_ID ? snapshot.themeId === null : snapshot.themeId === themeId)
   ), { label: "verified persistence menu" });
 }
 
@@ -1093,6 +1127,53 @@ async function rendererSkinSnapshot() {
       themeId: document.documentElement.dataset.heigeCodexSkin ?? null
     }))()`);
   } finally { session.close(); }
+}
+
+function rendererMatchesTheme(snapshot, themeId) {
+  return themeId === NATIVE_THEME_ID
+    ? snapshot?.themeId === null && snapshot.stylePresent === false
+    : snapshot?.themeId === themeId && snapshot.stylePresent === true;
+}
+
+export function resolveRecoveryTheme({
+  journalThemeId,
+  state,
+  rendererSelection,
+} = {}) {
+  if (
+    typeof journalThemeId !== "string"
+    || !(FORMAL_THEME_ID.test(journalThemeId) || journalThemeId === NATIVE_THEME_ID)
+  ) throw new Error("recovery journal theme is invalid");
+  let themeId;
+  let source;
+  if (state !== null && state !== undefined) {
+    themeId = state.selectedThemeId;
+    source = "state";
+  } else if (
+    rendererSelection?.kind === "formal"
+    && rendererSelection.mode === "active"
+    && rendererSelection.selectedThemeId === rendererSelection.themeId
+    && typeof rendererSelection.themeId === "string"
+  ) {
+    themeId = rendererSelection.themeId;
+    source = "renderer";
+  } else if (
+    rendererSelection?.kind === "native"
+    && rendererSelection.mode === "native"
+    && rendererSelection.themeId === null
+    && rendererSelection.selectedThemeId === NATIVE_THEME_ID
+  ) {
+    themeId = NATIVE_THEME_ID;
+    source = "renderer";
+  } else {
+    throw new Error("recovery has neither authoritative state nor a verified renderer selection");
+  }
+  return {
+    source,
+    journalThemeId,
+    effectiveThemeId: themeId,
+    diverged: themeId !== journalThemeId,
+  };
 }
 
 export async function setPersistenceViaMenu(session, enabled, {
@@ -2178,22 +2259,193 @@ async function discoverStageCandidates() {
     .map((entry) => join("/Applications", entry.name));
 }
 
-async function inspectRenderers() {
+export function auditRendererPreflight({
+  mainTargets,
+  observations,
+  formalThemeIds,
+} = {}) {
+  if (
+    !Array.isArray(mainTargets)
+    || mainTargets.length === 0
+    || !Array.isArray(observations)
+    || observations.length !== mainTargets.length
+    || !Array.isArray(formalThemeIds)
+  ) throw new Error("renderer preflight 数量不完整");
+  const expectedIds = mainTargets.map(({ id }) => id).sort();
+  if (
+    expectedIds.some((id) => typeof id !== "string" || id.length === 0)
+    || new Set(expectedIds).size !== expectedIds.length
+  ) throw new Error("renderer target identity 无效");
+  const allowedThemes = new Set(formalThemeIds);
+  const normalized = observations.map((value) => {
+    if (
+      value?.origin !== "app://-"
+      || typeof value.id !== "string"
+      || !expectedIds.includes(value.id)
+      || value.menuPresent !== true
+      || !(
+        value.generation === null
+        || (typeof value.generation === "string" && RENDERER_GENERATION.test(value.generation))
+      )
+    ) throw new Error("renderer observation identity 无效");
+    if (
+      value.mode === "native"
+      && value.stylePresent === false
+      && value.runtimeThemeId === null
+      && value.datasetThemeId === null
+      && value.storedThemeId === NATIVE_THEME_ID
+    ) {
+      return {
+        id: value.id,
+        generation: value.generation,
+        kind: "native",
+        mode: "native",
+        themeId: null,
+        selectedThemeId: NATIVE_THEME_ID,
+      };
+    }
+    if (
+      value.mode === "active"
+      && value.stylePresent === true
+      && typeof value.runtimeThemeId === "string"
+      && value.runtimeThemeId === value.datasetThemeId
+      && value.runtimeThemeId === value.storedThemeId
+      && FORMAL_THEME_ID.test(value.runtimeThemeId)
+      && allowedThemes.has(value.runtimeThemeId)
+    ) {
+      return {
+        id: value.id,
+        generation: value.generation,
+        kind: "formal",
+        mode: "active",
+        themeId: value.runtimeThemeId,
+        selectedThemeId: value.runtimeThemeId,
+      };
+    }
+    throw new Error("renderer 主题不是受信 formal 或 native 选择");
+  });
+  const observedIds = normalized.map(({ id }) => id).sort();
+  if (JSON.stringify(observedIds) !== JSON.stringify(expectedIds)) {
+    throw new Error("renderer observation 是 partial，不是完整主窗口集合");
+  }
+  const first = normalized[0];
+  if (!normalized.every((value) => (
+    value.kind === first.kind
+    && value.mode === first.mode
+    && value.themeId === first.themeId
+    && value.selectedThemeId === first.selectedThemeId
+  ))) throw new Error("renderer 主题选择不一致");
+  const rendererGenerations = Object.fromEntries(
+    [...normalized]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(({ id, generation }) => [id, generation]),
+  );
+  return {
+    rendererOrigin: "app://-",
+    mainRendererCount: mainTargets.length,
+    rendererGenerations,
+    rendererSelection: {
+      kind: first.kind,
+      mode: first.mode,
+      themeId: first.themeId,
+      selectedThemeId: first.selectedThemeId,
+      targetIds: observedIds,
+    },
+  };
+}
+
+async function validatedFormalThemeIds(home) {
+  const roots = [
+    join(home, ".codex", "heige-codex-skin-studio", "themes"),
+    join(home, "Library", "Application Support", "HeiGeCodexSkinStudio", "themes"),
+  ];
+  const ids = new Set();
+  for (const theme of await listThemes({ roots })) {
+    if (ids.has(theme.id)) continue;
+    try {
+      const loaded = await loadTheme(theme.path);
+      if (loaded.manifest.id === theme.id) ids.add(theme.id);
+    } catch {}
+  }
+  return [...ids].sort();
+}
+
+async function captureRendererSnapshot() {
   const targets = classifyCodexTargets(await fetchRendererTargets(PORT));
   const mainTargets = targets.filter(({ kind }) => kind === "main");
   if (mainTargets.length === 0) throw new Error("没有严格识别的 Codex 主 renderer");
-  const origins = [];
+  const observations = [];
   for (const target of mainTargets) {
     const session = new CdpSession(target.webSocketDebuggerUrl);
     try {
       await session.open();
-      origins.push(await session.evaluate("location.origin"));
+      observations.push({
+        id: target.id,
+        ...await session.evaluate(`(() => {
+          let status = null;
+          try { status = globalThis.__heigeCodexSkinRuntime?.status?.() ?? null; } catch {}
+          const datasetThemeId = document.documentElement.dataset.heigeCodexSkin ?? null;
+          let storedThemeId = null;
+          try { storedThemeId = localStorage.getItem("heigeCodexSkinSelected"); } catch {}
+          const runtimeThemeId = (
+            typeof status?.themeId === "string" || status?.themeId === null
+          ) ? status.themeId : datasetThemeId;
+          const mode = status?.mode === "active" || status?.mode === "native"
+            ? status.mode
+            : (storedThemeId === ${JSON.stringify(NATIVE_THEME_ID)} && datasetThemeId === null
+              ? "native"
+              : "active");
+          return {
+            origin: location.origin,
+            generation: typeof status?.generation === "string"
+              ? status.generation
+              : (typeof globalThis.__heigeCodexSkin?.generation === "string"
+                ? globalThis.__heigeCodexSkin.generation
+                : null),
+            menuPresent: document.getElementById("heige-codex-skin-menu") !== null,
+            stylePresent: document.getElementById("heige-codex-skin-style") !== null,
+            mode,
+            runtimeThemeId,
+            datasetThemeId,
+            storedThemeId
+          };
+        })()`),
+      });
     } finally {
       session.close();
     }
   }
-  if (!origins.every((origin) => origin === "app://-")) throw new Error("renderer origin 不是 app://-");
-  return { rendererOrigin: "app://-", mainRendererCount: mainTargets.length };
+  return { mainTargets, observations };
+}
+
+async function inspectRenderers({
+  home = userInfo().homedir,
+  run = execFile,
+} = {}) {
+  const app = await resolveCodexApp({
+    home,
+    env: { HEIGE_CODEX_APP: "/Applications/ChatGPT.app" },
+    platform: "darwin",
+  });
+  const before = await readMacCdpProcess({ appPath: app.appPath, port: PORT }, { run });
+  const formalThemeIds = await validatedFormalThemeIds(home);
+  const firstSnapshot = await captureRendererSnapshot();
+  const first = auditRendererPreflight({
+    ...firstSnapshot,
+    formalThemeIds,
+  });
+  const secondSnapshot = await captureRendererSnapshot();
+  const second = auditRendererPreflight({
+    ...secondSnapshot,
+    formalThemeIds,
+  });
+  const after = await readMacCdpProcess({ appPath: app.appPath, port: PORT }, { run });
+  if (
+    !sameProcessIdentity(before, after)
+    || JSON.stringify(first.rendererSelection) !== JSON.stringify(second.rendererSelection)
+    || JSON.stringify(first.rendererGenerations) !== JSON.stringify(second.rendererGenerations)
+  ) throw new Error("renderer selection or exact CDP owner changed during preflight");
+  return first;
 }
 
 async function inspectLegacyTheme(home) {
@@ -2217,6 +2469,7 @@ async function inspectSchema2State(home) {
     revision: state.revision,
     persistenceEnabled: state.persistenceEnabled,
     selectedThemeId: state.selectedThemeId,
+    lastNonNativeThemeId: state.lastNonNativeThemeId,
   };
 }
 
@@ -2235,7 +2488,7 @@ export async function discoverLivePreflight({
   const uid = process.getuid();
   const [{ app, identity, processIdentity }, renderers, legacy, existingController, legacyTheme, schema2] = await Promise.all([
     inspectAppAndProcess({ home, run }),
-    inspectRenderers(),
+    inspectRenderers({ home, run }),
     inspectLegacy({ home, uid, run }),
     inspectExistingController({ home, uid, run }),
     inspectLegacyTheme(home),
@@ -2416,7 +2669,7 @@ export async function runInstallerRollbackThenClean({
       const sameProcess = sameProcessIdentity(process.process, expectedProcess);
       const renderer = await waitForValue(
         inspectRenderer,
-        (value) => value?.themeId === initialThemeId && value.menuPresent === true,
+        (value) => rendererMatchesTheme(value, initialThemeId) && value.menuPresent === true,
         { label: "legacy renderer behavior after installer rollback" },
       );
       const exactController = JSON.stringify(controllerAfter) === JSON.stringify(controllerBefore);
@@ -2709,16 +2962,24 @@ export async function recoverLiveAcceptance({
     } else if (state !== null && state.persistenceEnabled !== initialPersistenceEnabled) {
       throw new Error("automatic recovery only restores the revalidated persistence=true pre-state");
     }
+    const observed = state === null ? await inspectRenderers({ home }) : null;
+    const recoveryTheme = resolveRecoveryTheme({
+      journalThemeId: initialThemeId,
+      state,
+      rendererSelection: observed?.rendererSelection,
+    });
     const renderer = await waitForValue(
       rendererSkinSnapshot,
-      (value) => value?.themeId === initialThemeId && value.menuPresent === true,
+      (value) => rendererMatchesTheme(value, recoveryTheme.effectiveThemeId)
+        && value.menuPresent === true,
       { label: "recovered functional skin" },
     );
     if (state?.persistenceEnabled === true) await waitForControllerReady({ home, run });
     return {
       mode: "cdp",
       process: current.process,
-      themeId: renderer.themeId,
+      themeId: recoveryTheme.effectiveThemeId,
+      themeRecovery: recoveryTheme,
       persistenceEnabled: state?.persistenceEnabled ?? initialPersistenceEnabled,
     };
   });
@@ -2729,7 +2990,7 @@ export async function recoverLiveAcceptance({
   };
 }
 
-function revalidatedInitialChoice(preflight) {
+export function revalidatedInitialChoice(preflight) {
   if (preflight?.legacy?.loaded !== true) {
     throw new Error("live mutation requires the revalidated loaded legacy watchdog");
   }
@@ -2747,13 +3008,41 @@ function revalidatedInitialChoice(preflight) {
   if (persistenceEnabled !== true) {
     throw new Error("live mutation requires the revalidated initial persistence choice to be true");
   }
-  const themeId = preflight.schema2?.present
-    ? preflight.schema2.selectedThemeId
-    : preflight.legacyTheme?.themeId;
-  if (typeof themeId !== "string" || themeId !== preflight.legacyTheme?.themeId) {
-    throw new Error("schema 2 and legacy theme choices are absent or inconsistent");
+  let themeId;
+  if (preflight.schema2?.present) {
+    themeId = preflight.schema2.selectedThemeId;
+  } else {
+    const renderer = preflight.rendererSelection;
+    const formal = (
+      renderer?.kind === "formal"
+      && renderer.mode === "active"
+      && typeof renderer.themeId === "string"
+      && renderer.selectedThemeId === renderer.themeId
+    );
+    const native = (
+      renderer?.kind === "native"
+      && renderer.mode === "native"
+      && renderer.themeId === null
+      && renderer.selectedThemeId === NATIVE_THEME_ID
+    );
+    if (!formal && !native) {
+      throw new Error("renderer selection is absent or not a verified formal or native theme");
+    }
+    themeId = renderer.selectedThemeId;
   }
-  return { persistenceEnabled, themeId };
+  if (typeof themeId !== "string" || themeId.length === 0) {
+    throw new Error("schema 2 or renderer theme choice is invalid");
+  }
+  if (themeId === NATIVE_THEME_ID) {
+    throw new Error("live option 1 mutation requires an active formal renderer theme");
+  }
+  return {
+    persistenceEnabled,
+    themeId,
+    lastNonNativeThemeId: preflight.schema2?.present
+      ? preflight.schema2.lastNonNativeThemeId ?? preflight.legacyTheme?.themeId
+      : (themeId === NATIVE_THEME_ID ? preflight.legacyTheme?.themeId : themeId),
+  };
 }
 
 export async function runProductionRollbackThenClean({
