@@ -945,6 +945,69 @@ export function createSkinController(input) {
       : undefined);
   };
 
+  const sameSnapshotValue = (left, right) => (
+    JSON.stringify(left) === JSON.stringify(right)
+  );
+
+  const healthyTickSnapshot = async () => {
+    if (server === null || typeof deps.inspectSkin !== "function") return null;
+    try {
+      const before = {
+        state: validateControlState(await deps.readState()),
+        session: await deps.readSession(),
+        transition: await deps.readTransition(),
+        process: await probeProcess(),
+      };
+      const expectedMode = before.state.selectedThemeId === NATIVE_THEME_ID
+        ? "native"
+        : "active";
+      const sessionMatches = isRecord(before.session) &&
+        before.session.mode === expectedMode &&
+        before.session.keepUntilProcessExit === false &&
+        sameProcessIdentity(before.session.process, before.process) &&
+        (
+          expectedMode === "native"
+            ? before.session.activeThemeId === null
+            : before.session.activeThemeId === before.state.selectedThemeId
+        );
+      if (
+        before.state.persistenceEnabled !== true ||
+        before.transition !== null ||
+        before.process === null ||
+        !sessionMatches
+      ) return null;
+
+      await assertPortOwner(before.process);
+      const health = analyzeRendererHealth(await deps.inspectSkin({
+        expected: {
+          themeId: before.state.selectedThemeId,
+          mode: expectedMode,
+          persistenceEnabled: true,
+          revision: before.state.revision,
+        },
+        process: before.process,
+      }), before.state);
+      if (health.repairTargets?.length !== 0) return null;
+
+      const after = {
+        state: validateControlState(await deps.readState()),
+        session: await deps.readSession(),
+        transition: await deps.readTransition(),
+        process: await probeProcess(),
+      };
+      if (!sameSnapshotValue(before, after)) return null;
+
+      lastKnownState = before.state;
+      consecutiveFailures = 0;
+      return result("idle", expectedMode, before.state, {
+        consecutiveFailures,
+        ...(health.selective ? { healthyTargets: health.healthyTargets } : {}),
+      });
+    } catch {
+      return null;
+    }
+  };
+
   const runSafe = async (
     operation,
     action,
@@ -992,6 +1055,8 @@ export function createSkinController(input) {
         if (handled !== null) return handled;
       }
     }
+    const healthy = await healthyTickSnapshot();
+    if (healthy !== null) return healthy;
     return runSafe(
       "controller:tick",
       (lease) => reconcile({ lease, includeHealthCount: true }),
