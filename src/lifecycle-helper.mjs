@@ -363,10 +363,39 @@ function run(argv) {
   await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", source, "--", String(target.pid)]);
 }
 
-async function defaultLaunchApp({ appPath, args }) {
-  const commandArgs = ["-na", appPath];
-  if (args.length > 0) commandArgs.push("--args", ...args);
-  await execFile("/usr/bin/open", commandArgs);
+export async function launchMacosAppExecutable({ appPath, args }, {
+  spawnImpl = spawn,
+} = {}) {
+  absolutePath(appPath, "appPath");
+  if (
+    !Array.isArray(args) ||
+    args.some((value) => typeof value !== "string" || value.includes("\0") || /[\r\n]/.test(value))
+  ) {
+    throw new TypeError("Codex 启动参数无效");
+  }
+  if (typeof spawnImpl !== "function") throw new TypeError("spawnImpl 必须是函数");
+  const executablePath = join(appPath, "Contents", "MacOS", "ChatGPT");
+  const child = spawnImpl(executablePath, args, {
+    detached: true,
+    shell: false,
+    stdio: "ignore",
+  });
+  if (!child || typeof child.once !== "function" || typeof child.unref !== "function") {
+    throw new Error("无法创建 Codex 启动进程");
+  }
+  await new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+    throw new Error("Codex 启动进程没有有效 PID");
+  }
+  child.unref();
+  return { pid: child.pid };
+}
+
+async function defaultLaunchApp(input) {
+  return launchMacosAppExecutable(input);
 }
 
 async function defaultWaitForPort(port) {
@@ -652,8 +681,18 @@ async function executeLifecycleAction(action, deps = {}) {
     port: action.port,
     restarted: true,
   };
-  if (action.afterLaunch !== null) {
+  if (action.launchMode === "cdp") {
     await waitForPort(action.port);
+    const launched = processIdentity(await readCdpProcess({
+      appPath: action.appPath,
+      port: action.port,
+    }));
+    const expectedExecutable = join(action.appPath, "Contents", "MacOS", "ChatGPT");
+    if (launched.executablePath !== expectedExecutable) {
+      throw new Error("新启动的 CDP 进程不属于已解析的 Codex 应用");
+    }
+  }
+  if (action.afterLaunch !== null) {
     try {
       await runAfterLaunch(action.afterLaunch);
     } catch (continuationError) {

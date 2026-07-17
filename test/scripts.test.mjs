@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  launchMacosAppExecutable,
   readMacCdpProcess,
   requestNormalQuit,
   runLifecycleActionFile,
@@ -209,6 +210,12 @@ test("lifecycle helper quits and launches only the recorded exact process identi
     requestQuit: async (input) => calls.push(["quit", input]),
     launchApp: async (input) => calls.push(["launch", input]),
     wait: async () => {},
+    waitForPort: async () => {},
+    readCdpProcess: async () => ({
+      ...processIdentity,
+      pid: 5252,
+      startedAt: "Fri Jul 17 12:01:00 2026",
+    }),
   });
   assert.deepEqual(result, { launchMode: "cdp", port: 9341, restarted: true });
   assert.equal(calls[0][0], "quit");
@@ -233,6 +240,38 @@ test("the default normal quit request is PID-bound and never addresses a bundle 
   assert.equal(calls[0][0], "/usr/bin/osascript");
   assert.equal(calls[0][1].at(-1), "4242");
   assert.doesNotMatch(calls[0][1].join(" "), /com\.openai\.codex|application id/i);
+});
+
+test("the default macOS launcher directly spawns the exact app executable", async () => {
+  const calls = [];
+  const child = new EventEmitter();
+  child.pid = 5252;
+  child.unref = () => calls.push(["unref"]);
+  const launched = launchMacosAppExecutable({
+    appPath: "/Applications/ChatGPT.app",
+    args: [
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-debugging-port=9341",
+    ],
+  }, {
+    spawnImpl: (command, args, options) => {
+      calls.push(["spawn", command, args, options]);
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+  });
+
+  assert.deepEqual(await launched, { pid: 5252 });
+  assert.deepEqual(calls, [
+    ["spawn",
+      "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+      [
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=9341",
+      ],
+      { detached: true, shell: false, stdio: "ignore" }],
+    ["unref"],
+  ]);
 });
 
 test("lifecycle compensation accepts inherited CDP listener FDs inside the exact app tree", async () => {
@@ -409,6 +448,11 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
       themeId: "miku-488137",
     },
   });
+  const launchedProcess = {
+    ...processIdentity,
+    pid: 5252,
+    startedAt: "Fri Jul 17 12:01:00 2026",
+  };
   let probes = 0;
   const calls = [];
   const result = await runLifecycleActionFile(path, {
@@ -417,6 +461,10 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     launchApp: async () => calls.push("launch"),
     wait: async () => {},
     waitForPort: async (port) => calls.push(["port", port]),
+    readCdpProcess: async (input) => {
+      calls.push(["owner", input]);
+      return launchedProcess;
+    },
     runAfterLaunch: async (input) => calls.push(["after", input]),
   });
   assert.deepEqual(result, {
@@ -425,8 +473,12 @@ test("a detached restart can run only the exact allowlisted CLI continuation aft
     restarted: true,
     continuation: "apply",
   });
-  assert.deepEqual(calls.slice(-2), [
+  assert.deepEqual(calls.slice(-3), [
     ["port", 9341],
+    ["owner", {
+      appPath: "/Applications/ChatGPT.app",
+      port: 9341,
+    }],
     ["after", {
       command: "apply",
       cliPath: "/trusted/src/cli.mjs",
@@ -541,6 +593,7 @@ test("a failed detached continuation restores the exact native prestate and reth
     ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
     ["port", 9341],
     ["cdp-process", 9341],
+    ["cdp-process", 9341],
     ["process", 5252],
     ["quit", 5252],
     ["process", 5252],
@@ -623,6 +676,7 @@ test("a failed detached continuation restores the exact closed prestate and reth
     ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
     ["port", 9341],
     ["cdp-process", 9341],
+    ["cdp-process", 9341],
     ["process", 5252],
     ["quit", 5252],
     ["process", 5252],
@@ -700,6 +754,11 @@ test("a launch-only action starts a closed Codex without issuing a quit request"
     requestQuit: async () => calls.push("quit"),
     launchApp: async () => calls.push("launch"),
     waitForPort: async () => calls.push("port"),
+    readCdpProcess: async () => ({
+      pid: 5252,
+      executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+      startedAt: "Fri Jul 17 12:01:00 2026",
+    }),
     runAfterLaunch: async () => calls.push("after"),
   });
   assert.equal(result.continuation, "apply");
