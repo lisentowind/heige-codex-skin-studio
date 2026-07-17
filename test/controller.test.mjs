@@ -118,6 +118,8 @@ function fixture(overrides = {}) {
     backgroundSequence: [],
     probeNative: [],
     restart: [],
+    updateCheck: [],
+    updateDelivery: [],
   };
   let nonceIndex = 0;
   let journalWriteCount = 0;
@@ -316,6 +318,23 @@ function fixture(overrides = {}) {
       },
     },
     launcherName: "HeiGe 皮肤启动器",
+    currentVersion: "5.2.2",
+    checkForUpdate: async () => {
+      calls.updateCheck.push(true);
+      if (overrides.updateCheckFailure) throw new Error("github unavailable");
+      return clone(overrides.updateResult ?? {
+        status: "latest",
+        currentVersion: "5.2.2",
+        latestVersion: "5.2.2",
+        releaseUrl:
+          "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
+      });
+    },
+    deliverUpdateCheckResult: async (input) => {
+      calls.updateDelivery.push(clone(input));
+      if (overrides.updateDeliveryFailure) throw new Error("renderer disappeared");
+      return { delivered: 1 };
+    },
   };
 
   return {
@@ -767,6 +786,85 @@ function rendererRequestHealth(request, overrides = {}) {
     },
   };
 }
+
+test("a manual update request checks once and replies without state mutation or reinjection", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const injectsBefore = fx.calls.inject.length;
+  const leasesBefore = fx.calls.lease.length;
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "7".repeat(32),
+    action: "check-update",
+    capability: CONTROL_TOKEN,
+    generation: "a".repeat(32),
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(result.revision, 1);
+  assert.equal(fx.calls.updateCheck.length, 1);
+  assert.deepEqual(fx.calls.updateDelivery, [{
+    generation: "a".repeat(32),
+    requestId: "7".repeat(32),
+    result: {
+      status: "latest",
+      currentVersion: "5.2.2",
+      latestVersion: "5.2.2",
+      releaseUrl:
+        "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
+    },
+  }]);
+  assert.equal(fx.calls.inject.length, injectsBefore);
+  assert.equal(fx.calls.lease.length, leasesBefore);
+  assert.equal(fx.state.revision, 1);
+});
+
+test("a failed update check returns a safe retry result to the same generation", async () => {
+  const fx = fixture({ updateCheckFailure: true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "6".repeat(32),
+    action: "check-update",
+    capability: CONTROL_TOKEN,
+    generation: "a".repeat(32),
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.deepEqual(fx.calls.updateDelivery, [{
+    generation: "a".repeat(32),
+    requestId: "6".repeat(32),
+    result: {
+      status: "error",
+      currentVersion: "5.2.2",
+    },
+  }]);
+});
+
+test("an update request with a foreign generation is ignored before networking", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "5".repeat(32),
+    action: "check-update",
+    capability: CONTROL_TOKEN,
+    generation: "b".repeat(32),
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.calls.updateCheck.length, 0);
+  assert.equal(fx.calls.updateDelivery.length, 0);
+});
 
 test("a polled menu request disables persistence and reinjects the current session ACK", async () => {
   const fx = fixture({ backgroundProcess: true });

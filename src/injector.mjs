@@ -10,6 +10,10 @@ import { readBoundedFile, RESOURCE_LIMITS, sumWithinLimit } from "./resource-lim
 const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
+const REQUEST_ID = /^[a-f0-9]{32}$/;
+const STABLE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+const RELEASE_URL =
+  /^https:\/\/github\.com\/HeiGeAi\/heige-codex-skin-studio\/releases\/tag\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 async function waitForMainTargets(wait, port, { timeoutMs = 20_000, pollMs = 500 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
@@ -175,6 +179,7 @@ export async function applySkin({
   themes,
   activeId,
   port,
+  currentVersion,
   preferStored = false,
   control = null,
   targetIds = null,
@@ -213,6 +218,7 @@ export async function applySkin({
     activeId: themeId,
     styleId: STYLE_ID,
     menuId: MENU_ID,
+    currentVersion: currentVersion ?? deps.currentVersion,
     cssTemplate,
     preferStored,
     control,
@@ -344,6 +350,9 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
         const themeKeys = [
           "action", "capability", "expectedRevision", "requestId", "schemaVersion", "themeId"
         ];
+        const updateKeys = [
+          "action", "capability", "generation", "requestId", "schemaVersion"
+        ];
         const exact = (expected) =>
           keys.length === expected.length &&
           keys.every((key, index) => key === [...expected].sort()[index]);
@@ -364,6 +373,14 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
             capability: typeof request.capability === "string" ? request.capability.slice(0, 128) : null,
             expectedRevision: request.expectedRevision,
             themeId: typeof request.themeId === "string" ? request.themeId.slice(0, 128) : null
+          };
+        } else if (request.action === "check-update" && exact(updateKeys)) {
+          controlRequest = {
+            schemaVersion: request.schemaVersion,
+            requestId: typeof request.requestId === "string" ? request.requestId.slice(0, 128) : null,
+            action: request.action,
+            capability: typeof request.capability === "string" ? request.capability.slice(0, 128) : null,
+            generation: typeof request.generation === "string" ? request.generation.slice(0, 128) : null
           };
         }
       }
@@ -399,6 +416,97 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
   }
   return {
     statuses: evaluated.succeeded.map(({ value }) => value),
+    failed: evaluated.failed.map(({ id }) => id),
+    results,
+  };
+}
+
+function normalizedUpdateDelivery({ generation, requestId, result }) {
+  if (
+    typeof generation !== "string" ||
+    !REQUEST_ID.test(generation) ||
+    typeof requestId !== "string" ||
+    !REQUEST_ID.test(requestId) ||
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    !["latest", "update-available", "error"].includes(result.status) ||
+    typeof result.currentVersion !== "string" ||
+    !STABLE_VERSION.test(result.currentVersion)
+  ) {
+    throw new Error("更新检查结果无效");
+  }
+  const expectedKeys = result.status === "error"
+    ? ["currentVersion", "status"]
+    : ["currentVersion", "latestVersion", "releaseUrl", "status"];
+  const keys = Object.keys(result).sort();
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== [...expectedKeys].sort()[index])
+  ) {
+    throw new Error("更新检查结果字段无效");
+  }
+  if (result.status !== "error") {
+    const match = typeof result.releaseUrl === "string"
+      ? RELEASE_URL.exec(result.releaseUrl)
+      : null;
+    if (
+      typeof result.latestVersion !== "string" ||
+      !STABLE_VERSION.test(result.latestVersion) ||
+      match === null ||
+      `${match[1]}.${match[2]}.${match[3]}` !== result.latestVersion
+    ) {
+      throw new Error("更新检查发布地址无效");
+    }
+  }
+  return {
+    schemaVersion: 1,
+    requestId,
+    generation,
+    ...result,
+  };
+}
+
+export async function deliverUpdateCheckResult({
+  port,
+  generation,
+  requestId,
+  result,
+  deps = {},
+}) {
+  const payload = normalizedUpdateDelivery({ generation, requestId, result });
+  const fetchTargets = deps.fetchRendererTargets ?? fetchRendererTargets;
+  const Session = deps.Session ?? CdpSession;
+  const expression = `(() => {
+    try {
+      return window.__heigeCodexSkinRuntime?.receiveUpdateCheckResult?.(
+        ${JSON.stringify(payload)}
+      ) === true;
+    } catch {
+      return false;
+    }
+  })()`;
+  const classified = classifyCodexTargets(await fetchTargets(port));
+  const targets = classified.filter(({ kind }) => kind === "main");
+  if (targets.length === 0) {
+    throw targetError(
+      "NO_MAIN_RENDERER",
+      "未发现经过严格识别的 Codex 主窗口 renderer",
+      resultsFor(classified, { succeeded: [], failed: [] }),
+    );
+  }
+  const evaluated = await evaluateTargets(targets, expression, Session);
+  const results = resultsFor(classified, evaluated);
+  const delivered = evaluated.succeeded.filter(({ value }) => value === true).length;
+  if (delivered === 0) {
+    throw targetError(
+      "UPDATE_RESULT_NOT_DELIVERED",
+      "更新检查结果未被当前主题面板接收",
+      results,
+    );
+  }
+  return {
+    delivered,
     failed: evaluated.failed.map(({ id }) => id),
     results,
   };

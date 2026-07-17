@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { applySkin, removeSkin, skinStatus } from "../src/injector.mjs";
+import {
+  applySkin,
+  deliverUpdateCheckResult,
+  removeSkin,
+  skinStatus,
+} from "../src/injector.mjs";
 
 function png(width, height, bytes = 24) {
   const result = Buffer.alloc(Math.max(bytes, 24));
@@ -62,6 +67,7 @@ async function fixture() {
         { id: "one", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/one" },
       ],
       Session: FakeSession,
+      currentVersion: "5.2.2",
     },
   };
 }
@@ -164,6 +170,60 @@ test("status exposes renderer control requests only to an explicit internal call
     skinStatus({ port: 9341, includeControlRequest: "true", deps }),
     /includeControlRequest 必须是布尔值/,
   );
+});
+
+test("status extracts only the exact renderer update request shape", async () => {
+  FakeSession.expressions = [];
+  const { deps } = await fixture();
+
+  await skinStatus({ port: 9341, includeControlRequest: true, deps });
+
+  const expression = FakeSession.expressions[0];
+  assert.match(expression, /request\.action === "check-update"/);
+  assert.match(expression, /"action", "capability", "generation", "requestId", "schemaVersion"/);
+});
+
+test("delivers an update result only through the current renderer callback", async () => {
+  FakeSession.expressions = [];
+  const { deps } = await fixture();
+  const result = await deliverUpdateCheckResult({
+    port: 9341,
+    generation: "a".repeat(32),
+    requestId: "b".repeat(32),
+    result: {
+      status: "latest",
+      currentVersion: "5.2.2",
+      latestVersion: "5.2.2",
+      releaseUrl:
+        "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
+    },
+    deps,
+  });
+
+  assert.equal(result.delivered, 1);
+  assert.match(FakeSession.expressions.at(-1), /receiveUpdateCheckResult/);
+  assert.match(FakeSession.expressions.at(-1), /"generation":"a{32}"/);
+});
+
+test("rejects malformed update delivery before opening a renderer session", async () => {
+  FakeSession.expressions = [];
+  const { deps } = await fixture();
+  await assert.rejects(
+    deliverUpdateCheckResult({
+      port: 9341,
+      generation: "a".repeat(32),
+      requestId: "b".repeat(32),
+      result: {
+        status: "latest",
+        currentVersion: "5.2.2",
+        latestVersion: "5.2.2",
+        releaseUrl: "https://github.com/other/project/releases/tag/v5.2.2",
+      },
+      deps,
+    }),
+    /发布地址/,
+  );
+  assert.equal(FakeSession.expressions.length, 0);
 });
 
 test("one dead target does not abort injection into the survivors", async () => {

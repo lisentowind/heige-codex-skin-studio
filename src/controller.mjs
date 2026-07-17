@@ -93,8 +93,7 @@ function normalizedRendererControlRequest(status) {
     !isRecord(request) ||
     request.schemaVersion !== 1 ||
     typeof request.requestId !== "string" ||
-    !MENU_REQUEST_ID.test(request.requestId) ||
-    request.expectedRevision !== status.revision
+    !MENU_REQUEST_ID.test(request.requestId)
   ) return undefined;
   if (request.action === "set-persistence") {
     if (
@@ -108,6 +107,7 @@ function normalizedRendererControlRequest(status) {
       ]) ||
       typeof request.capability !== "string" ||
       !CONTROL_TOKEN.test(request.capability) ||
+      request.expectedRevision !== status.revision ||
       typeof request.persistenceEnabled !== "boolean"
     ) return undefined;
     return { ...request };
@@ -124,6 +124,7 @@ function normalizedRendererControlRequest(status) {
       ]) ||
       typeof request.capability !== "string" ||
       !CONTROL_TOKEN.test(request.capability) ||
+      request.expectedRevision !== status.revision ||
       !(
         request.themeId === NATIVE_THEME_ID ||
         (
@@ -132,6 +133,21 @@ function normalizedRendererControlRequest(status) {
           THEME_ID.test(request.themeId)
         )
       )
+    ) return undefined;
+    return { ...request };
+  }
+  if (request.action === "check-update") {
+    if (
+      !hasExactKeys(request, [
+        "action",
+        "capability",
+        "generation",
+        "requestId",
+        "schemaVersion",
+      ]) ||
+      typeof request.capability !== "string" ||
+      !CONTROL_TOKEN.test(request.capability) ||
+      request.generation !== status.generation
     ) return undefined;
     return { ...request };
   }
@@ -315,6 +331,13 @@ function normalizedDependencies(input) {
     logger: input.logger ?? noopLogger(),
     launcherName: input.launcherName ?? "HeiGe 皮肤启动器",
     controlPort: input.controlPort ?? 0,
+    currentVersion: input.currentVersion ?? "0.0.0",
+    checkForUpdate: input.checkForUpdate ?? (async () => {
+      throw new Error("update checker is unavailable");
+    }),
+    deliverUpdateCheckResult: input.deliverUpdateCheckResult ?? (async () => {
+      throw new Error("update result delivery is unavailable");
+    }),
   });
 }
 
@@ -1370,6 +1393,32 @@ export function createSkinController(input) {
 
   processRendererRequest = async (request) => {
     try {
+      if (request.action === "check-update") {
+        const state = validateControlState(await deps.readState());
+        lastKnownState = state;
+        if (!sameControlCapability(request.capability, state.controlToken)) {
+          throw new Error("renderer control capability is invalid");
+        }
+        let updateResult;
+        try {
+          updateResult = await deps.checkForUpdate();
+        } catch {
+          updateResult = {
+            status: "error",
+            currentVersion: deps.currentVersion,
+          };
+        }
+        await deps.deliverUpdateCheckResult({
+          generation: request.generation,
+          requestId: request.requestId,
+          result: updateResult,
+        });
+        return result(
+          "idle",
+          state.selectedThemeId === NATIVE_THEME_ID ? "native" : "active",
+          state,
+        );
+      }
       if (request.action === "set-persistence") {
         await setPersistenceFromRenderer({
           expectedRevision: request.expectedRevision,
@@ -1383,7 +1432,7 @@ export function createSkinController(input) {
           const mode = lastKnownState?.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
           return result("handoff", mode, lastKnownState);
         }
-      } else {
+      } else if (request.action === "set-theme") {
         await setThemeSelectionFromRenderer({
           expectedRevision: request.expectedRevision,
           themeId: request.themeId,
