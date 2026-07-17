@@ -601,7 +601,7 @@ export async function productionMacosInstallDependencies({
     inspectServices: async () => {
       const [controller, legacy] = await Promise.all([
         launchAgent.inspectLaunchAgent(),
-        launchAgent.inspectLaunchAgent({ label: launchAgent.LEGACY_WATCHDOG_LABEL }),
+        launchAgent.inspectLegacyWatchdog(),
       ]);
       return {
         controllerLoaded: controller.loaded === true,

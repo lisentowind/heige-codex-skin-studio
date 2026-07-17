@@ -2185,6 +2185,28 @@ export async function inspectLaunchAgent(input = {}) {
   };
 }
 
+export async function inspectLegacyWatchdog(input = {}) {
+  const options = normalizedOptions(input);
+  const label = input.oldLabel ?? LEGACY_WATCHDOG_LABEL;
+  assertLegacyMutationLabel(label, options.testMode === true);
+  launchDomain(options);
+  const plistPath = options.testMode
+    ? (input.oldPlistPath ?? join(options.launchAgentsDir, `${label}.plist`))
+    : join(options.launchAgentsDir, `${LEGACY_WATCHDOG_LABEL}.plist`);
+  const snapshot = await snapshotFile(options.fs, plistPath);
+  const plist = snapshot
+    ? await readPlistSnapshot(options, plistPath, snapshot)
+    : null;
+  await assertSnapshotCurrent(options.fs, plistPath, snapshot);
+  return {
+    label,
+    plistPath,
+    plistExists: snapshot !== null,
+    plistLabel: plist?.Label ?? null,
+    loaded: await isLoaded(options, label),
+  };
+}
+
 export async function inspectLaunchAgentProcessIdentity(input = {}) {
   const options = normalizedOptions(input);
   assertLabel(options.label);

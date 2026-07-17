@@ -15,6 +15,7 @@ import {
   finalizeLegacyWatchdogMigration,
   inspectLaunchAgent,
   inspectLaunchAgentProcessIdentity,
+  inspectLegacyWatchdog,
   migrateLegacyWatchdog,
   prepareStableServiceFreeze,
   registerControllerAgent,
@@ -1276,6 +1277,16 @@ test("inspect reports plist identity and verified launchctl state", async (t) =>
   assert.equal(inspection.plistPath, deps.controllerPlistPath);
   assert.equal(inspection.plistExists, true);
   assert.equal(inspection.plistLabel, deps.label);
+  assert.equal(inspection.loaded, true);
+});
+
+test("legacy inspection uses the dedicated read-only legacy label path", async (t) => {
+  const deps = await fixture(t);
+  const inspection = await inspectLegacyWatchdog(deps);
+  assert.equal(inspection.label, deps.oldLabel);
+  assert.equal(inspection.plistPath, deps.oldPlistPath);
+  assert.equal(inspection.plistExists, true);
+  assert.equal(inspection.plistLabel, deps.oldLabel);
   assert.equal(inspection.loaded, true);
 });
 
