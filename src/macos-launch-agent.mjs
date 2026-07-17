@@ -67,7 +67,7 @@ const PRODUCTION_PLATFORM_OVERRIDE_KEYS = [
 
 const UNREGISTER_HELPER_SOURCE = String.raw`
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, open } from "node:fs/promises";
+import { link, lstat, open } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -130,13 +130,40 @@ const readyDocument = JSON.stringify({
   helperTarget,
   readyNonce,
 }) + "\n";
-const readyHandle = await open(readyPath, "wx", 0o600);
+const readyTemporaryPath = readyPath + ".pending";
+const pendingInfo = await lstat(readyTemporaryPath);
+if (
+  pendingInfo.isSymbolicLink() ||
+  !pendingInfo.isFile() ||
+  (pendingInfo.mode & 0o777) !== 0o600 ||
+  (typeof process.getuid === "function" && pendingInfo.uid !== process.getuid())
+) throw new Error("deferred unregister pending readiness is untrusted");
+const samePending = (left, right) => left.dev === right.dev &&
+  left.ino === right.ino &&
+  left.mode === right.mode &&
+  left.size === right.size &&
+  left.mtimeMs === right.mtimeMs &&
+  left.uid === right.uid;
+const readyHandle = await open(readyTemporaryPath, "r");
 try {
-  await readyHandle.writeFile(readyDocument);
-  await readyHandle.sync();
+  const opened = await readyHandle.stat();
+  if (!samePending(pendingInfo, opened)) {
+    throw new Error("deferred unregister pending readiness changed before open");
+  }
+  const readyBytes = await readyHandle.readFile();
+  const completed = await readyHandle.stat();
+  if (
+    !samePending(opened, completed) ||
+    !readyBytes.equals(Buffer.from(readyDocument))
+  ) throw new Error("deferred unregister pending readiness is invalid");
 } finally {
   await readyHandle.close();
 }
+const currentPending = await lstat(readyTemporaryPath);
+if (!samePending(pendingInfo, currentPending)) {
+  throw new Error("deferred unregister pending readiness changed before publish");
+}
+await link(readyTemporaryPath, readyPath);
 while (true) {
   if (await pathAbsent()) {
     const job = await inspect(target, targetMatch[2], targetMatch[1]);
@@ -710,9 +737,43 @@ async function bootout(options, label, { knownLoaded = false } = {}) {
   return true;
 }
 
-async function stopUnregisterHelper(options, helperLabel) {
-  if (!(await isLoaded(options, helperLabel))) return;
-  await bootout(options, helperLabel, { knownLoaded: true });
+async function readStableLoadedJobIdentity(options, label) {
+  const firstJob = await inspectLoadedJob(options, label);
+  if (!firstJob.loaded || firstJob.pid === null) return null;
+  const firstIdentity = await options.readProcessIdentity(firstJob.pid);
+  if (
+    firstIdentity?.pid !== firstJob.pid ||
+    typeof firstIdentity.startedAt !== "string" ||
+    firstIdentity.startedAt.length === 0
+  ) return null;
+  const secondJob = await inspectLoadedJob(options, label);
+  if (!secondJob.loaded || secondJob.pid !== firstJob.pid) return null;
+  const secondIdentity = await options.readProcessIdentity(secondJob.pid);
+  return sameProcessIdentity(firstIdentity, secondIdentity) ? { ...secondIdentity } : null;
+}
+
+async function stopUnregisterHelper(options, helperLabel, expectedIdentity = null) {
+  let helper = await inspectLoadedJob(options, helperLabel);
+  if (helper.loaded && helper.pid === null && expectedIdentity !== null) {
+    await waitForFrozenPidExit(options, expectedIdentity.pid);
+    helper = await inspectLoadedJob(options, helperLabel);
+  }
+  if (helper.loaded) {
+    const currentIdentity = expectedIdentity === null
+      ? null
+      : (helper.pid === null ? null : await readStableLoadedJobIdentity(options, helperLabel));
+    if (
+      expectedIdentity !== null &&
+      helper.pid !== null &&
+      !sameProcessIdentity(currentIdentity, expectedIdentity)
+    ) {
+      const error = new Error("refusing to stop a replaced unregister helper");
+      error.code = "UNREGISTER_HELPER_IDENTITY_CHANGED";
+      throw error;
+    }
+    await bootout(options, helperLabel, { knownLoaded: true });
+  }
+  await waitForFrozenPidExit(options, expectedIdentity?.pid ?? helper.pid);
 }
 
 async function startUnregisterHelper(options, programArguments, targetPid) {
@@ -722,6 +783,7 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
   const target = launchTarget(options);
   const helperTarget = launchTarget(options, helperLabel);
   const readyPath = join(options.stateDir, `.controller-unregister-helper-ready.${readyNonce}`);
+  const readyTemporaryPath = `${readyPath}.pending`;
   const expectedReady = Buffer.from(`${JSON.stringify({
     schemaVersion: 1,
     target,
@@ -730,34 +792,44 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
     readyNonce,
   })}\n`);
   await assertSnapshotCurrent(options.fs, readyPath, null);
-  await command(options, "/bin/launchctl", [
-    "submit",
-    "-l",
-    helperLabel,
-    "-o",
-    "/dev/null",
-    "-e",
-    "/dev/null",
-    "--",
-    programArguments[0],
-    "--input-type=module",
-    "--eval",
-    UNREGISTER_HELPER_SOURCE,
-    target,
-    String(targetPid),
-    helperTarget,
-    options.plistPath,
-    readyPath,
-    readyNonce,
-  ]);
+  await assertSnapshotCurrent(options.fs, readyTemporaryPath, null);
+  let helperIdentity = null;
   let readySnapshot = null;
+  let readyTemporarySnapshot = null;
   try {
+    readyTemporarySnapshot = await atomicWrite(
+      options.fs,
+      readyTemporaryPath,
+      expectedReady,
+      0o600,
+    );
+    await command(options, "/bin/launchctl", [
+      "submit",
+      "-l",
+      helperLabel,
+      "-o",
+      "/dev/null",
+      "-e",
+      "/dev/null",
+      "--",
+      programArguments[0],
+      "--input-type=module",
+      "--eval",
+      UNREGISTER_HELPER_SOURCE,
+      target,
+      String(targetPid),
+      helperTarget,
+      options.plistPath,
+      readyPath,
+      readyNonce,
+    ]);
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      const helper = await inspectLoadedJob(options, helperLabel);
-      if (helper.loaded && helper.pid !== null) {
-        if (helper.pid === targetPid) {
+      const identity = await readStableLoadedJobIdentity(options, helperLabel);
+      if (identity !== null) {
+        if (identity.pid === targetPid) {
           throw new Error("deferred unregister helper reused the controller PID");
         }
+        helperIdentity = identity;
         break;
       }
       await options.wait(50);
@@ -766,13 +838,32 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const candidate = await snapshotFile(options.fs, readyPath);
       if (candidate !== null) {
-        if (!candidate.bytes.equals(expectedReady) || candidate.mode !== 0o600) {
+        const temporaryCandidate = await snapshotFile(options.fs, readyTemporaryPath);
+        if (
+          temporaryCandidate === null ||
+          !candidate.bytes.equals(expectedReady) ||
+          candidate.mode !== 0o600 ||
+          !temporaryCandidate.bytes.equals(expectedReady) ||
+          temporaryCandidate.mode !== 0o600 ||
+          !sameFileSnapshot(readyTemporarySnapshot, temporaryCandidate) ||
+          !sameFileSnapshot(candidate, temporaryCandidate)
+        ) {
           throw new Error("deferred unregister helper readiness is invalid");
+        }
+        const currentIdentity = await readStableLoadedJobIdentity(options, helperLabel);
+        if (!sameProcessIdentity(currentIdentity, helperIdentity)) {
+          throw new Error("deferred unregister helper identity changed after readiness");
         }
         readySnapshot = candidate;
         await removeSnapshotPath(options.fs, readyPath, readySnapshot);
         readySnapshot = null;
-        return helperLabel;
+        await removeSnapshotPath(options.fs, readyTemporaryPath, readyTemporarySnapshot);
+        readyTemporarySnapshot = null;
+        const finalIdentity = await readStableLoadedJobIdentity(options, helperLabel);
+        if (!sameProcessIdentity(finalIdentity, helperIdentity)) {
+          throw new Error("deferred unregister helper identity changed before commit");
+        }
+        return { label: helperLabel, identity: helperIdentity };
       }
       await options.wait(50);
     }
@@ -780,18 +871,25 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
   } catch (primaryError) {
     const cleanupErrors = [];
     try {
-      await stopUnregisterHelper(options, helperLabel);
+      await stopUnregisterHelper(options, helperLabel, helperIdentity);
     } catch (cleanupError) {
       cleanupErrors.push(cleanupError);
     }
-    if (readySnapshot === null) {
+    if (readySnapshot === null && readyTemporarySnapshot !== null) {
       try {
-        const candidate = await snapshotFile(options.fs, readyPath);
+        const [candidate, temporaryCandidate] = await Promise.all([
+          snapshotFile(options.fs, readyPath),
+          snapshotFile(options.fs, readyTemporaryPath),
+        ]);
         if (
           candidate !== null &&
-          candidate.bytes.equals(expectedReady) &&
-          candidate.mode === 0o600
-        ) readySnapshot = candidate;
+          temporaryCandidate !== null &&
+          sameFileSnapshot(readyTemporarySnapshot, candidate) &&
+          sameFileSnapshot(readyTemporarySnapshot, temporaryCandidate) &&
+          sameFileSnapshot(candidate, temporaryCandidate)
+        ) {
+          readySnapshot = candidate;
+        }
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
@@ -799,6 +897,17 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
     if (readySnapshot !== null) {
       try {
         await removeSnapshotPath(options.fs, readyPath, readySnapshot);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (readyTemporarySnapshot !== null) {
+      try {
+        await cleanupSnapshotIfCurrent(
+          options.fs,
+          readyTemporaryPath,
+          readyTemporarySnapshot,
+        );
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
@@ -962,16 +1071,38 @@ async function atomicWrite(fs, path, bytes, mode = 0o600) {
   const parent = dirname(path);
   await ensureDirectory(fs, parent);
   const temporaryPath = `${path}.tmp.${randomUUID()}`;
+  const expectedBytes = Buffer.isBuffer(bytes) ? Buffer.from(bytes) : Buffer.from(String(bytes));
   let handle;
   let temporarySnapshot;
+  let publishedSnapshot;
   try {
     handle = await fs.open(temporaryPath, "wx", mode);
     await handle.writeFile(bytes);
     await handle.chmod(mode);
     await handle.sync();
-    await handle.close();
-    handle = undefined;
-    temporarySnapshot = await snapshotFile(fs, temporaryPath, { required: true });
+    const created = await handle.stat();
+    if (
+      !created.isFile() ||
+      created.size !== expectedBytes.length ||
+      (created.mode & 0o777) !== mode ||
+      (typeof process.getuid === "function" && created.uid !== process.getuid())
+    ) {
+      throw capabilityConflict(temporaryPath);
+    }
+    temporarySnapshot = {
+      bytes: expectedBytes,
+      mode: created.mode & 0o777,
+      dev: created.dev,
+      ino: created.ino,
+      size: created.size,
+      mtimeMs: created.mtimeMs,
+      sha256: createHash("sha256").update(expectedBytes).digest("hex"),
+    };
+    const pathSnapshot = await snapshotFile(fs, temporaryPath, { required: true });
+    if (!sameFileSnapshot(temporarySnapshot, pathSnapshot)) {
+      throw capabilityConflict(temporaryPath);
+    }
+    temporarySnapshot = pathSnapshot;
     const published = await publishSnapshotPath(
       fs,
       temporaryPath,
@@ -980,11 +1111,29 @@ async function atomicWrite(fs, path, bytes, mode = 0o600) {
       null,
       "FILE_CAPABILITY_CONFLICT",
     );
-    return published.published;
+    publishedSnapshot = published.published;
+    await handle.close();
+    handle = undefined;
+    return publishedSnapshot;
   } catch (error) {
-    await handle?.close().catch(() => {});
+    const cleanupErrors = [];
+    await handle?.close().catch((cleanupError) => cleanupErrors.push(cleanupError));
+    if (publishedSnapshot) {
+      await cleanupSnapshotIfCurrent(fs, path, publishedSnapshot)
+        .catch((cleanupError) => cleanupErrors.push(cleanupError));
+    }
     if (temporarySnapshot) {
-      await cleanupSnapshotIfCurrent(fs, temporaryPath, temporarySnapshot).catch(() => {});
+      await cleanupSnapshotIfCurrent(fs, temporaryPath, temporarySnapshot)
+        .catch((cleanupError) => cleanupErrors.push(cleanupError));
+    }
+    if (cleanupErrors.length > 0) {
+      const aggregate = new AggregateError(
+        [error, ...cleanupErrors],
+        `atomic write failed and cleanup was incomplete: ${path}`,
+        { cause: error },
+      );
+      aggregate.code = error?.code ?? "FILE_CAPABILITY_CONFLICT";
+      throw aggregate;
     }
     throw error;
   }
@@ -2021,20 +2170,7 @@ export async function inspectLaunchAgentProcessIdentity(input = {}) {
   const options = normalizedOptions(input);
   assertLabel(options.label);
   launchDomain(options);
-  const firstJob = await inspectLoadedJob(options, options.label);
-  if (!firstJob.loaded || firstJob.pid === null) return null;
-  const firstIdentity = await options.readProcessIdentity(firstJob.pid);
-  if (
-    firstIdentity?.pid !== firstJob.pid ||
-    typeof firstIdentity.startedAt !== "string" ||
-    firstIdentity.startedAt.length === 0
-  ) {
-    return null;
-  }
-  const secondJob = await inspectLoadedJob(options, options.label);
-  if (!secondJob.loaded || secondJob.pid !== firstJob.pid) return null;
-  const secondIdentity = await options.readProcessIdentity(secondJob.pid);
-  return sameProcessIdentity(firstIdentity, secondIdentity) ? { ...secondIdentity } : null;
+  return readStableLoadedJobIdentity(options, options.label);
 }
 
 export async function wakeControllerAgent(input = {}) {
@@ -2236,18 +2372,22 @@ export async function unregisterControllerAgent(input = {}) {
   if (loaded && job.pid === options.currentPid) {
     const stateCapability = await ensurePrivateDirectory(options.fs, options.stateDir);
     await assertDirectoryCapability(options.fs, stateCapability);
-    const helperLabel = await startUnregisterHelper(options, programArguments, job.pid);
+    const helper = await startUnregisterHelper(options, programArguments, job.pid);
     let removed;
     try {
       await assertDirectoryCapability(options.fs, stateCapability);
       await assertSnapshotCurrent(options.fs, options.plistPath, snapshot);
       await assertDirectoryCapability(options.fs, launchAgentsCapability);
+      const currentHelperIdentity = await readStableLoadedJobIdentity(options, helper.label);
+      if (!sameProcessIdentity(currentHelperIdentity, helper.identity)) {
+        throw new Error("deferred unregister helper identity changed before plist removal");
+      }
       removed = await removeSnapshotPath(options.fs, options.plistPath, snapshot);
       await assertDirectoryCapability(options.fs, stateCapability);
       await assertDirectoryCapability(options.fs, launchAgentsCapability);
     } catch (primaryError) {
       try {
-        await stopUnregisterHelper(options, helperLabel);
+        await stopUnregisterHelper(options, helper.label, helper.identity);
       } catch (cleanupError) {
         throw new AggregateError(
           [primaryError, cleanupError],
@@ -2263,7 +2403,7 @@ export async function unregisterControllerAgent(input = {}) {
       loaded: true,
       removed,
       deferred: true,
-      helperLabel,
+      helperLabel: helper.label,
     };
   }
   if (loaded) {

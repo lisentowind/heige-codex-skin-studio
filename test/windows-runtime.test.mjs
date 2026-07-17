@@ -6,7 +6,10 @@ import {
   decodeWindowsAppIdentityToken,
   queryWindowsRuntimeSnapshot,
 } from "../src/windows-runtime.mjs";
-import { createWindowsSecurityAdapter } from "../src/windows-secure-fs.mjs";
+import {
+  createWindowsSecurityAdapter,
+  windowsAclPowerShellScript,
+} from "../src/windows-secure-fs.mjs";
 
 const APP = Object.freeze({
   kind: "Win32",
@@ -216,6 +219,52 @@ test("Windows ACL adapter protects files explicitly and bounds trusted PowerShel
   assert.equal(calls.every((entry) => entry.options.timeout === 15_000), true);
   assert.equal(calls.every((entry) => entry.options.maxBuffer === 256 * 1024), true);
   assert.equal(calls.every((entry) => entry.options.windowsHide === true), true);
+});
+
+test("Windows ACL adapter preserves the canonical request path instead of rewriting 8.3 aliases", async () => {
+  const path = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\heige-state";
+  const powershellPath = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  const result = {
+    schemaVersion: 1,
+    action: "verify-directory",
+    path,
+    ownerSid: "S-1-5-21-1",
+    private: true,
+  };
+  const adapter = createWindowsSecurityAdapter({
+    powershellPath,
+    execFileImpl: async () => ({ stdout: JSON.stringify(result), stderr: "" }),
+  });
+
+  assert.deepEqual(await adapter.verifyDirectory(path), result);
+  assert.match(windowsAclPowerShellScript, /path = \$TargetPath/);
+  assert.doesNotMatch(windowsAclPowerShellScript, /path = \[System\.IO\.Path\]::GetFullPath/);
+});
+
+test("Windows ACL adapter rejects a rewritten path without reflecting sensitive values", async () => {
+  const path = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\heige-state";
+  const adapter = createWindowsSecurityAdapter({
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        action: "verify-directory",
+        path: "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\heige-state",
+        ownerSid: "S-1-5-21-1",
+        private: true,
+      }),
+      stderr: "",
+    }),
+  });
+
+  await assert.rejects(
+    adapter.verifyDirectory(path),
+    (error) => {
+      assert.match(error.message, /invalid result: path$/);
+      assert.doesNotMatch(error.message, /RUNNER|runneradmin|S-1-/);
+      return true;
+    },
+  );
 });
 
 test("Windows preflight selects one exact root and exact loopback owner", () => {

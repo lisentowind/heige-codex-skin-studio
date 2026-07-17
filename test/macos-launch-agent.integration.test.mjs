@@ -123,7 +123,7 @@ test("isolated random-label LaunchAgent self-unregisters through a distinct help
     resultPath,
   }));
   await writeFile(scriptPath, `
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { unregisterControllerAgent } from ${JSON.stringify(moduleUrl)};
 const config = JSON.parse(await readFile(process.argv[2], "utf8"));
 while (true) {
@@ -136,7 +136,23 @@ const result = await unregisterControllerAgent({
   currentPid: process.pid,
   deferIfCurrentProcess: true,
 });
-await writeFile(config.resultPath, JSON.stringify(result));
+const temporaryResultPath = config.resultPath + "." + process.pid + ".tmp";
+let resultHandle;
+try {
+  resultHandle = await open(temporaryResultPath, "wx", 0o600);
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  await resultHandle.writeFile(JSON.stringify(result) + "\\n", "utf8");
+  await resultHandle.sync();
+  await resultHandle.close();
+  resultHandle = undefined;
+  await rename(temporaryResultPath, config.resultPath);
+} catch (error) {
+  await resultHandle?.close().catch(() => {});
+  await unlink(temporaryResultPath).catch((cleanupError) => {
+    if (cleanupError?.code !== "ENOENT") throw cleanupError;
+  });
+  throw error;
+}
 `);
 
   let helperLabel = null;

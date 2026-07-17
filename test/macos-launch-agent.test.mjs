@@ -320,15 +320,13 @@ async function fixture(t, overrides = {}) {
       if (overrides.submitFailure) throw overrides.submitFailure;
       loaded.add(label);
       if (overrides.publishHelperReady !== false) {
-        const [target, expectedPid, helperTarget, , readyPath, readyNonce] = args.slice(-6);
-        const readyBytes = overrides.helperReadyBytes ?? `${JSON.stringify({
-          schemaVersion: 1,
-          target,
-          expectedPid: Number(expectedPid),
-          helperTarget,
-          readyNonce,
-        })}\n`;
-        await writeFile(readyPath, readyBytes, { mode: 0o600 });
+        const [, , , , readyPath] = args.slice(-6);
+        const readyTemporaryPath = `${readyPath}.pending`;
+        if (overrides.helperReadyBytes !== undefined) {
+          await rm(readyTemporaryPath, { force: true });
+          await writeFile(readyTemporaryPath, overrides.helperReadyBytes, { mode: 0o600 });
+        }
+        await fsPromises.link(readyTemporaryPath, readyPath);
       }
       return { stdout: "", stderr: "" };
     }
@@ -375,6 +373,10 @@ async function fixture(t, overrides = {}) {
     hardCrashAt: overrides.hardCrashAt,
     rollbackFaultAt: overrides.rollbackFaultAt,
     processExists: overrides.processExists,
+    readProcessIdentity: overrides.readProcessIdentity ?? (async (pid) => ({
+      pid,
+      startedAt: `start-${pid}`,
+    })),
     wait: overrides.wait,
   };
 }
@@ -605,6 +607,19 @@ test("launch-agent process ACK fails closed when launchd replaces the PID during
   assert.equal(await inspectLaunchAgentProcessIdentity({
     ...deps,
     readProcessIdentity: async (pid) => ({ pid, startedAt: `start-${pid}` }),
+  }), null);
+});
+
+test("launch-agent process ACK fails closed when one PID is reused with a new start time", async (t) => {
+  let identityReads = 0;
+  const deps = await fixture(t, { printPid: () => 8201 });
+  deps.loaded.add(deps.label);
+  assert.equal(await inspectLaunchAgentProcessIdentity({
+    ...deps,
+    readProcessIdentity: async (pid) => ({
+      pid,
+      startedAt: ++identityReads === 1 ? "start-a" : "start-b",
+    }),
   }), null);
 });
 
@@ -971,6 +986,184 @@ test("staged creation never overwrites a path created at the publish syscall", a
   assert.equal(await pathExists(deps.controllerPlistPath), false);
 });
 
+test("atomic creation rejects an identical temporary file on a different inode", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const originalLstat = deps.fs.lstat.bind(deps.fs);
+  let attackedPath = null;
+  let savedPath = null;
+  deps.fs = {
+    ...deps.fs,
+    async lstat(path, ...args) {
+      if (attackedPath === null && String(path).includes(".tmp.")) {
+        attackedPath = String(path);
+        savedPath = `${attackedPath}.attacker-saved`;
+        await fsPromises.rename(attackedPath, savedPath);
+        const identicalBytes = await readFile(savedPath);
+        await writeFile(attackedPath, identicalBytes, { mode: 0o600 });
+      }
+      return originalLstat(path, ...args);
+    },
+  };
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "FILE_CAPABILITY_CONFLICT",
+  );
+  assert.equal(typeof attackedPath, "string");
+  assert.equal(typeof savedPath, "string");
+  assert.deepEqual(await readFile(attackedPath), await readFile(savedPath));
+  const [replacement, created] = await Promise.all([stat(attackedPath), stat(savedPath)]);
+  assert.notDeepEqual(
+    [replacement.dev, replacement.ino],
+    [created.dev, created.ino],
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
+test("atomic creation keeps its creating inode pinned through publication", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  const originalLink = deps.fs.link.bind(deps.fs);
+  let creatingHandleClosed = false;
+  let checkedPublication = false;
+  deps.fs = {
+    ...deps.fs,
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (flags !== "wx" || !String(path).includes(".tmp.")) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              await target.close();
+              creatingHandleClosed = true;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    async link(from, to, ...args) {
+      if (!checkedPublication && String(from).includes(".tmp.")) {
+        checkedPublication = true;
+        assert.equal(creatingHandleClosed, false);
+      }
+      return originalLink(from, to, ...args);
+    },
+  };
+
+  await registerControllerAgent(deps);
+  assert.equal(checkedPublication, true);
+  assert.equal(creatingHandleClosed, true);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+});
+
+test("atomic creation rolls back its published target when the creating handle close fails", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const closeError = Object.assign(new Error("injected creating handle close failure"), {
+    code: "CLOSE_SENTINEL",
+  });
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  const originalLink = deps.fs.link.bind(deps.fs);
+  let closeCalls = 0;
+  let publishedPath = null;
+  deps.fs = {
+    ...deps.fs,
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (flags !== "wx" || !String(path).includes(".tmp.")) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              closeCalls += 1;
+              if (closeCalls === 1) {
+                await target.close();
+                throw closeError;
+              }
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    async link(from, to, ...args) {
+      if (publishedPath === null && String(from).includes(".tmp.")) publishedPath = String(to);
+      return originalLink(from, to, ...args);
+    },
+  };
+
+  await assert.rejects(registerControllerAgent(deps), (error) => error === closeError);
+  assert.equal(closeCalls, 2);
+  assert.equal(typeof publishedPath, "string");
+  assert.equal(await pathExists(publishedPath), false);
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
+test("atomic creation reports both close and rollback failures", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  const closeError = Object.assign(new Error("injected creating handle close failure"), {
+    code: "CLOSE_SENTINEL",
+  });
+  const cleanupError = new Error("injected published target cleanup failure");
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  const originalLink = deps.fs.link.bind(deps.fs);
+  const originalRename = deps.fs.rename.bind(deps.fs);
+  let closeCalls = 0;
+  let publishedPath = null;
+  deps.fs = {
+    ...deps.fs,
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (flags !== "wx" || !String(path).includes(".tmp.")) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              closeCalls += 1;
+              if (closeCalls === 1) {
+                await target.close();
+                throw closeError;
+              }
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    async link(from, to, ...args) {
+      if (publishedPath === null && String(from).includes(".tmp.")) publishedPath = String(to);
+      return originalLink(from, to, ...args);
+    },
+    async rename(from, to, ...args) {
+      if (closeCalls > 0 && String(from) === publishedPath) throw cleanupError;
+      return originalRename(from, to, ...args);
+    },
+  };
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.equal(error.cause, closeError);
+      assert.equal(error.errors[0], closeError);
+      assert.equal(error.errors[1]?.code, "FILE_CAPABILITY_CONFLICT");
+      assert.equal(error.errors[1]?.cause, cleanupError);
+      return true;
+    },
+  );
+  assert.equal(typeof publishedPath, "string");
+  assert.equal(await pathExists(publishedPath), true);
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+});
+
 test("register restores an existing loaded controller when replacement bootstrap fails", async (t) => {
   const deps = await fixture(t, { controllerBootstrapFailures: 1 });
   const previous = Buffer.from(renderControllerPlist({
@@ -1165,11 +1358,13 @@ test("unregister verifies absence and deletes only its matching generated plist"
 test("self-unregister removes persistence only after a distinct one-shot helper is running", async (t) => {
   const currentPid = 4321;
   let plistPresentWhenHelperSubmitted = false;
+  let readyPath;
   const deps = await fixture(t, {
     currentPid,
     printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
-    onSubmit: async () => {
+    onSubmit: async ({ args }) => {
       plistPresentWhenHelperSubmitted = await pathExists(deps.controllerPlistPath);
+      readyPath = args.at(-2);
     },
   });
   deps.loaded.clear();
@@ -1191,6 +1386,8 @@ test("self-unregister removes persistence only after a distinct one-shot helper 
   assert.equal(await pathExists(deps.controllerPlistPath), false);
   assert.equal(deps.loaded.has(deps.label), true);
   assert.equal(deps.loaded.has(result.helperLabel), true);
+  assert.equal(await pathExists(readyPath), false);
+  assert.equal(await pathExists(`${readyPath}.pending`), false);
   const submit = deps.commands.find((command) => command[1] === "submit");
   assert.ok(submit);
   assert.equal(submit.includes(`gui/${UID}/${deps.label}`), true);
@@ -1243,11 +1440,18 @@ test("self-unregister fails closed and removes a submitted helper that never sta
 
 test("self-unregister keeps persistence when a running helper never publishes readiness", async (t) => {
   const currentPid = 4321;
+  let processChecks = 0;
+  let waits = 0;
   const deps = await fixture(t, {
     currentPid,
     printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
     publishHelperReady: false,
-    wait: async () => {},
+    processExists: (pid) => {
+      assert.equal(pid, 8765);
+      processChecks += 1;
+      return processChecks === 1;
+    },
+    wait: async () => { waits += 1; },
   });
   deps.loaded.clear();
   await registerControllerAgent(deps);
@@ -1259,6 +1463,8 @@ test("self-unregister keeps persistence when a running helper never publishes re
     [...deps.loaded].some((label) => label.includes(".unregister.")),
     false,
   );
+  assert.equal(processChecks, 2);
+  assert.equal(waits, 41, "cleanup waits for the captured helper PID after bootout");
 });
 
 test("self-unregister preserves a foreign readiness file and keeps persistence", async (t) => {
@@ -1278,8 +1484,215 @@ test("self-unregister preserves a foreign readiness file and keeps persistence",
 
   await assert.rejects(unregisterControllerAgent(deps), /helper readiness is invalid/i);
   assert.equal(await readFile(readyPath, "utf8"), foreign);
+  assert.equal(await readFile(`${readyPath}.pending`, "utf8"), foreign);
   assert.equal(await pathExists(deps.controllerPlistPath), true);
   assert.equal(deps.loaded.has(deps.label), true);
+});
+
+test("self-unregister preserves an exact foreign public readiness without its pending hard link", async (t) => {
+  const currentPid = 4321;
+  let readyPath;
+  let foreignReady;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    publishHelperReady: false,
+    onSubmit: async ({ args }) => {
+      const [target, expectedPid, helperTarget, , observedReadyPath, readyNonce] = args.slice(-6);
+      readyPath = observedReadyPath;
+      foreignReady = `${JSON.stringify({
+        schemaVersion: 1,
+        target,
+        expectedPid: Number(expectedPid),
+        helperTarget,
+        readyNonce,
+      })}\n`;
+      await writeFile(readyPath, foreignReady, { mode: 0o600 });
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper readiness is invalid/i);
+  assert.equal(await readFile(readyPath, "utf8"), foreignReady);
+  assert.equal(await pathExists(`${readyPath}.pending`), false);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+});
+
+test("self-unregister rejects and preserves equal readiness files with different inodes", async (t) => {
+  const currentPid = 4321;
+  let readyPath;
+  let expectedReady;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    publishHelperReady: false,
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+      const pendingPath = `${readyPath}.pending`;
+      expectedReady = await readFile(pendingPath);
+      await rm(pendingPath);
+      await writeFile(pendingPath, expectedReady, { mode: 0o600 });
+      await writeFile(readyPath, expectedReady, { mode: 0o600 });
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(unregisterControllerAgent(deps), /helper readiness is invalid/i);
+  assert.deepEqual(await readFile(readyPath), expectedReady);
+  assert.deepEqual(await readFile(`${readyPath}.pending`), expectedReady);
+  assert.notEqual((await stat(readyPath)).ino, (await stat(`${readyPath}.pending`)).ino);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+});
+
+test("self-unregister keeps persistence when the helper PID changes after readiness", async (t) => {
+  const currentPid = 4321;
+  let helperInspections = 0;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => {
+      if (!label.includes(".unregister.")) return currentPid;
+      helperInspections += 1;
+      return helperInspections <= 2 ? 8765 : 9876;
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(
+    unregisterControllerAgent(deps),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.match(error.cause?.message ?? "", /helper identity changed after readiness/i);
+      assert.equal(
+        error.errors.some((entry) => entry?.code === "UNREGISTER_HELPER_IDENTITY_CHANGED"),
+        true,
+      );
+      return true;
+    },
+  );
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    true,
+  );
+});
+
+test("self-unregister removes its loaded no-PID helper only after the captured PID exits", async (t) => {
+  const currentPid = 4321;
+  let helperInspections = 0;
+  let processChecks = 0;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => {
+      if (!label.includes(".unregister.")) return currentPid;
+      helperInspections += 1;
+      return helperInspections <= 2 ? 8765 : undefined;
+    },
+    processExists: (pid) => {
+      assert.equal(pid, 8765);
+      processChecks += 1;
+      return false;
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(
+    unregisterControllerAgent(deps),
+    /helper identity changed after readiness/i,
+  );
+  assert.equal(processChecks >= 1, true);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    false,
+  );
+});
+
+test("self-unregister keeps persistence when the helper PID changes before commit", async (t) => {
+  const currentPid = 4321;
+  let helperInspections = 0;
+  let readyPath;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => {
+      if (!label.includes(".unregister.")) return currentPid;
+      helperInspections += 1;
+      return helperInspections <= 4 ? 8765 : 9876;
+    },
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(
+    unregisterControllerAgent(deps),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.match(error.cause?.message ?? "", /helper identity changed before commit/i);
+      assert.equal(
+        error.errors.some((entry) => entry?.code === "UNREGISTER_HELPER_IDENTITY_CHANGED"),
+        true,
+      );
+      return true;
+    },
+  );
+  assert.equal(await pathExists(readyPath), false);
+  assert.equal(await pathExists(`${readyPath}.pending`), false);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    true,
+  );
+});
+
+test("self-unregister keeps persistence when the helper changes before plist removal", async (t) => {
+  const currentPid = 4321;
+  let helperInspections = 0;
+  let readyPath;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => {
+      if (!label.includes(".unregister.")) return currentPid;
+      helperInspections += 1;
+      return helperInspections <= 6 ? 8765 : 9876;
+    },
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+
+  await assert.rejects(
+    unregisterControllerAgent(deps),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.match(error.cause?.message ?? "", /helper identity changed before plist removal/i);
+      assert.equal(
+        error.errors.some((entry) => entry?.code === "UNREGISTER_HELPER_IDENTITY_CHANGED"),
+        true,
+      );
+      return true;
+    },
+  );
+  assert.equal(await pathExists(readyPath), false);
+  assert.equal(await pathExists(`${readyPath}.pending`), false);
+  assert.equal(await pathExists(deps.controllerPlistPath), true);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(
+    [...deps.loaded].some((label) => label.includes(".unregister.")),
+    true,
+  );
 });
 
 test("background self-unregister fails closed when launchd omits the exact current PID", async (t) => {

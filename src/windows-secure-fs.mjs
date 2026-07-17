@@ -105,7 +105,7 @@ if (-not $private) { throw 'private path ACL is not exact current-user only' }
 $result = [pscustomobject][ordered]@{
   schemaVersion = 1
   action = $Action
-  path = [System.IO.Path]::GetFullPath($TargetPath)
+  path = $TargetPath
   ownerSid = $ownerSid.Value
   private = $true
 }
@@ -132,20 +132,24 @@ export function trustedWindowsPowerShellPath(env = process.env) {
 }
 
 function exactAclResult(value, { action, path }) {
-  if (
-    value === null ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).sort().join("\0") !== ["action", "ownerSid", "path", "private", "schemaVersion"].sort().join("\0") ||
-    value.schemaVersion !== 1 ||
-    value.action !== action ||
-    value.private !== true ||
-    typeof value.ownerSid !== "string" ||
-    !/^S-1-(?:\d+-)+\d+$/.test(value.ownerSid) ||
-    typeof value.path !== "string" ||
-    value.path.toLowerCase() !== path.toLowerCase()
-  ) {
-    throw new Error("Windows private ACL verifier returned an invalid result");
+  const expectedKeys = ["action", "ownerSid", "path", "private", "schemaVersion"];
+  const mismatches = [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    mismatches.push("document");
+  } else {
+    if (Object.keys(value).sort().join("\0") !== expectedKeys.sort().join("\0")) mismatches.push("keys");
+    if (value.schemaVersion !== 1) mismatches.push("schemaVersion");
+    if (value.action !== action) mismatches.push("action");
+    if (value.private !== true) mismatches.push("private");
+    if (typeof value.ownerSid !== "string" || !/^S-1-(?:\d+-)+\d+$/.test(value.ownerSid)) {
+      mismatches.push("ownerSid");
+    }
+    if (typeof value.path !== "string" || value.path.toLowerCase() !== path.toLowerCase()) {
+      mismatches.push("path");
+    }
+  }
+  if (mismatches.length > 0) {
+    throw new Error(`Windows private ACL verifier returned an invalid result: ${mismatches.join(",")}`);
   }
   return value;
 }
