@@ -15,6 +15,7 @@ Recorded: 2026-07-17T05:10:00.000Z
 
 - controller and LaunchAgent regression suite: PASS, 216 passed, 0 failed.
 - full suite before the final fresh-controller startup-race patch: PASS, 917 passed, 0 failed, 6 skipped.
+- rollback-quiescence regression suite after the final recovery-order patch: PASS, 58 passed, 0 failed.
 - final live menu acceptance: NOT RUN. Do not treat the prior recovery result as feature acceptance.
 
 ## Recovery

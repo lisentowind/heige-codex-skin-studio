@@ -514,6 +514,23 @@ test("readiness failure durably decides rollback and reverses state launcher tre
   assert.equal(fx.journal, null);
 });
 
+test("recovery quiesces an activated controller before durably deciding rollback", async () => {
+  const fx = fixture({
+    persistenceEnabled: true,
+    crashAt: "ready-acked",
+  });
+
+  await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /crash at/);
+  await recoverMacosInstallTransaction(fx.deps);
+
+  const stopIndex = fx.events.lastIndexOf("freeze-stop");
+  const rollbackDecisionIndex = fx.events.findIndex((entry) =>
+    Array.isArray(entry) && entry[0] === "journal-update" && entry[1] === "rollback-decided");
+  assert.equal(stopIndex >= 0, true);
+  assert.equal(rollbackDecisionIndex >= 0, true);
+  assert.equal(stopIndex < rollbackDecisionIndex, true);
+});
+
 for (const prestate of ["controller-only", "both", "none"]) {
   test(`rollback recovery preserves the exact ${prestate} freeze prestate after outer clear crashes`, async () => {
     const fx = fixture({

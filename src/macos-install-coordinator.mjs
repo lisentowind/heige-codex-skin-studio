@@ -235,7 +235,7 @@ async function finishCommittedInstall(deps, journal) {
   return { recovered: true, decision: "commit" };
 }
 
-async function undoUndecidedInstall(deps, journal) {
+async function undoUndecidedInstall(deps, journal, { controllerQuiesced = false } = {}) {
   if (journal.phase === "freeze-rollback-restored") {
     await deps.finalizeFreezeRollback(journal.freezeParticipant);
     await deps.checkpoint("freeze-rollback-finalized", journal);
@@ -243,7 +243,11 @@ async function undoUndecidedInstall(deps, journal) {
     return { recovered: true, decision: "rollback" };
   }
 
-  if (journal.activation === "controller" && journal.freezeParticipant !== null) {
+  if (
+    controllerQuiesced !== true &&
+    journal.activation === "controller" &&
+    journal.freezeParticipant !== null
+  ) {
     await deps.stopFreezeForRollback(journal.freezeParticipant);
   }
 
@@ -275,7 +279,12 @@ export async function recoverMacosInstallTransaction(dependencies) {
   const deps = assertDependencies(dependencies);
   let journal = await deps.readJournal();
   if (journal === null) return { recovered: false };
+  let controllerQuiesced = false;
   if (journal.decision === "undecided") {
+    if (journal.activation === "controller" && journal.freezeParticipant !== null) {
+      await deps.stopFreezeForRollback(journal.freezeParticipant);
+      controllerQuiesced = true;
+    }
     journal = await update(deps, journal, {
       decision: "rollback",
       phase: "rollback-decided",
@@ -283,7 +292,7 @@ export async function recoverMacosInstallTransaction(dependencies) {
   }
   return journal.decision === "commit"
     ? finishCommittedInstall(deps, journal)
-    : undoUndecidedInstall(deps, journal);
+    : undoUndecidedInstall(deps, journal, { controllerQuiesced });
 }
 
 async function createFreshInstall(input, deps, launcherLock) {
