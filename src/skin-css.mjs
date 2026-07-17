@@ -19,7 +19,24 @@ function copy(value, fallback = "") {
 
 const DATA_URL = /^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i;
 
-export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidDataUrl = null }) {
+export function buildSignatureCardSharedCss(frameDataUrl) {
+  if (
+    !DATA_URL.test(frameDataUrl)
+    || !frameDataUrl.startsWith("data:image/png;base64,")
+  ) {
+    throw new Error("signature card frame 必须是本地 PNG 数据");
+  }
+  return `:root{--heige-signature-card-frame-image:url(${JSON.stringify(frameDataUrl)});}`;
+}
+
+export function buildSkinCss({
+  theme,
+  heroDataUrl,
+  logoDataUrl = null,
+  polaroidDataUrl = null,
+  cardArtworkDataUrl = null,
+  signatureCard = false,
+}) {
   if (!DATA_URL.test(heroDataUrl)) {
     throw new Error("hero 必须是本地 PNG、JPEG 或 WebP 数据");
   }
@@ -29,6 +46,9 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   if (polaroidDataUrl !== null && !DATA_URL.test(polaroidDataUrl)) {
     throw new Error("polaroid 必须是本地 PNG、JPEG 或 WebP 数据");
   }
+  if (cardArtworkDataUrl !== null && !DATA_URL.test(cardArtworkDataUrl)) {
+    throw new Error("cardArtwork 必须是本地 PNG、JPEG 或 WebP 数据");
+  }
   const colors = {
     accent: color(theme.colors?.accent, DEFAULT_COLORS.accent),
     secondary: color(theme.colors?.secondary, DEFAULT_COLORS.secondary),
@@ -36,6 +56,7 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
     text: color(theme.colors?.text, DEFAULT_COLORS.text),
   };
   const id = String(theme.id ?? "custom").replace(/[^a-z0-9_-]/gi, "");
+  const modularSignatureCard = signatureCard === true && polaroidDataUrl === null;
 
   return `/* HEIGE_CODEX_SKIN:${id} */
 :root[data-codex-window-type="electron"] {
@@ -44,7 +65,11 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   --heige-secondary: ${colors.secondary};
   --heige-surface: ${colors.surface};
   --heige-text: ${colors.text};
-  --color-background-surface: color-mix(in srgb, var(--heige-surface) 90%, transparent) !important;
+  --heige-hero-image: url(${JSON.stringify(heroDataUrl)});
+${modularSignatureCard ? `  --heige-card-artwork-image: ${cardArtworkDataUrl === null
+    ? "var(--heige-hero-image)"
+    : `url(${JSON.stringify(cardArtworkDataUrl)})`};
+` : ""}  --color-background-surface: color-mix(in srgb, var(--heige-surface) 90%, transparent) !important;
   --color-background-panel: color-mix(in srgb, var(--heige-surface) 94%, transparent) !important;
   --color-background-button-primary: var(--heige-accent) !important;
   --color-text-foreground: var(--heige-text) !important;
@@ -56,7 +81,7 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--heige-surface) 96%, transparent) 0 22%, transparent 46%),
     linear-gradient(180deg, transparent 0 45%, color-mix(in srgb, var(--heige-surface) 78%, transparent) 78% 100%),
-    url(${JSON.stringify(heroDataUrl)}) right center / cover no-repeat fixed !important;
+    var(--heige-hero-image) right center / cover no-repeat fixed !important;
 }
 
 #root::before {
@@ -127,7 +152,7 @@ ${logoDataUrl === null ? "" : `
 .app-shell-left-panel button[aria-haspopup="menu"][aria-label*="ChatGPT"] > svg {
   visibility: hidden;
 }
-`}${polaroidDataUrl === null ? "" : `
+`}${polaroidDataUrl !== null ? `
 /* 右下角拍立得挂件，点击穿透 */
 body::after {
   content: "";
@@ -141,5 +166,51 @@ body::after {
   z-index: 15;
   filter: drop-shadow(0 12px 26px color-mix(in srgb, var(--heige-text) 24%, transparent));
 }
-`}`;
+` : modularSignatureCard ? `
+/* 预设主题共享签名卡：画芯与相框分层，切换时同步更新 */
+body::before,
+body::after {
+  position: fixed;
+  right: 20px;
+  bottom: 24px;
+  width: clamp(150px, 13.2vw, 200px);
+  aspect-ratio: 2 / 3;
+  box-sizing: border-box;
+  transform: rotate(-3.5deg);
+  transform-origin: center;
+  pointer-events: none;
+  z-index: 15;
+}
+
+body::before {
+  content: "";
+  border-radius: 5%;
+  background:
+    var(--heige-card-artwork-image) 50% 17% / 78% 66% no-repeat,
+    #fffaf5;
+  filter: drop-shadow(0 12px 26px color-mix(in srgb, var(--heige-text) 24%, transparent));
+}
+
+body::after {
+  content: ${copy(theme.name)} "\\A" "By@HeiGe";
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 10% 7.5%;
+  overflow: hidden;
+  white-space: pre;
+  text-align: center;
+  color: var(--heige-accent);
+  font: italic 700 clamp(10px, .9vw, 14px)/1.25 ui-rounded, system-ui;
+  text-shadow: 0 1px 0 rgba(255,255,255,.9);
+  background: var(--heige-signature-card-frame-image) center / contain no-repeat;
+}
+
+@media (max-width: 899px), (max-height: 649px) {
+  body::before,
+  body::after {
+    display: none;
+  }
+}
+` : ""}`;
 }
