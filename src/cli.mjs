@@ -2326,7 +2326,12 @@ export async function runCli(argv, overrides = {}) {
     }
     const port = portFrom(args.port);
     const state = await deps.readState();
-    if (state === null) throw new Error("状态文件不存在，请先运行 apply");
+    if (state === null) {
+      if (enabled) throw new Error("状态文件不存在，请先运行 apply");
+      // 从未 apply 过的安装本来就是原生外观：关闭常驻应当幂等落盘，
+      // 而不是要求用户先 apply 一次才准关闭。Windows 的还原流程走的正是这条路径。
+      return deps.offlineDisablePersistence({ port });
+    }
     const expectedRevision = revisionFrom(args.revision, state.revision);
     const { preflight, restartRequired } = enabled
       ? {

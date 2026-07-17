@@ -40,7 +40,8 @@ function deps(overrides = {}) {
 }
 
 function lifecycleDeps(overrides = {}) {
-  let state = overrides.initialState ?? {
+  // 用 === undefined 而不是 ??：initialState: null 要能表达「状态文件不存在」。
+  let state = overrides.initialState === undefined ? {
     schemaVersion: 2,
     persistenceEnabled: false,
     selectedThemeId: "miku-488137",
@@ -48,7 +49,7 @@ function lifecycleDeps(overrides = {}) {
     controlToken: Buffer.alloc(32, 7).toString("base64url"),
     lastTransitionNonce: null,
     revision: 5,
-  };
+  } : overrides.initialState;
   const calls = {
     controller: [],
     createController: [],
@@ -105,6 +106,19 @@ function lifecycleDeps(overrides = {}) {
     },
     offlineDisablePersistence: async (input) => {
       calls.offlineDisable.push(structuredClone(input));
+      // 真实实现在没有状态文件时会新建一条「已关闭」记录，不再抛错。
+      if (state === null) {
+        state = {
+          schemaVersion: 2,
+          persistenceEnabled: false,
+          selectedThemeId: "miku-488137",
+          lastNonNativeThemeId: "miku-488137",
+          controlToken: Buffer.alloc(32, 7).toString("base64url"),
+          lastTransitionNonce: null,
+          revision: 0,
+        };
+        return { persistenceEnabled: false, revision: state.revision };
+      }
       if (state.persistenceEnabled) {
         state = {
           ...state,
@@ -1326,6 +1340,27 @@ test("offline disable commits authority and a non-retained native session before
     "background:unregistered",
     "background:verified",
   ]);
+});
+
+test("set-persistence false on a never-applied install defers to the offline path", async () => {
+  // Windows 的还原流程调的是 set-persistence false，不是 restore。
+  // -SkipApply 装完就还原时没有状态文件，必须幂等成功而不是要求先 apply。
+  const fx = lifecycleDeps({ initialState: null });
+  assert.deepEqual(await runCli(["set-persistence", "false"], fx.deps), {
+    persistenceEnabled: false,
+    revision: 0,
+  });
+  assert.equal(fx.calls.offlineDisable.length, 1);
+  assert.equal(fx.calls.offlineDisable[0].expectedRevision, undefined);
+});
+
+test("set-persistence true on a never-applied install still refuses without state", async () => {
+  const fx = lifecycleDeps({ initialState: null });
+  await assert.rejects(
+    runCli(["set-persistence", "true"], fx.deps),
+    /常驻只能在 Codex 顶部菜单/,
+  );
+  assert.equal(fx.calls.offlineDisable.length, 0);
 });
 
 test("offline restore on a never-applied install records the disabled choice instead of failing", async () => {
