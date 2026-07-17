@@ -24,6 +24,9 @@ const operationLockUrl = pathToFileURL(join(repositoryRoot, "src", "operation-lo
 const cliUrl = pathToFileURL(cliPath).href;
 const PORT = 49341;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const CLI_TIMEOUT_MS = 120_000;
+const CONTRACT_TIMEOUT_MS = 600_000;
+const CLEANUP_TIMEOUT_MS = 60_000;
 
 function runtimeSnapshot(processes = []) {
   const executablePath = "C:\\Program Files\\Codex\\Codex.exe";
@@ -77,6 +80,33 @@ async function writePrivateJson(path, value, security) {
   await security.verifyFile(path);
 }
 
+async function terminateProcessTree(child) {
+  if (
+    !Number.isSafeInteger(child.pid) ||
+    child.pid <= 0 ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  ) {
+    return;
+  }
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (typeof systemRoot !== "string" || systemRoot.length === 0) {
+    child.kill();
+    throw new Error("SystemRoot is unavailable for Windows process-tree cleanup");
+  }
+  try {
+    await execFile(
+      join(systemRoot, "System32", "taskkill.exe"),
+      ["/PID", String(child.pid), "/T", "/F"],
+      { timeout: 15_000, windowsHide: true },
+    );
+  } catch (error) {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill();
+    throw error;
+  }
+}
+
 async function runCli(args, env) {
   const child = spawn(process.execPath, [cliPath, ...args], {
     cwd: repositoryRoot,
@@ -97,13 +127,29 @@ async function runCli(args, env) {
     if (Buffer.byteLength(stderr) > MAX_OUTPUT_BYTES) child.kill();
   });
   let timer;
+  let settled = false;
   const result = await new Promise((resolve, reject) => {
-    timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`CLI timed out: ${args.join(" ")}`));
-    }, 30_000);
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+      const timeoutError = new Error(`CLI timed out: ${args.join(" ")}`);
+      try {
+        await terminateProcessTree(child);
+        reject(timeoutError);
+      } catch (cause) {
+        reject(new Error(`${timeoutError.message}; process-tree cleanup failed`, { cause }));
+      }
+    }, CLI_TIMEOUT_MS);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      resolve({ code, signal });
+    });
   }).finally(() => clearTimeout(timer));
   return { ...result, stdout, stderr };
 }
@@ -145,7 +191,10 @@ async function startLockHolder(stateRoot) {
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   try {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("lock holder readiness timed out")), 20_000);
+      const timer = setTimeout(
+        () => reject(new Error("lock holder readiness timed out")),
+        CLI_TIMEOUT_MS,
+      );
       const cleanup = () => {
         clearTimeout(timer);
         child.stdout.off("data", onData);
@@ -169,7 +218,14 @@ async function startLockHolder(stateRoot) {
       child.once("exit", onExit);
     });
   } catch (error) {
-    child.kill();
+    try {
+      await terminateProcessTree(child);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "lock holder readiness failed and process-tree cleanup did not finish",
+      );
+    }
     throw error;
   }
   return child;
@@ -184,7 +240,7 @@ async function terminate(child) {
 
 test("real Windows Node CLI stays isolated, portable, and crash-safe", {
   skip: process.platform !== "win32",
-  timeout: 120_000,
+  timeout: CONTRACT_TIMEOUT_MS,
 }, async (t) => {
   const stateRoot = await realpath(await mkdtemp(join(tmpdir(), "heige-windows-node-cli-")));
   const statePath = join(stateRoot, "state.json");
@@ -218,7 +274,7 @@ test("real Windows Node CLI stays isolated, portable, and crash-safe", {
         String(PORT),
         "-StateDirectory",
         stateRoot,
-      ], { timeout: 20_000, windowsHide: true });
+      ], { timeout: CLEANUP_TIMEOUT_MS, windowsHide: true });
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }
