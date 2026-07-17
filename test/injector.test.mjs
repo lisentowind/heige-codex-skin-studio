@@ -93,6 +93,7 @@ test("keeps waiting when only the pet overlay renderer exists", async () => {
 test("injects the in-app switcher menu with every loaded theme", async () => {
   FakeSession.expressions = [];
   const { loaded, deps } = await fixture();
+  loaded.manifest.previewFocus = { x: 50, y: 24 };
   const second = structuredClone(loaded);
   second.manifest.id = "night-city";
   second.manifest.name = "Night City";
@@ -101,6 +102,7 @@ test("injects the in-app switcher menu with every loaded theme", async () => {
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
   assert.match(FakeSession.expressions[0], /"activeId":"demo"/);
   assert.match(FakeSession.expressions[0], /"night-city"/);
+  assert.match(FakeSession.expressions[0], /"previewFocus":\{"x":50,"y":24\}/);
 });
 
 test("keeps the menu resources while rendering the authoritative native selection", async () => {

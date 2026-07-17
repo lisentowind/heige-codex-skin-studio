@@ -80,6 +80,17 @@ export function buildSkinMenuScript({
     throw new Error("皮肤菜单至少需要一个主题");
   }
   const colorValue = (value, fallback) => HEX_COLOR.test(value ?? "") ? value : fallback;
+  const previewFocusValue = (value) => (
+    value
+    && Number.isInteger(value.x)
+    && Number.isInteger(value.y)
+    && value.x >= 0
+    && value.x <= 100
+    && value.y >= 0
+    && value.y <= 100
+      ? { x: value.x, y: value.y }
+      : { x: 50, y: 50 }
+  );
   const themes = entries.map((entry) => {
     if (!entry?.id || typeof entry.css !== "string") throw new Error("主题条目缺少 id 或 css");
     const accent = colorValue(entry.colors?.accent ?? entry.accent, DEFAULT_ACCENT);
@@ -90,6 +101,7 @@ export function buildSkinMenuScript({
       appearance: ["system", "light", "dark"].includes(entry.appearance)
         ? entry.appearance
         : "system",
+      previewFocus: previewFocusValue(entry.previewFocus),
       colors: {
         accent,
         secondary: colorValue(entry.colors?.secondary, "#ed6ec1"),
@@ -339,7 +351,7 @@ export function buildSkinMenuScript({
   appearanceHelp.dataset.heigeRole = "appearance-help";
   appearanceHelp.setAttribute("role", "note");
   appearanceHelp.setAttribute("aria-label", "字体颜色显示异常处理");
-  appearanceHelp.textContent = "字体颜色显示不对？这通常是 Codex 本体的外观配色不匹配。点击左下角头像 → 设置 → 外观 → 选择浅色或深色主题即可。";
+  appearanceHelp.textContent = "字体颜色显示不对？这通常是 Codex 本体的外观配色不匹配。点击左下角头像👉设置👉外观👉选择 浅色/深色 主题✅即可。";
   const quickActions = document.createElement("section");
   quickActions.dataset.heigeRole = "quick-actions";
   const customSection = document.createElement("section");
@@ -793,6 +805,16 @@ export function buildSkinMenuScript({
     const custom = themeId === data.customId ? currentCustom ?? loadCustom() : null;
     const preview = theme ? previewFromGeneratedCss(theme.css) : custom?.dataUrl ?? null;
     currentHero.dataset.themeId = themeId;
+    const previewFocus = theme?.previewFocus ?? { x: 50, y: 50 };
+    if (custom !== null) {
+      currentHero.style.backgroundPosition = "center, center";
+      currentHero.style.backgroundSize = "100% 100%, contain";
+      currentHero.style.backgroundRepeat = "no-repeat";
+    } else {
+      currentHero.style.backgroundPosition = previewFocus.x + "% " + previewFocus.y + "%";
+      currentHero.style.backgroundSize = "";
+      currentHero.style.backgroundRepeat = "";
+    }
     currentHero.style.backgroundImage = preview === null
       ? "linear-gradient(135deg,#26343b,#67757a)"
       : "linear-gradient(90deg,rgba(7,28,52,.84),rgba(7,28,52,.18)),url("

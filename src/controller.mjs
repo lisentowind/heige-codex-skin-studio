@@ -963,7 +963,6 @@ export function createSkinController(input) {
         : "active";
       const sessionMatches = isRecord(before.session) &&
         before.session.mode === expectedMode &&
-        before.session.keepUntilProcessExit === false &&
         sameProcessIdentity(before.session.process, before.process) &&
         (
           expectedMode === "native"
@@ -971,14 +970,14 @@ export function createSkinController(input) {
             : before.session.activeThemeId === before.state.selectedThemeId
         );
       if (
-        before.state.persistenceEnabled !== true ||
         before.transition !== null ||
         before.process === null ||
         !sessionMatches
       ) return null;
 
       await assertPortOwner(before.process);
-      const health = analyzeRendererHealth(await deps.inspectSkin({
+      const observedHealth = await deps.inspectSkin({
+        purpose: "renderer-control-request",
         expected: {
           themeId: before.state.selectedThemeId,
           mode: expectedMode,
@@ -986,7 +985,19 @@ export function createSkinController(input) {
           revision: before.state.revision,
         },
         process: before.process,
-      }), before.state);
+      });
+      if (typeof processRendererRequest === "function") {
+        const request = pendingRendererControlRequest(observedHealth);
+        if (request !== null) {
+          const handled = await processRendererRequest(request);
+          if (handled !== null) return handled;
+        }
+      }
+      if (
+        before.state.persistenceEnabled !== true ||
+        before.session.keepUntilProcessExit !== false
+      ) return null;
+      const health = analyzeRendererHealth(observedHealth, before.state);
       if (health.repairTargets?.length !== 0) return null;
 
       const after = {
@@ -1039,21 +1050,6 @@ export function createSkinController(input) {
     if (handoffRequested && !deps.backgroundProcess) {
       const mode = lastKnownState?.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
       return result("handoff", mode, lastKnownState);
-    }
-    if (
-      typeof deps.inspectSkin === "function" &&
-      typeof processRendererRequest === "function"
-    ) {
-      let request = null;
-      try {
-        request = pendingRendererControlRequest(await deps.inspectSkin({
-          purpose: "renderer-control-request",
-        }));
-      } catch {}
-      if (request !== null) {
-        const handled = await processRendererRequest(request);
-        if (handled !== null) return handled;
-      }
     }
     const healthy = await healthyTickSnapshot();
     if (healthy !== null) return healthy;

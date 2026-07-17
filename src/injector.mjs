@@ -159,6 +159,7 @@ function themeEntry(resources) {
     name: loadedTheme.manifest.name,
     accent: loadedTheme.manifest.colors?.accent,
     appearance: loadedTheme.manifest.appearance,
+    previewFocus: { ...loadedTheme.manifest.previewFocus },
     colors: { ...loadedTheme.manifest.colors },
     css: buildSkinCss({
       theme: loadedTheme.manifest,

@@ -230,6 +230,7 @@ test("theme center renders native upload and built-in preview cards", async (t) 
         id: "miku-488137",
         name: "Miku",
         accent: "#19c9e5",
+        previewFocus: { x: 50, y: 33 },
         colors: { accent: "#19c9e5", secondary: "#ed6ec1", surface: "#f5f6fc", text: "#122c60" },
         css: '#root{background:url("data:image/webp;base64,QUJDRA==")}',
       },
@@ -237,6 +238,7 @@ test("theme center renders native upload and built-in preview cards", async (t) 
         id: "night-city",
         name: "Night City",
         accent: "#4455aa",
+        previewFocus: { x: 50, y: 17 },
         colors: { accent: "#4455aa", secondary: "#d25c9d", surface: "#121725", text: "#f4f6ff" },
         css: "html{color:#eee}",
       },
@@ -251,10 +253,13 @@ test("theme center renders native upload and built-in preview cards", async (t) 
   assert.match(cards[0].querySelector('[data-heige-role="theme-preview"]').style.backgroundImage, /data:image\/webp/);
   assert.match(cards[1].querySelector('[data-heige-role="theme-preview"]').dataset.fallbackColors, /#4455aa/i);
   assert.equal(page.currentHero.dataset.themeId, "miku-488137");
+  assert.equal(page.currentHero.style.backgroundPosition, "50% 33%");
+  await page.pickTheme("night-city");
+  assert.equal(page.currentHero.style.backgroundPosition, "50% 17%");
   const appearanceHelp = page.document.querySelector('[data-heige-role="appearance-help"]');
   assert.equal(appearanceHelp?.parentElement?.dataset.heigeRole, "theme-center-scroll");
   assert.match(appearanceHelp?.textContent ?? "", /字体颜色显示不对/);
-  assert.match(appearanceHelp?.textContent ?? "", /左下角头像.*设置.*外观.*浅色.*深色主题/);
+  assert.match(appearanceHelp?.textContent ?? "", /左下角头像👉设置👉外观👉选择 浅色\/深色 主题✅即可/);
 });
 
 test("switch exposes programmatic state and permanent re-enable guidance", async (t) => {
@@ -716,6 +721,12 @@ test("validated upload scales within both canvas budgets and persists", async (t
   assert.match(alert.textContent, /自动补针或常驻启动时可能继续显示/);
   assert.deepEqual(drawCalls[0], { width: 2000, height: 500 });
   assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.equal(
+    page.currentHero.style.backgroundSize,
+    "100% 100%, contain",
+    "custom artwork must remain fully visible in the current-theme board",
+  );
+  assert.equal(page.currentHero.style.backgroundRepeat, "no-repeat");
   assert.match(page.window.localStorage.getItem("heigeCodexCustomTheme"), /data:image\/webp/);
   const custom = page.document.querySelector('[data-heige-theme-id="custom-upload"]');
   const remove = page.document.querySelector('[data-heige-role="custom-delete"]');

@@ -4,6 +4,7 @@
   "name": "Miku 488137",
   "hero": "hero.webp",
   "appearance": "light",
+  "previewFocus": { "x": 50, "y": 33 },
   "logo": "logo.webp",
   "polaroid": "polaroid.webp",
   "colors": {

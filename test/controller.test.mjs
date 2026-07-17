@@ -433,12 +433,19 @@ test("a stable healthy tick never acquires the durable operation lease", async (
   await controller.start();
   fx.calls.lease.length = 0;
   fx.calls.leaseContext.length = 0;
+  fx.calls.inspect.length = 0;
 
   const current = await controller.tick();
 
   assert.equal(current.action, "idle");
   assert.deepEqual(fx.calls.lease, []);
   assert.deepEqual(fx.calls.leaseContext, []);
+  assert.equal(fx.calls.inspect.length, 1, "one healthy tick must scan the renderer only once");
+  assert.equal(
+    fx.calls.inspect[0].purpose,
+    "renderer-control-request",
+    "the combined health scan must still expose queued renderer requests",
+  );
 });
 
 test("an unhealthy fast snapshot falls back to the leased repair path", async () => {

@@ -1815,6 +1815,31 @@ test("background login with no one-shot request follows the latest revision with
   assert.deepEqual(events, ["claim", "start", "stop"]);
 });
 
+test("a healthy background controller keeps the one-second interaction cadence", async () => {
+  const waits = [];
+  const result = await runControllerProcess({
+    start: async () => ({
+      action: "idle",
+      mode: "active",
+      persistenceEnabled: true,
+      revision: 19,
+    }),
+    tick: async () => ({
+      action: "unregister",
+      mode: "native",
+      persistenceEnabled: false,
+      revision: 20,
+    }),
+    stop: async () => {},
+  }, {
+    paths: { stateRoot: "/private/state" },
+    wait: async (milliseconds) => waits.push(milliseconds),
+  });
+
+  assert.equal(result.action, "unregister");
+  assert.deepEqual(waits, [1000]);
+});
+
 function postControl(control, input) {
   const endpoint = new URL(control.endpoint);
   const payload = JSON.stringify(input);

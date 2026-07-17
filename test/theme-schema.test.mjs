@@ -52,6 +52,7 @@ test("normalizes the minimal theme and supplies color defaults", () => {
     logo: null,
     polaroid: null,
     appearance: "system",
+    previewFocus: { x: 50, y: 50 },
     colors: {
       accent: "#4BC2E0",
       secondary: "#AD7ED5",
@@ -60,6 +61,28 @@ test("normalizes the minimal theme and supplies color defaults", () => {
     },
     copy: null,
   });
+});
+
+test("normalizes and validates the current-theme preview focus", () => {
+  assert.deepEqual(
+    validateThemeManifest({
+      ...minimalManifest,
+      previewFocus: { x: 50, y: 24 },
+    }).previewFocus,
+    { x: 50, y: 24 },
+  );
+  for (const previewFocus of [
+    { x: -1, y: 50 },
+    { x: 50, y: 101 },
+    { x: 50.5, y: 50 },
+    { x: 50, y: 50, z: 1 },
+    "50% 24%",
+  ]) {
+    assert.throws(
+      () => validateThemeManifest({ ...minimalManifest, previewFocus }),
+      /preview focus/,
+    );
+  }
 });
 
 test("normalizes and validates a theme appearance preference", () => {

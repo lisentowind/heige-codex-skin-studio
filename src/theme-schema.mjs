@@ -103,6 +103,25 @@ function normalizeCopy(copy) {
   );
 }
 
+function normalizePreviewFocus(previewFocus) {
+  if (previewFocus == null) return { x: 50, y: 50 };
+  if (
+    !isRecord(previewFocus)
+    || Object.keys(previewFocus).length !== 2
+    || !Object.hasOwn(previewFocus, "x")
+    || !Object.hasOwn(previewFocus, "y")
+    || !Number.isInteger(previewFocus.x)
+    || !Number.isInteger(previewFocus.y)
+    || previewFocus.x < 0
+    || previewFocus.x > 100
+    || previewFocus.y < 0
+    || previewFocus.y > 100
+  ) {
+    throw new Error("theme preview focus must contain integer x and y values from 0 through 100");
+  }
+  return { x: previewFocus.x, y: previewFocus.y };
+}
+
 export function validateThemeManifest(input) {
   if (!isRecord(input)) {
     throw new Error("theme manifest must be an object");
@@ -129,6 +148,7 @@ export function validateThemeManifest(input) {
     logo: input.logo === undefined || input.logo === null ? null : normalizeAssetPath(input.logo, "logo"),
     polaroid: input.polaroid === undefined || input.polaroid === null ? null : normalizeAssetPath(input.polaroid, "polaroid"),
     appearance,
+    previewFocus: normalizePreviewFocus(input.previewFocus),
     colors: normalizeColors(input.colors),
     copy: normalizeCopy(input.copy),
   };
