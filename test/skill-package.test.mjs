@@ -210,6 +210,7 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/payload/src/cli.mjs",
     "heige-codex-skin-studio/payload/src/lifecycle-helper.mjs",
     "heige-codex-skin-studio/payload/src/macos-launcher.mjs",
+    "heige-codex-skin-studio/payload/src/theme-center-style.mjs",
     "heige-codex-skin-studio/payload/scripts/enable-skin.command",
     "heige-codex-skin-studio/payload/scripts/resume.command",
     "heige-codex-skin-studio/payload/scripts/windows/install.bat",

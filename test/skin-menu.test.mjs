@@ -1,12 +1,58 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSkinMenuScript, CSS_SENTINELS } from "../src/skin-menu.mjs";
+import {
+  buildSkinMenuScript,
+  CSS_SENTINELS,
+  previewFromGeneratedCss,
+} from "../src/skin-menu.mjs";
+import { THEME_CENTER_STYLE } from "../src/theme-center-style.mjs";
 
 const base = {
   styleId: "heige-codex-skin-style",
   menuId: "heige-codex-skin-menu",
 };
+
+test("extracts one validated hero data URL from generated theme CSS", () => {
+  const hero = "data:image/webp;base64,QUJDRA==";
+  const css = `#root { background:
+    linear-gradient(#fff, transparent),
+    url(${JSON.stringify(hero)}) right center / cover no-repeat fixed !important;
+  }`;
+  assert.equal(previewFromGeneratedCss(css), hero);
+  assert.equal(previewFromGeneratedCss("html { color: red; }"), null);
+  assert.equal(previewFromGeneratedCss("#root{background:url(https://example.com/x.webp)}"), null);
+});
+
+test("embeds validated theme colors without adding a duplicate preview field", () => {
+  const script = buildSkinMenuScript({
+    ...base,
+    activeId: "miku-488137",
+    entries: [{
+      id: "miku-488137",
+      name: "Miku",
+      accent: "#19c9e5",
+      colors: {
+        accent: "#19c9e5",
+        secondary: "#ed6ec1",
+        surface: "#f5f6fc",
+        text: "#122c60",
+      },
+      css: `#root{background:url("data:image/webp;base64,QUJDRA==")}`,
+    }],
+  });
+  assert.match(script, /"secondary":"#ed6ec1"/);
+  assert.doesNotMatch(script, /"preview":/);
+});
+
+test("ships the responsive Aurora Gallery dialog without animation", () => {
+  assert.match(THEME_CENTER_STYLE, /data-heige-role="theme-center"/);
+  assert.match(THEME_CENTER_STYLE, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(THEME_CENTER_STYLE, /@media \(max-width:979px\)/);
+  assert.match(THEME_CENTER_STYLE, /@media \(max-width:679px\)/);
+  assert.doesNotMatch(THEME_CENTER_STYLE, /https?:\/\//);
+  assert.doesNotMatch(THEME_CENTER_STYLE, /@keyframes|animation:/);
+});
 
 test("embeds every theme and the active id as JSON data", () => {
   const script = buildSkinMenuScript({
@@ -61,7 +107,7 @@ test("centers the menu at the top clear of window controls on every platform", (
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
 
-  assert.match(script, /left:50%/, "menu must anchor to the horizontal center");
+  assert.match(script, /left:\s*50%/, "menu must anchor to the horizontal center");
   assert.match(script, /translateX\(-50%\)/, "menu must center on its own width");
   assert.doesNotMatch(script, /right:1?\d+px/, "no corner offset may remain");
   assert.match(script, /-webkit-app-region:no-drag/, "controls must opt out of the titlebar drag region");

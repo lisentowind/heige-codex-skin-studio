@@ -17,7 +17,27 @@ test("builds one fast generic skin from a theme and image data URL", () => {
   assert.match(css, /data:image\/webp;base64,AAAA/);
   assert.match(css, /\.app-shell-left-panel/);
   assert.match(css, /\.composer-surface-chrome/);
+  assert.match(
+    css,
+    /\[data-local-conversation-final-assistant\]\s*\{[^}]*background:\s*transparent[^}]*box-shadow:\s*none/s,
+  );
+  assert.match(
+    css,
+    /\.composer-surface-chrome,[\s\S]*background:\s*color-mix\(in srgb, var\(--heige-surface\) 60%, transparent\)/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.composer-surface-chrome,[\s\S]*\[data-local-conversation-final-assistant\],[\s\S]*var\(--heige-surface\) 88%/,
+  );
   assert.match(css, /pointer-events:\s*none/);
+  assert.match(
+    css,
+    /\[data-app-action-sidebar-thread-active="false"\]\s+span:has\(svg\[class\*="pr-status-dot-color"\]\)\s*\{[^}]*opacity:\s*0/s,
+  );
+  assert.match(
+    css,
+    /\[data-app-action-sidebar-thread-active="false"\]:hover\s+span:has\(svg\[class\*="pr-status-dot-color"\]\)\s*\{[^}]*opacity:\s*1/s,
+  );
   assert.doesNotMatch(css, /https?:\/\//);
 });
 

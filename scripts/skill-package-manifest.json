@@ -122,6 +122,12 @@
       "exclude": []
     },
     {
+      "source": "src/macos-state-root.mjs",
+      "destination": "payload/src/macos-state-root.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "src/operation-lock.mjs",
       "destination": "payload/src/operation-lock.mjs",
       "recursive": false,
@@ -178,6 +184,12 @@
     {
       "source": "src/target-classifier.mjs",
       "destination": "payload/src/target-classifier.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "src/theme-center-style.mjs",
+      "destination": "payload/src/theme-center-style.mjs",
       "recursive": false,
       "exclude": []
     },

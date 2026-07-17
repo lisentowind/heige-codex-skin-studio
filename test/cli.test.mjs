@@ -14,6 +14,7 @@ import {
   offlineDisablePersistence,
   parseMacosInstallAuthorization,
   probeWindowsCdpProcess,
+  productionLockOptions,
   productionPreflight,
   runCli,
   runControllerProcess,
@@ -38,6 +39,15 @@ function deps(overrides = {}) {
     ...overrides,
   };
 }
+
+test("production state locks compact ownership chains before the default limit", async () => {
+  const options = await productionLockOptions({
+    stateRoot: "/tmp/heige-production-lock-test",
+    lockPath: "/tmp/heige-production-lock-test/operation.lock",
+  }, process.platform);
+
+  assert.equal(options.compactionThreshold, 8);
+});
 
 function lifecycleDeps(overrides = {}) {
   // 用 === undefined 而不是 ??：initialState: null 要能表达「状态文件不存在」。

@@ -427,6 +427,33 @@ test("a healthy native renderer is not repeatedly repaired", async () => {
   assert.equal(fx.calls.inject.length, 1);
 });
 
+test("a stable healthy tick never acquires the durable operation lease", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.calls.lease.length = 0;
+  fx.calls.leaseContext.length = 0;
+
+  const current = await controller.tick();
+
+  assert.equal(current.action, "idle");
+  assert.deepEqual(fx.calls.lease, []);
+  assert.deepEqual(fx.calls.leaseContext, []);
+});
+
+test("an unhealthy fast snapshot falls back to the leased repair path", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.calls.lease.length = 0;
+  fx.setHealth({ healthy: false });
+
+  const current = await controller.tick();
+
+  assert.equal(current.action, "repair");
+  assert.deepEqual(fx.calls.lease, ["controller:tick"]);
+});
+
 test("turning persistence off keeps only the verified current process", async () => {
   const fx = fixture();
   const controller = createSkinController(fx.deps);

@@ -95,19 +95,34 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   background: linear-gradient(180deg, transparent 0 40%, color-mix(in srgb, var(--heige-surface) 74%, transparent) 100%) !important;
 }
 
+[data-local-conversation-final-assistant] {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
 .composer-surface-chrome,
 [data-user-message-bubble],
-[data-local-conversation-final-assistant],
 [data-codex-approval-surface] {
   color: var(--heige-text) !important;
-  border-color: color-mix(in srgb, var(--heige-accent) 48%, transparent) !important;
-  background: color-mix(in srgb, var(--heige-surface) 88%, transparent) !important;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--heige-accent) 18%, transparent) !important;
-  backdrop-filter: blur(18px) saturate(1.08);
+  border: 1px solid color-mix(in srgb, var(--heige-accent) 24%, transparent) !important;
+  background: color-mix(in srgb, var(--heige-surface) 60%, transparent) !important;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--heige-accent) 12%, transparent) !important;
+  backdrop-filter: blur(22px) saturate(1.08);
 }
 
 [data-app-action-sidebar-thread-active="true"] {
   background: linear-gradient(90deg, color-mix(in srgb, var(--heige-accent) 22%, transparent), color-mix(in srgb, var(--heige-secondary) 16%, transparent)) !important;
+}
+
+/* 非当前任务不常驻展示共享工作区的 PR 状态，悬停时仍可检查 */
+[data-app-action-sidebar-thread-active="false"] span:has(svg[class*="pr-status-dot-color"]) {
+  opacity: 0 !important;
+}
+
+[data-app-action-sidebar-thread-active="false"]:hover span:has(svg[class*="pr-status-dot-color"]) {
+  opacity: 1 !important;
 }
 ${logoDataUrl === null ? "" : `
 /* 侧栏工作区标题换品牌 Logo，按钮仍可点开模式切换 */
