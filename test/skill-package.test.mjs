@@ -98,6 +98,20 @@ test("keeps the reusable skill free of author paths", async () => {
   assert.doesNotMatch(skill, /\/Users\/blakexu/);
 });
 
+test("pins the extensionless packaged license to LF checkouts", async () => {
+  const { stdout } = await execFileAsync("git", [
+    "check-attr",
+    "text",
+    "eol",
+    "--",
+    "LICENSE",
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  assert.match(stdout, /^LICENSE: text: set\r?\nLICENSE: eol: lf\r?\n$/);
+});
+
 test("two allowlisted builds are byte-identical and do not touch tracked output", async (t) => {
   const outputRoot = await mkdtemp(join(tmpdir(), "heige-package-test-"));
   t.after(() => rm(outputRoot, { recursive: true, force: true }));
