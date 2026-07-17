@@ -52,7 +52,7 @@ async function sourceFixture(t) {
     type: "module",
     bin: { "heige-codex-skin": "src/cli.mjs" },
   })}\n`);
-  for (const directory of ["src", "themes", "scripts", "custom-pet"]) {
+  for (const directory of ["src", "themes", "scripts", "custom-pet", "assets"]) {
     await mkdir(join(sourceRoot, directory), { recursive: true });
     await writeFile(join(sourceRoot, directory, `${directory}.txt`), `${directory}\n`);
   }
@@ -81,7 +81,7 @@ async function legacyFixture(t) {
     type: "module",
     bin: { "heige-codex-skin": "src/cli.mjs" },
   })}\n`);
-  for (const directory of ["src", "themes", "scripts", "custom-pet"]) {
+  for (const directory of ["src", "themes", "scripts", "custom-pet", "assets"]) {
     await mkdir(join(sourceRoot, directory), { recursive: true });
     await writeFile(join(sourceRoot, directory, `${directory}.txt`), `${directory}-v2\n`);
   }
@@ -158,6 +158,7 @@ test("installs an absent stable tree with an exact ownership marker", async (t) 
 
   assert.equal(result.installed, true);
   assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "src\n");
+  assert.equal(await readFile(join(targetRoot, "assets", "assets.txt"), "utf8"), "assets\n");
   const marker = JSON.parse(await readFile(join(targetRoot, INSTALL_MARKER_NAME), "utf8"));
   assert.deepEqual(Object.keys(marker).sort(), [
     "kind",

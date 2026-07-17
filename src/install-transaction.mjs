@@ -29,9 +29,17 @@ export const MAX_INSTALL_SOURCE_TREE_DEPTH = 32;
 const SOURCE_ENTRIES = Object.freeze([
   { name: "package.json", type: "file" },
   { name: "src", type: "directory" },
+  { name: "assets", type: "directory" },
   { name: "themes", type: "directory" },
   { name: "scripts", type: "directory" },
   { name: "custom-pet", type: "directory" },
+]);
+const LEGACY_SOURCE_ENTRY_NAMES = Object.freeze([
+  "package.json",
+  "src",
+  "themes",
+  "scripts",
+  "custom-pet",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_JOURNAL_BYTES = 128 * 1024;
@@ -382,7 +390,7 @@ async function validateLegacyTree(root, {
   const topLevel = (await readdir(root)).sort();
   const hasCommit = topLevel.includes("INSTALLED_COMMIT");
   const expectedTopLevel = [
-    ...SOURCE_ENTRIES.map((entry) => entry.name),
+    ...LEGACY_SOURCE_ENTRY_NAMES,
     ...(hasCommit ? ["INSTALLED_COMMIT"] : []),
   ].sort();
   if (
