@@ -1050,6 +1050,10 @@ export function createSkinController(input) {
         return publicState(finalized);
       }
 
+      const handshakeRequest = await deps.prepareBackgroundHandshake({
+        revision: changed.state.revision,
+        transitionNonce: enableAttempt.nonce,
+      });
       const registration = await deps.registerBackground({
         pendingRevision: changed.idempotent === true
           ? changed.state.revision
@@ -1060,14 +1064,12 @@ export function createSkinController(input) {
       if (!isRecord(registration) || registration.registered !== true) {
         throw new Error("后台控制器注册失败");
       }
-      const handshakeRequest = await deps.prepareBackgroundHandshake({
-        revision: changed.state.revision,
-        transitionNonce: enableAttempt.nonce,
-      });
-      await deps.wakeBackground({
-        revision: changed.state.revision,
-        transitionNonce: enableAttempt.nonce,
-      });
+      if (registration.started !== true) {
+        await deps.wakeBackground({
+          revision: changed.state.revision,
+          transitionNonce: enableAttempt.nonce,
+        });
+      }
       const acknowledgedIdentity = await deps.verifyBackgroundHandshake({
         revision: changed.state.revision,
         transitionNonce: enableAttempt.nonce,

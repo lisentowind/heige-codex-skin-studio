@@ -2308,6 +2308,7 @@ export async function registerControllerAgent(input = {}) {
       label: options.label,
       plistPath: options.plistPath,
       loaded: true,
+      started: false,
     };
   }
   const stagedPath = `${options.plistPath}.staged.${randomUUID()}`;
@@ -2370,6 +2371,7 @@ export async function registerControllerAgent(input = {}) {
     label: options.label,
     plistPath: options.plistPath,
     loaded: true,
+    started: true,
   };
 }
 

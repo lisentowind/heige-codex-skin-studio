@@ -882,6 +882,7 @@ test("register writes private files, lints, bootstraps and verifies gui uid stat
     label: deps.label,
     plistPath: deps.controllerPlistPath,
     loaded: true,
+    started: true,
   });
   assert.equal((await stat(deps.stateDir)).mode & 0o777, 0o700);
   assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o600);
@@ -2156,9 +2157,10 @@ test("register is inode-stable when the exact fixed controller is already loaded
   const before = await stat(deps.controllerPlistPath);
   deps.commands.length = 0;
 
-  await registerControllerAgent(deps);
+  const result = await registerControllerAgent(deps);
 
   const after = await stat(deps.controllerPlistPath);
+  assert.equal(result.started, false);
   assert.equal(after.ino, before.ino);
   assert.equal(deps.commands.some((command) => ["bootstrap", "bootout"].includes(command[1])), false);
 });

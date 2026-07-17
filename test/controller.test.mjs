@@ -242,7 +242,10 @@ function fixture(overrides = {}) {
       calls.register.push(true);
       if (overrides.registerFailure) throw new Error("后台控制器启动失败");
       backgroundRegistered = true;
-      return { registered: true };
+      return {
+        registered: true,
+        started: overrides.registrationStarted === true,
+      };
     },
     unregisterBackground: async () => {
       calls.unregister.push(true);
@@ -499,8 +502,8 @@ test("same-value enabled state repairs a missing background job without changing
   assert.equal(fx.calls.register.length, 1);
   assert.equal(fx.calls.wake.length, 1);
   assert.deepEqual(fx.calls.backgroundSequence.slice(0, 4), [
-    "register",
     "prepare",
+    "register",
     "wake",
     "verify",
   ]);
@@ -1311,6 +1314,27 @@ test("enable ACK follows registration wake handshake and clears current-session 
   }]);
   assert.equal(fx.session.keepUntilProcessExit, false);
   assert.equal(fx.transition, null);
+});
+
+test("enable publishes its one-shot request before bootstrap and never wakes that new process twice", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+    registrationStarted: true,
+  });
+
+  assert.deepEqual(await createSkinController(fx.deps).setPersistence({
+    expectedRevision: 1,
+    enabled: true,
+  }), { persistenceEnabled: true, revision: 2 });
+
+  assert.deepEqual(fx.calls.backgroundSequence, [
+    "prepare",
+    "register",
+    "verify",
+  ]);
+  assert.equal(fx.calls.wake.length, 0);
 });
 
 test("authorized persistence enable returns the exact acknowledged background identity", async () => {
