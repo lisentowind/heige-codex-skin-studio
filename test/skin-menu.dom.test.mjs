@@ -309,9 +309,16 @@ test("update results are request-bound and paint latest retry and available stat
       "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
   }), true);
   assert.equal(page.versionText.textContent, "v5.2.2 已是最新版");
-  assert.equal(page.updateButton.textContent, "已是最新版");
-  assert.equal(page.updateButton.disabled, true);
+  assert.equal(page.updateButton.textContent, "再次检查");
+  assert.equal(page.updateButton.disabled, false);
   assert.equal(page.runtime.status().controlRequest, null);
+  page.updateButton.click();
+  await page.flush();
+  const repeated = page.runtime.status().controlRequest;
+  assert.equal(repeated.action, "check-update");
+  assert.notEqual(repeated.requestId, first.requestId);
+  assert.equal(page.updateButton.textContent, "检查中");
+  assert.equal(page.updateButton.disabled, true);
 
   const retryPage = await menuWindow({ currentVersion: "5.2.2" });
   t.after(() => retryPage.close());

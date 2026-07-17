@@ -1301,8 +1301,8 @@ export function buildSkinMenuScript({
         updateButton.disabled = true;
       } else if (state === "latest") {
         versionText.textContent = "v" + data.currentVersion + " 已是最新版";
-        updateButton.textContent = "已是最新版";
-        updateButton.disabled = true;
+        updateButton.textContent = "再次检查";
+        updateButton.disabled = false;
       } else if (state === "available") {
         versionText.textContent = "发现新版本 v" + latestVersion;
         updateButton.textContent = "复制更新指令";
