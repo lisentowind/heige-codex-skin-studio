@@ -1,5 +1,6 @@
 import { HEX_COLOR } from "./constants.mjs";
 import { RESOURCE_LIMITS } from "./resource-limits.mjs";
+import { THEME_CENTER_STYLE } from "./theme-center-style.mjs";
 
 const DEFAULT_ACCENT = "#24c9d7";
 const CONTROL_ENDPOINT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/v1\/persistence$/;
@@ -113,6 +114,7 @@ export function buildSkinMenuScript({
     preferStored,
     control: normalizeControl(control),
     limits: RESOURCE_LIMITS,
+    themeCenterStyle: THEME_CENTER_STYLE,
   });
   const previewParserSource = previewFromGeneratedCss.toString();
 
@@ -203,8 +205,12 @@ export function buildSkinMenuScript({
     channel.close();
     const ownedMenu = document.getElementById(data.menuId);
     const ownedStyle = document.getElementById(data.styleId);
+    const ownedChromeStyle = document.querySelector(
+      '[data-heige-role="theme-center-style"][data-heige-generation="' + generation + '"]',
+    );
     if (ownedMenu?.dataset.heigeGeneration === generation) ownedMenu.remove();
     if (ownedStyle?.dataset.heigeGeneration === generation) ownedStyle.remove();
+    ownedChromeStyle?.remove();
     if (window.__heigeCodexSkinRuntime === runtime) {
       delete document.documentElement.dataset.heigeCodexSkin;
       try { delete window.__heigeCodexSkin; } catch { window.__heigeCodexSkin = undefined; }
@@ -242,6 +248,13 @@ export function buildSkinMenuScript({
     document.head.appendChild(style);
   }
   style.dataset.heigeGeneration = generation;
+
+  document.querySelectorAll('[data-heige-role="theme-center-style"]').forEach((node) => node.remove());
+  const chromeStyle = document.createElement("style");
+  chromeStyle.dataset.heigeRole = "theme-center-style";
+  chromeStyle.dataset.heigeGeneration = generation;
+  chromeStyle.textContent = data.themeCenterStyle;
+  document.head.appendChild(chromeStyle);
 
   document.getElementById(data.menuId)?.remove();
   const root = document.createElement("div");

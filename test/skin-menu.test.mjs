@@ -6,6 +6,7 @@ import {
   CSS_SENTINELS,
   previewFromGeneratedCss,
 } from "../src/skin-menu.mjs";
+import { THEME_CENTER_STYLE } from "../src/theme-center-style.mjs";
 
 const base = {
   styleId: "heige-codex-skin-style",
@@ -42,6 +43,15 @@ test("embeds validated theme colors without adding a duplicate preview field", (
   });
   assert.match(script, /"secondary":"#ed6ec1"/);
   assert.doesNotMatch(script, /"preview":/);
+});
+
+test("ships the responsive Aurora Gallery dialog without animation", () => {
+  assert.match(THEME_CENTER_STYLE, /data-heige-role="theme-center"/);
+  assert.match(THEME_CENTER_STYLE, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(THEME_CENTER_STYLE, /@media \(max-width:979px\)/);
+  assert.match(THEME_CENTER_STYLE, /@media \(max-width:679px\)/);
+  assert.doesNotMatch(THEME_CENTER_STYLE, /https?:\/\//);
+  assert.doesNotMatch(THEME_CENTER_STYLE, /@keyframes|animation:/);
 });
 
 test("embeds every theme and the active id as JSON data", () => {

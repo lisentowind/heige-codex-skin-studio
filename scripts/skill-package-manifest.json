@@ -188,6 +188,12 @@
       "exclude": []
     },
     {
+      "source": "src/theme-center-style.mjs",
+      "destination": "payload/src/theme-center-style.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "src/theme-schema.mjs",
       "destination": "payload/src/theme-schema.mjs",
       "recursive": false,
