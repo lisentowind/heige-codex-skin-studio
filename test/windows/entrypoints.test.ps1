@@ -666,7 +666,8 @@ try {
                 -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
                 -Description $script:ShortcutDescription
         } catch {
-            throw "WScript shortcut creation failed：$($_.Exception.Message)"
+            $hresult = "0x{0:X8}" -f $_.Exception.HResult
+            throw "WScript shortcut creation failed：$($_.Exception.Message)；HRESULT=$hresult`n$($_.InvocationInfo.PositionMessage)`n$($_.ScriptStackTrace)"
         }
         try {
             $observed = Read-DefaultHeiGeShortcut -Path $shortcutPath
