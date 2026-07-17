@@ -57,7 +57,6 @@ async function sourceFixture(t) {
     await writeFile(join(sourceRoot, directory, `${directory}.txt`), `${directory}\n`);
   }
   await writeFile(join(sourceRoot, "src", "cli.mjs"), "#!/usr/bin/env node\n", { mode: 0o755 });
-  await writeFile(join(sourceRoot, "src", "signature-card-frame.png"), "frame\n");
   await writeFile(join(sourceRoot, "scripts", "enable-skin.command"), "#!/bin/zsh\nexit 0\n", {
     mode: 0o755,
   });
@@ -91,7 +90,6 @@ async function legacyFixture(t) {
     "#!/usr/bin/env node\nimport { resolveStudioPaths } from \"./constants.mjs\";\nvoid resolveStudioPaths;\n",
     { mode: 0o755 },
   );
-  await writeFile(join(sourceRoot, "src", "signature-card-frame.png"), "frame\n");
   await writeFile(join(sourceRoot, "scripts", "enable-skin.command"), "#!/bin/zsh\nexit 0\n", {
     mode: 0o755,
   });
@@ -160,7 +158,6 @@ test("installs an absent stable tree with an exact ownership marker", async (t) 
 
   assert.equal(result.installed, true);
   assert.equal(await readFile(join(targetRoot, "src", "src.txt"), "utf8"), "src\n");
-  assert.equal(await readFile(join(targetRoot, "src", "signature-card-frame.png"), "utf8"), "frame\n");
   const marker = JSON.parse(await readFile(join(targetRoot, INSTALL_MARKER_NAME), "utf8"));
   assert.deepEqual(Object.keys(marker).sort(), [
     "kind",

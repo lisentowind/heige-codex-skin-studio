@@ -33,13 +33,6 @@ const SOURCE_ENTRIES = Object.freeze([
   { name: "scripts", type: "directory" },
   { name: "custom-pet", type: "directory" },
 ]);
-const LEGACY_SOURCE_ENTRY_NAMES = Object.freeze([
-  "package.json",
-  "src",
-  "themes",
-  "scripts",
-  "custom-pet",
-]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_JOURNAL_BYTES = 128 * 1024;
 const MAX_PACKAGE_BYTES = 256 * 1024;
@@ -336,11 +329,10 @@ async function validateOwnedTree(root, expectedManifestSha256 = null) {
   }
   const topLevel = (await readdir(root)).sort();
   const expectedTopLevel = [...SOURCE_ENTRIES.map((entry) => entry.name), INSTALL_MARKER_NAME].sort();
-  const matchesTopLevel = (expected) => (
-    topLevel.length === expected.length &&
-    topLevel.every((name, index) => name === expected[index])
-  );
-  if (!matchesTopLevel(expectedTopLevel)) {
+  if (
+    topLevel.length !== expectedTopLevel.length ||
+    !topLevel.every((name, index) => name === expectedTopLevel[index])
+  ) {
     throw new Error("owned tree contains unexpected top-level content");
   }
   const entries = [];
@@ -390,7 +382,7 @@ async function validateLegacyTree(root, {
   const topLevel = (await readdir(root)).sort();
   const hasCommit = topLevel.includes("INSTALLED_COMMIT");
   const expectedTopLevel = [
-    ...LEGACY_SOURCE_ENTRY_NAMES,
+    ...SOURCE_ENTRIES.map((entry) => entry.name),
     ...(hasCommit ? ["INSTALLED_COMMIT"] : []),
   ].sort();
   if (

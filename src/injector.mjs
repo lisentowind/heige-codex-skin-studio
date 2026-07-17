@@ -1,8 +1,7 @@
 import { extname } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { CdpSession, fetchRendererTargets, waitForRendererTargets } from "./cdp-client.mjs";
-import { buildSignatureCardSharedCss, buildSkinCss } from "./skin-css.mjs";
+import { buildSkinCss } from "./skin-css.mjs";
 import { buildSkinMenuScript, CSS_SENTINELS } from "./skin-menu.mjs";
 import { classifyCodexTargets } from "./target-classifier.mjs";
 import { validateImageMetadata } from "./image-metadata.mjs";
@@ -10,9 +9,6 @@ import { readBoundedFile, RESOURCE_LIMITS, sumWithinLimit } from "./resource-lim
 
 const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
-const SIGNATURE_CARD_FRAME_PATH = fileURLToPath(
-  new URL("./signature-card-frame.png", import.meta.url),
-);
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
 async function waitForMainTargets(wait, port, { timeoutMs = 20_000, pollMs = 500 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -146,29 +142,18 @@ async function readThemeResources(loadedTheme) {
   const hero = await readThemeAsset(loadedTheme.heroPath, "hero", loadedTheme.assetBuffers?.hero);
   const logo = await readThemeAsset(loadedTheme.logoPath, "logo", loadedTheme.assetBuffers?.logo);
   const polaroid = await readThemeAsset(loadedTheme.polaroidPath, "polaroid", loadedTheme.assetBuffers?.polaroid);
-  const cardArtwork = await readThemeAsset(
-    loadedTheme.cardArtworkPath,
-    "cardArtwork",
-    loadedTheme.assetBuffers?.cardArtwork,
-  );
   const manifestBytes = loadedTheme.manifestBytes
     ?? Buffer.byteLength(JSON.stringify(loadedTheme.manifest), "utf8");
   const resourceBytes = sumWithinLimit(
-    [
-      manifestBytes,
-      hero.bytes.byteLength,
-      logo?.bytes.byteLength ?? 0,
-      polaroid?.bytes.byteLength ?? 0,
-      cardArtwork?.bytes.byteLength ?? 0,
-    ],
+    [manifestBytes, hero.bytes.byteLength, logo?.bytes.byteLength ?? 0, polaroid?.bytes.byteLength ?? 0],
     RESOURCE_LIMITS.themeBytes,
     `theme ${loadedTheme.manifest.id}`,
   );
-  return { loadedTheme, hero, logo, polaroid, cardArtwork, resourceBytes };
+  return { loadedTheme, hero, logo, polaroid, resourceBytes };
 }
 
 function themeEntry(resources) {
-  const { loadedTheme, hero, logo, polaroid, cardArtwork } = resources;
+  const { loadedTheme, hero, logo, polaroid } = resources;
   return {
     id: loadedTheme.manifest.id,
     name: loadedTheme.manifest.name,
@@ -179,8 +164,6 @@ function themeEntry(resources) {
       heroDataUrl: dataUrl(hero),
       logoDataUrl: dataUrl(logo),
       polaroidDataUrl: dataUrl(polaroid),
-      cardArtworkDataUrl: dataUrl(cardArtwork),
-      signatureCard: polaroid === null,
     }),
   };
 }
@@ -197,11 +180,6 @@ export async function applySkin({
   const targetAllowlist = normalizeTargetIds(targetIds);
   const wait = deps.waitForRendererTargets ?? waitForRendererTargets;
   const Session = deps.Session ?? CdpSession;
-  const signatureCardFrame = await readThemeAsset(
-    deps.signatureCardFramePath ?? SIGNATURE_CARD_FRAME_PATH,
-    "signature card frame",
-  );
-  const sharedStyleCss = buildSignatureCardSharedCss(dataUrl(signatureCardFrame));
   const menuThemes = themes?.length ? themes : [loadedTheme];
   const resourceSets = [];
   let menuBytes = 0;
@@ -233,7 +211,6 @@ export async function applySkin({
     styleId: STYLE_ID,
     menuId: MENU_ID,
     cssTemplate,
-    sharedStyleCss,
     preferStored,
     control,
   });

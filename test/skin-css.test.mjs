@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSignatureCardSharedCss, buildSkinCss } from "../src/skin-css.mjs";
+import { buildSkinCss } from "../src/skin-css.mjs";
 
 test("builds one fast generic skin from a theme and image data URL", () => {
   const css = buildSkinCss({
@@ -55,59 +55,4 @@ test("rejects 5 and 7 digit hex colors that CSS cannot parse", () => {
       `${good} 应通过`,
     );
   }
-});
-
-test("builds a modular signature card without duplicating the hero", () => {
-  const hero = "data:image/webp;base64,SEVSTw==";
-  const css = buildSkinCss({
-    theme: { id: "genshin-night", name: "原神 · 星夜" },
-    heroDataUrl: hero,
-    signatureCard: true,
-  });
-
-  assert.equal(css.split(hero).length - 1, 1);
-  assert.match(css, /--heige-hero-image:/);
-  assert.match(css, /--heige-card-artwork-image:\s*var\(--heige-hero-image\)/);
-  assert.match(css, /body::before/);
-  assert.match(css, /body::after/);
-  assert.match(css, /content:\s*"原神 · 星夜"\s*"\\A"\s*"By@HeiGe"/);
-  assert.match(css, /--heige-signature-card-frame-image/);
-  assert.match(css, /pointer-events:\s*none/);
-  assert.match(css, /max-width:\s*899px/);
-  assert.match(css, /max-height:\s*649px/);
-});
-
-test("optional card artwork replaces only the modular card image", () => {
-  const css = buildSkinCss({
-    theme: { id: "custom-art", name: "独立画芯" },
-    heroDataUrl: "data:image/webp;base64,SEVSTw==",
-    cardArtworkDataUrl: "data:image/png;base64,Q0FSRA==",
-    signatureCard: true,
-  });
-
-  assert.match(css, /--heige-card-artwork-image:\s*url\("data:image\/png;base64,Q0FSRA=="\)/);
-});
-
-test("legacy polaroid remains the only card path for Miku", () => {
-  const css = buildSkinCss({
-    theme: { id: "miku-488137", name: "Miku 488137" },
-    heroDataUrl: "data:image/webp;base64,SEVSTw==",
-    polaroidDataUrl: "data:image/webp;base64,UE9MQVJPSUQ=",
-    signatureCard: true,
-  });
-
-  assert.doesNotMatch(css, /--heige-card-artwork-image/);
-  assert.equal(css.split("UE9MQVJPSUQ=").length - 1, 1);
-});
-
-test("builds one strict shared signature-card frame declaration", () => {
-  const frame = "data:image/png;base64,RlJBTUU=";
-  assert.equal(
-    buildSignatureCardSharedCss(frame),
-    ':root{--heige-signature-card-frame-image:url("data:image/png;base64,RlJBTUU=");}',
-  );
-  assert.throws(
-    () => buildSignatureCardSharedCss("data:image/webp;base64,RlJBTUU="),
-    /PNG/,
-  );
 });

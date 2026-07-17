@@ -170,12 +170,6 @@
       "exclude": []
     },
     {
-      "source": "src/signature-card-frame.png",
-      "destination": "payload/src/signature-card-frame.png",
-      "recursive": false,
-      "exclude": []
-    },
-    {
       "source": "src/state-store.mjs",
       "destination": "payload/src/state-store.mjs",
       "recursive": false,
