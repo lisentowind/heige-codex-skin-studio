@@ -362,6 +362,13 @@ async function lockOptions(paths, platform = process.platform) {
   };
 }
 
+export async function productionLockOptions(paths, platform = process.platform) {
+  return {
+    ...await lockOptions(paths, platform),
+    compactionThreshold: 32,
+  };
+}
+
 export async function acquireEphemeralControllerLease(paths, platform = process.platform) {
   const stateRoot = join(paths.stateRoot, "ephemeral-controller");
   const options = await lockOptions({
@@ -843,7 +850,7 @@ async function withProductionStateLease({
 }
 
 async function ensureProductionState({ paths, themeId, process: processIdentity, keepUntilProcessExit }) {
-  const options = await lockOptions(paths);
+  const options = await productionLockOptions(paths);
   return withProductionStateLease({
     paths,
     options,
@@ -1059,7 +1066,7 @@ export async function productionController({
     platform,
     platform === "win32" ? (taskName ?? WINDOWS_PRODUCTION_TASK) : taskName,
   );
-  const lock = await lockOptions(paths, platform);
+  const lock = await productionLockOptions(paths, platform);
   let deferredWindowsUnregister = false;
   const queryWindowsRuntime = deps.queryWindowsRuntime ?? ((input) =>
     queryWindowsRuntimeSnapshot({
@@ -1817,7 +1824,7 @@ export async function migrateLegacyLifecycle({
 }
 
 async function productionMigrateLegacy({ deps, paths, roots, port }) {
-  const stateLock = await lockOptions(paths);
+  const stateLock = await productionLockOptions(paths);
   const coordinatorStateRoot = join(paths.stateRoot, "legacy-migration-operation");
   const coordinatorLock = {
     ...stateLock,
@@ -1994,7 +2001,7 @@ async function productionInspectBackground({
 }
 
 async function productionOfflineDisable({ paths, platform, port, expectedRevision, taskName }) {
-  const stateLock = await lockOptions(paths, platform);
+  const stateLock = await productionLockOptions(paths, platform);
   return offlineDisablePersistence({
     statePath: paths.statePath,
     sessionPath: paths.sessionPath,
