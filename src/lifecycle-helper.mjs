@@ -55,12 +55,19 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function markLifecycleFailure(error, code, compensated) {
+function markLifecycleFailure(error, code, compensated, details = {}) {
   const failure = SAFE_FAILURES[code] ?? SAFE_FAILURES.LIFECYCLE_FAILED;
   const target = error instanceof Error ? error : new Error(failure.message, { cause: error });
   Object.defineProperty(target, LIFECYCLE_FAILURE, {
     configurable: true,
-    value: Object.freeze({ ...failure, compensated: compensated === true }),
+    value: Object.freeze({
+      ...failure,
+      compensated: compensated === true,
+      ...(typeof details.stage === "string" ? { stage: details.stage } : {}),
+      ...(isRecord(details.diagnostics)
+        ? { diagnostics: Object.freeze({ ...details.diagnostics }) }
+        : {}),
+    }),
   });
   return target;
 }
@@ -243,6 +250,8 @@ async function writeLifecycleResult(actionPath, action, input, { now = () => new
     outcome: input.outcome,
     compensated: input.compensated === true,
     error: input.error,
+    ...(typeof input.stage === "string" ? { stage: input.stage } : {}),
+    ...(isRecord(input.diagnostics) ? { diagnostics: input.diagnostics } : {}),
     completedAt: now().toISOString(),
   };
   const handle = await open(
@@ -631,7 +640,7 @@ function defaultWait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function executeLifecycleAction(action, deps = {}) {
+async function executeLifecycleActionCore(action, deps, progress) {
   const readProcessIdentity = deps.readProcessIdentity ?? defaultReadProcessIdentity;
   const requestQuit = deps.requestQuit ?? requestNormalQuit;
   const launchApp = deps.launchApp ?? defaultLaunchApp;
@@ -657,6 +666,7 @@ async function executeLifecycleAction(action, deps = {}) {
     if (!sameProcessIdentity(observed, action.process)) {
       throw new Error("记录的 Codex 进程身份已变化，拒绝退出或启动");
     }
+    progress.stage = "quit-requested";
     await requestQuit({ appPath: action.appPath, process: action.process });
     let disappeared = false;
     for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
@@ -670,12 +680,17 @@ async function executeLifecycleAction(action, deps = {}) {
     if (!disappeared) {
       throw new Error("Codex 未正常退出，拒绝强制终止或启动第二个实例");
     }
+    progress.oldProcessExited = true;
+    progress.stage = "old-process-exited";
   }
 
   const args = action.launchMode === "cdp"
     ? ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${action.port}`]
     : [];
+  progress.stage = "launch-starting";
   await launchApp({ appPath: action.appPath, args });
+  progress.launchStarted = true;
+  progress.stage = "launch-started";
   const result = {
     launchMode: action.launchMode,
     port: action.port,
@@ -683,6 +698,8 @@ async function executeLifecycleAction(action, deps = {}) {
   };
   if (action.launchMode === "cdp") {
     await waitForPort(action.port);
+    progress.portReady = true;
+    progress.stage = "port-ready";
     const launched = processIdentity(await readCdpProcess({
       appPath: action.appPath,
       port: action.port,
@@ -691,12 +708,19 @@ async function executeLifecycleAction(action, deps = {}) {
     if (launched.executablePath !== expectedExecutable) {
       throw new Error("新启动的 CDP 进程不属于已解析的 Codex 应用");
     }
+    progress.processVerified = true;
+    progress.stage = "process-verified";
   }
   if (action.afterLaunch !== null) {
     try {
+      progress.continuationStarted = true;
+      progress.stage = "renderer-applying";
       await runAfterLaunch(action.afterLaunch);
+      progress.stage = "renderer-applied";
     } catch (continuationError) {
       try {
+        progress.compensationAttempted = true;
+        progress.stage = "compensating";
         await restoreContinuationPrestate(action, {
           readProcessIdentity,
           requestQuit,
@@ -708,6 +732,7 @@ async function executeLifecycleAction(action, deps = {}) {
           maxWaitAttempts,
           waitIntervalMs,
         });
+        progress.stage = "compensated";
       } catch (compensationError) {
         throw markLifecycleFailure(new AggregateError(
           [continuationError, compensationError],
@@ -723,8 +748,46 @@ async function executeLifecycleAction(action, deps = {}) {
       throw new Error(`CDP 端口 ${action.verifyPort} 仍被占用`);
     }
     result.verifiedPortReleased = action.verifyPort;
+    progress.stage = "port-released";
   }
+  progress.stage = "completed";
   return result;
+}
+
+function boundedLifecycleDiagnostics(progress) {
+  return {
+    launchMode: progress.launchMode,
+    hadOriginalProcess: progress.hadOriginalProcess,
+    oldProcessExited: progress.oldProcessExited,
+    launchStarted: progress.launchStarted,
+    portReady: progress.portReady,
+    processVerified: progress.processVerified,
+    continuationStarted: progress.continuationStarted,
+    compensationAttempted: progress.compensationAttempted,
+  };
+}
+
+async function executeLifecycleAction(action, deps = {}) {
+  const progress = {
+    stage: "preflight",
+    launchMode: action.launchMode,
+    hadOriginalProcess: action.process !== null,
+    oldProcessExited: action.process === null,
+    launchStarted: false,
+    portReady: false,
+    processVerified: false,
+    continuationStarted: false,
+    compensationAttempted: false,
+  };
+  try {
+    return await executeLifecycleActionCore(action, deps, progress);
+  } catch (error) {
+    const failure = safeLifecycleFailure(error);
+    throw markLifecycleFailure(error, failure.code, failure.compensated, {
+      stage: progress.stage,
+      diagnostics: boundedLifecycleDiagnostics(progress),
+    });
+  }
 }
 
 export async function runLifecycleActionFile(actionPath, deps = {}) {
@@ -748,6 +811,8 @@ export async function runLifecycleActionFile(actionPath, deps = {}) {
         outcome: "failed",
         compensated: failure.compensated,
         error: { code: failure.code, message: failure.message },
+        stage: failure.stage,
+        diagnostics: failure.diagnostics,
       }, { now });
     } catch (resultError) {
       throw markLifecycleFailure(new AggregateError(

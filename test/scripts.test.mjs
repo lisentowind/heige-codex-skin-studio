@@ -620,6 +620,17 @@ test("a failed detached continuation restores the exact native prestate and reth
       code: "CONTINUATION_FAILED_COMPENSATED",
       message: "皮肤应用失败，已恢复启动前状态。",
     },
+    stage: "compensated",
+    diagnostics: {
+      launchMode: "cdp",
+      hadOriginalProcess: true,
+      oldProcessExited: true,
+      launchStarted: true,
+      portReady: true,
+      processVerified: true,
+      continuationStarted: true,
+      compensationAttempted: true,
+    },
     completedAt: sidecar.completedAt,
   });
   assert.equal((await stat(`${path}.result.json`)).mode & 0o777, 0o600);
@@ -726,6 +737,17 @@ test("a detached compensation failure preserves both errors and writes only a sa
   const sidecar = JSON.parse(sidecarText);
   assert.equal(sidecar.outcome, "failed");
   assert.equal(sidecar.compensated, false);
+  assert.equal(sidecar.stage, "compensating");
+  assert.deepEqual(sidecar.diagnostics, {
+    launchMode: "cdp",
+    hadOriginalProcess: false,
+    oldProcessExited: true,
+    launchStarted: true,
+    portReady: true,
+    processVerified: true,
+    continuationStarted: true,
+    compensationAttempted: true,
+  });
   assert.deepEqual(sidecar.error, {
     code: "CONTINUATION_COMPENSATION_FAILED",
     message: "皮肤应用失败，且未能确认已恢复启动前状态。",
