@@ -218,6 +218,12 @@
       "exclude": []
     },
     {
+      "source": "assets/signature-card-frame.png",
+      "destination": "payload/assets/signature-card-frame.png",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "themes",
       "destination": "payload/themes",
       "recursive": true,

@@ -198,6 +198,11 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   await packageSkill(archive, { sourceDateEpoch: fixedEpoch });
   const entries = await zipEntries(archive);
   const names = entries.map(({ name }) => name);
+  assert.equal(
+    names.filter((name) => name === "heige-codex-skin-studio/payload/assets/signature-card-frame.png").length,
+    1,
+    "the reusable signature-card frame must ship exactly once",
+  );
   assert.deepEqual(names, [...names].sort(), "central directory must be lexicographically ordered");
   assert.equal(names.some((name) => name.endsWith("/")), false, "archive has no directory entries");
   for (const required of [
