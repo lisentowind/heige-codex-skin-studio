@@ -729,12 +729,13 @@ async function bootstrap(options, label, plistPath) {
 async function bootout(options, label, { knownLoaded = false } = {}) {
   if (!knownLoaded && !(await isLoaded(options, label))) return false;
   await command(options, "/bin/launchctl", ["bootout", launchTarget(options, label)]);
-  if (await isLoaded(options, label)) {
-    const error = new Error(`LaunchAgent ${label} remained loaded after bootout`);
-    error.code = "LAUNCH_AGENT_STILL_LOADED";
-    throw error;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (!(await isLoaded(options, label))) return true;
+    await options.wait(50);
   }
-  return true;
+  const error = new Error(`LaunchAgent ${label} remained loaded after bootout`);
+  error.code = "LAUNCH_AGENT_STILL_LOADED";
+  throw error;
 }
 
 async function readStableLoadedJobIdentity(options, label) {
@@ -2963,20 +2964,30 @@ export async function prepareStableServiceFreeze(input = {}) {
     ),
   };
   const transaction = await createMigrationJournal(options, journalPath, journal);
+  const controllerBackup = validateJournalBackup(
+    journal.controllerBackup,
+    controllerPlistPath,
+    "controllerBackup",
+  );
+  const watchdogBackup = validateJournalBackup(
+    journal.watchdogBackup,
+    watchdogPlistPath,
+    "watchdogBackup",
+  );
   const services = [
     {
       label: options.label,
       path: controllerPlistPath,
       snapshot: controllerSnapshot,
       job: controllerJob,
-      backup: journal.controllerBackup,
+      backup: controllerBackup,
     },
     {
       label: watchdogLabel,
       path: watchdogPlistPath,
       snapshot: watchdogSnapshot,
       job: watchdogJob,
-      backup: journal.watchdogBackup,
+      backup: watchdogBackup,
     },
   ];
   const frozen = [];

@@ -428,7 +428,10 @@ export async function updateMacosInstallJournal(
   if (Object.keys(changes).some((key) => !mutable.has(key))) {
     throw new Error("macOS install changes contain immutable fields");
   }
-  if (current.decision !== "undecided" && changes.decision !== current.decision) {
+  const nextDecision = Object.hasOwn(changes, "decision")
+    ? changes.decision
+    : current.decision;
+  if (current.decision !== "undecided" && nextDecision !== current.decision) {
     throw new Error("macOS install decision is already durable");
   }
   const nextPhase = changes.phase ?? current.phase;

@@ -180,6 +180,7 @@ async function fixture(t, overrides = {}) {
   const deletedPaths = [];
   const parsedByPath = new Map([[oldPlistPath, oldPlist]]);
   let controllerBootstrapFailures = overrides.controllerBootstrapFailures ?? 0;
+  const delayedUnloadPrints = new Map();
 
   const trackingFs = {
     ...fsPromises,
@@ -285,6 +286,11 @@ async function fixture(t, overrides = {}) {
     if (file !== "/bin/launchctl") throw new Error(`unexpected command: ${file}`);
     if (args[0] === "print") {
       const label = args[1].split("/").at(-1);
+      const delayed = delayedUnloadPrints.get(label) ?? 0;
+      if (delayed > 0) {
+        delayedUnloadPrints.set(label, delayed - 1);
+        return { stdout: `service = ${label}\n`, stderr: "" };
+      }
       if (loaded.has(label)) {
         const pid = overrides.printPid?.(label);
         return {
@@ -334,6 +340,10 @@ async function fixture(t, overrides = {}) {
     if (args[0] === "bootout") {
       const label = args[1].split("/").at(-1);
       loaded.delete(label);
+      if (Number.isSafeInteger(overrides.unloadVisibilityDelay) &&
+          overrides.unloadVisibilityDelay > 0) {
+        delayedUnloadPrints.set(label, overrides.unloadVisibilityDelay);
+      }
       return { stdout: "", stderr: "" };
     }
     if (args[0] === "kickstart") {
@@ -2213,6 +2223,29 @@ test("stable service freeze hard crash restores both old jobs only after outer r
   assert.equal(deps.loaded.has(deps.oldLabel), true);
 });
 
+test("stable service freeze soft failure restores decoded backups before returning", async (t) => {
+  const deps = await fixture(t, { faultAt: "after-controller-freeze" });
+  await registerControllerAgent(deps);
+  const controllerBytes = await readFile(deps.controllerPlistPath);
+  const outer = await outerMacosInstallJournal(deps);
+
+  await assert.rejects(
+    prepareStableServiceFreeze({
+      ...deps,
+      outerTransaction: outer.outerTransaction,
+    }),
+    (error) =>
+      error.code === "INJECTED_MIGRATION_FAILURE" &&
+      error.phase === "after-controller-freeze",
+  );
+
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+  assert.deepEqual(await readFile(deps.controllerPlistPath), controllerBytes);
+  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(await pathExists(join(deps.stateDir, "stable-service-freeze.json")), false);
+});
+
 test("stable service freeze waits for every captured launchd PID to exit", async (t) => {
   const probes = new Map();
   const deps = await fixture(t, {
@@ -2232,6 +2265,24 @@ test("stable service freeze waits for every captured launchd PID to exit", async
   });
   assert.equal(probes.get(8101), 2);
   assert.equal(probes.get(8102), 2);
+});
+
+test("stable service freeze waits through delayed launchd unload visibility", async (t) => {
+  const deps = await fixture(t, {
+    unloadVisibilityDelay: 2,
+    wait: async () => {},
+  });
+  await registerControllerAgent(deps);
+  const outer = await outerMacosInstallJournal(deps);
+
+  const frozen = await prepareStableServiceFreeze({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+
+  assert.equal(frozen.servicesFrozen, 2);
+  assert.equal(deps.loaded.has(deps.label), false);
+  assert.equal(deps.loaded.has(deps.oldLabel), false);
 });
 
 test("stable service freeze finalize never revives the old watchdog after outer commit", async (t) => {
