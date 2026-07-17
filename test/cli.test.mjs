@@ -46,7 +46,7 @@ test("production state locks compact ownership chains before the default limit",
     lockPath: "/tmp/heige-production-lock-test/operation.lock",
   }, process.platform);
 
-  assert.equal(options.compactionThreshold, 32);
+  assert.equal(options.compactionThreshold, 8);
 });
 
 function lifecycleDeps(overrides = {}) {

@@ -101,7 +101,7 @@ git commit -m "perf: avoid durable lock on healthy controller ticks"
 Export the production lock option builder for test and assert:
 
 ```js
-assert.equal((await productionLockOptions(paths, "darwin")).compactionThreshold, 32);
+assert.equal((await productionLockOptions(paths, "darwin")).compactionThreshold, 8);
 ```
 
 - [ ] **Step 2: Run the focused test and verify RED**
@@ -115,7 +115,7 @@ Expected: FAIL because the builder is private and uses the default threshold.
 Rename `lockOptions` to `productionLockOptions`, export it, and include:
 
 ```js
-compactionThreshold: 32,
+compactionThreshold: 8,
 ```
 
 Update internal callers without changing Windows or ephemeral lock semantics.

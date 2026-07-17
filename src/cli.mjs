@@ -365,7 +365,7 @@ async function lockOptions(paths, platform = process.platform) {
 export async function productionLockOptions(paths, platform = process.platform) {
   return {
     ...await lockOptions(paths, platform),
-    compactionThreshold: 32,
+    compactionThreshold: 8,
   };
 }
 
