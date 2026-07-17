@@ -122,6 +122,12 @@
       "exclude": []
     },
     {
+      "source": "src/macos-state-root.mjs",
+      "destination": "payload/src/macos-state-root.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "src/operation-lock.mjs",
       "destination": "payload/src/operation-lock.mjs",
       "recursive": false,

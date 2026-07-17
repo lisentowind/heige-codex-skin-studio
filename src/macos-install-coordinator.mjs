@@ -34,6 +34,7 @@ import {
   recoverMacosLauncherPreparationUnderLock,
   rollbackMacosLauncher,
 } from "./macos-launcher.mjs";
+import { ensureMacosStateRoot } from "./macos-state-root.mjs";
 import { readMacCdpProcess } from "./lifecycle-helper.mjs";
 import { withOperationLock } from "./operation-lock.mjs";
 import {
@@ -683,6 +684,7 @@ export async function runProductionMacosInstall({ sourceRoot, targetRoot, port =
   }
   const home = launchAgent.trustedUserHome();
   const paths = resolveStudioPaths({ home, platform: "darwin" });
+  await ensureMacosStateRoot(paths.stateRoot);
   const dependencies = await productionMacosInstallDependencies({
     home,
     sourceRoot,
@@ -709,6 +711,7 @@ export async function runProductionMacosInstallRecovery({
   }
   const home = launchAgent.trustedUserHome();
   const paths = resolveStudioPaths({ home, platform: "darwin" });
+  await ensureMacosStateRoot(paths.stateRoot);
   const dependencies = await productionMacosInstallDependencies({
     home,
     sourceRoot,
