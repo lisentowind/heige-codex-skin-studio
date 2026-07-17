@@ -113,6 +113,45 @@ export const THEME_CENTER_STYLE = String.raw`
   box-shadow: 0 15px 35px rgba(29,97,120,.2);
   color: #fff;
 }
+[data-heige-role="update-bar"] {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 0;
+  padding: 7px 8px 7px 13px;
+  border: 1px solid rgba(25,122,139,.12);
+  border-radius: 13px;
+  background: rgba(255,255,255,.58);
+  box-shadow: 0 6px 18px rgba(33,128,142,.05);
+}
+[data-heige-role="update-version"] {
+  min-width: 0;
+  color: rgba(23,52,79,.76);
+  font-size: 11px;
+  font-weight: 700;
+}
+[data-heige-role="update-check"] {
+  flex: none;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--heige-accent, #19c9e5) 25%, transparent);
+  border-radius: 9px;
+  background: rgba(255,255,255,.76);
+  color: #135d70;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 750;
+}
+[data-heige-role="update-check"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--heige-accent, #19c9e5) 52%, transparent);
+  background: rgba(255,255,255,.96);
+}
+[data-heige-role="update-check"]:disabled {
+  cursor: default;
+  opacity: .62;
+}
 [data-heige-role="quick-actions"] {
   display: grid;
   grid-template-columns: 1fr 1fr;

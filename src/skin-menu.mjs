@@ -5,6 +5,7 @@ import { THEME_CENTER_STYLE } from "./theme-center-style.mjs";
 const DEFAULT_ACCENT = "#24c9d7";
 const CONTROL_ENDPOINT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/v1\/persistence$/;
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const STABLE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 
 export function previewFromGeneratedCss(css) {
   if (typeof css !== "string" || css.length === 0) return null;
@@ -72,6 +73,7 @@ export function buildSkinMenuScript({
   activeId,
   styleId,
   menuId,
+  currentVersion,
   cssTemplate = "",
   preferStored = false,
   control = null,
@@ -114,9 +116,13 @@ export function buildSkinMenuScript({
   if (activeId !== null && !themes.some((theme) => theme.id === activeId)) {
     throw new Error(`当前主题不在菜单列表中：${activeId}`);
   }
+  if (typeof currentVersion !== "string" || !STABLE_VERSION.test(currentVersion)) {
+    throw new Error("当前版本必须是稳定的 X.Y.Z 版本号");
+  }
   const payload = JSON.stringify({
     styleId,
     menuId,
+    currentVersion,
     activeId,
     themes,
     cssTemplate,
@@ -347,6 +353,19 @@ export function buildSkinMenuScript({
   heroName.style.cssText = "display:block;font-size:18px;text-shadow:0 1px 8px rgba(0,0,0,.24);";
   heroCopy.append(heroEyebrow, heroName);
   currentHero.appendChild(heroCopy);
+  const updateBar = document.createElement("section");
+  updateBar.dataset.heigeRole = "update-bar";
+  updateBar.setAttribute("aria-label", "版本与更新");
+  const versionText = document.createElement("span");
+  versionText.dataset.heigeRole = "update-version";
+  versionText.setAttribute("aria-live", "polite");
+  versionText.textContent = "当前版本 v" + data.currentVersion;
+  const updateButton = document.createElement("button");
+  updateButton.type = "button";
+  updateButton.dataset.heigeRole = "update-check";
+  updateButton.textContent = "检查更新";
+  updateButton.disabled = data.control?.available !== true;
+  updateBar.append(versionText, updateButton);
   const appearanceHelp = document.createElement("aside");
   appearanceHelp.dataset.heigeRole = "appearance-help";
   appearanceHelp.setAttribute("role", "note");
@@ -368,7 +387,7 @@ export function buildSkinMenuScript({
   builtInHeading.style.cssText = "margin:0 0 9px;font-size:13px;";
   const themeGrid = document.createElement("section");
   themeGrid.dataset.heigeRole = "theme-grid";
-  scroll.append(currentHero, appearanceHelp, quickActions, customSection, builtInHeading, themeGrid);
+  scroll.append(currentHero, updateBar, appearanceHelp, quickActions, customSection, builtInHeading, themeGrid);
   const footer = document.createElement("footer");
   footer.dataset.heigeRole = "theme-center-footer";
   panel.append(header, scroll, footer);
@@ -1273,6 +1292,154 @@ export function buildSkinMenuScript({
       controlRequest = null;
       return cleared;
     };
+    let availableUpdate = null;
+    const paintUpdateState = (state, latestVersion = null) => {
+      assertCurrent();
+      if (state === "checking") {
+        versionText.textContent = "正在检查 GitHub…";
+        updateButton.textContent = "检查中";
+        updateButton.disabled = true;
+      } else if (state === "latest") {
+        versionText.textContent = "v" + data.currentVersion + " 已是最新版";
+        updateButton.textContent = "已是最新版";
+        updateButton.disabled = true;
+      } else if (state === "available") {
+        versionText.textContent = "发现新版本 v" + latestVersion;
+        updateButton.textContent = "复制更新指令";
+        updateButton.disabled = false;
+      } else if (state === "error") {
+        versionText.textContent = "暂时无法检查更新";
+        updateButton.textContent = "重新检查";
+        updateButton.disabled = false;
+      } else {
+        versionText.textContent = "当前版本 v" + data.currentVersion;
+        updateButton.textContent = "检查更新";
+        updateButton.disabled = false;
+      }
+    };
+    const exactUpdateKeys = (value, expected) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+      const keys = Object.keys(value).sort();
+      const sorted = [...expected].sort();
+      return keys.length === sorted.length && keys.every((key, index) => key === sorted[index]);
+    };
+    const stableVersion = /^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$/;
+    const receiveUpdateCheckResult = (result) => {
+      assertCurrent();
+      const pendingRequest = controlRequest;
+      if (
+        pendingRequest?.action !== "check-update"
+        || result?.status === undefined
+        || !["latest", "update-available", "error"].includes(result.status)
+      ) return false;
+      const expectedKeys = result.status === "error"
+        ? ["schemaVersion", "requestId", "generation", "status", "currentVersion"]
+        : ["schemaVersion", "requestId", "generation", "status", "currentVersion", "latestVersion", "releaseUrl"];
+      if (
+        !exactUpdateKeys(result, expectedKeys)
+        || result.schemaVersion !== 1
+        || result.requestId !== pendingRequest.requestId
+        || result.generation !== pendingRequest.generation
+        || result.generation !== generation
+        || result.currentVersion !== data.currentVersion
+      ) return false;
+      if (result.status !== "error") {
+        const expectedReleaseUrl =
+          "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v" + result.latestVersion;
+        if (!stableVersion.test(result.latestVersion) || result.releaseUrl !== expectedReleaseUrl) return false;
+      }
+      clearControlRequest();
+      if (result.status === "latest") {
+        availableUpdate = null;
+        paintUpdateState("latest");
+        showAlert("当前已经是最新版本。", "success");
+      } else if (result.status === "update-available") {
+        availableUpdate = {
+          currentVersion: result.currentVersion,
+          latestVersion: result.latestVersion,
+          releaseUrl: result.releaseUrl,
+        };
+        paintUpdateState("available", result.latestVersion);
+        showAlert("发现新版本，复制更新指令后粘贴到 Codex 对话中即可。", "success");
+      } else {
+        availableUpdate = null;
+        paintUpdateState("error");
+        showAlert("暂时无法连接 GitHub，请稍后重试。");
+      }
+      return true;
+    };
+    runtime.receiveUpdateCheckResult = receiveUpdateCheckResult;
+    const queueUpdateCheck = () => {
+      assertCurrent();
+      if (controlRequest !== null) {
+        showAlert("请等待当前操作完成后再检查更新。");
+        return false;
+      }
+      const request = {
+        schemaVersion: 1,
+        requestId: newRequestId(),
+        action: "check-update",
+        capability: data.control.token,
+        generation,
+      };
+      controlRequest = request;
+      availableUpdate = null;
+      hideAlert();
+      paintUpdateState("checking");
+      controlRequestTimeout = later(() => {
+        if (controlRequest?.requestId !== request.requestId) return;
+        clearControlRequest();
+        paintUpdateState("error");
+        showAlert("后台控制器未返回检查结果，请重试。");
+      }, 15000);
+      return true;
+    };
+    const updateInstruction = () => [
+      "请帮我更新 HeiGe Codex Skin Studio。",
+      "",
+      "项目地址：https://github.com/HeiGeAi/heige-codex-skin-studio",
+      "当前安装版本：v" + availableUpdate.currentVersion,
+      "检测到最新版本：v" + availableUpdate.latestVersion,
+      "发布页面：" + availableUpdate.releaseUrl,
+      "",
+      "请先检查本机现有安装，再按项目 README 的最新版安装流程完成更新。",
+      "保留现有主题、宠物和常驻设置，更新后运行项目测试并做一次真实启动验证。",
+      "不要修改 Codex 的 app.asar，也不要覆盖与本项目无关的用户配置。",
+    ].join("\\n");
+    const copyUpdateInstruction = async () => {
+      assertCurrent();
+      const text = updateInstruction();
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+        await navigator.clipboard.writeText(text);
+        assertCurrent();
+        showAlert("更新指令已复制，请粘贴到 Codex 对话中执行。", "success");
+        return true;
+      } catch {}
+      let textarea = null;
+      try {
+        assertCurrent();
+        textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        if (document.execCommand?.("copy") !== true) throw new Error("copy command failed");
+        showAlert("更新指令已复制，请粘贴到 Codex 对话中执行。", "success");
+        return true;
+      } catch {
+        if (isCurrent()) showAlert("复制失败，请手动复制项目地址。");
+        return false;
+      } finally {
+        textarea?.remove();
+      }
+    };
+    listen(updateButton, "click", () => {
+      if (availableUpdate === null) queueUpdateCheck();
+      else void copyUpdateInstruction();
+    });
     const renderThemeSelection = (themeId, persist = false, broadcast = false) => {
       if (themeId === data.customId) {
         const custom = currentCustom ?? loadCustom();
@@ -1520,6 +1687,7 @@ export function buildSkinMenuScript({
         themePending = false;
         for (const item of rows.values()) item.disabled = false;
       }
+      if (cleared?.action === "check-update") paintUpdateState("error");
       closeConfirmation({ restoreFocus: !confirmation.hidden });
       persistenceEnabled = value.enabled;
       controlRevision = value.revision;

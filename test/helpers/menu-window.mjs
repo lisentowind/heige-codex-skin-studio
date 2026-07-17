@@ -49,6 +49,7 @@ async function flushMicrotasks(window) {
 }
 
 export async function menuWindow({
+  currentVersion = "5.2.2",
   persistenceEnabled = true,
   revision = 7,
   BroadcastChannelClass,
@@ -94,6 +95,7 @@ export async function menuWindow({
   const buildOptions = {
     styleId: "heige-codex-skin-style",
     menuId: "heige-codex-skin-menu",
+    currentVersion,
     activeId,
     preferStored,
     entries,
@@ -119,6 +121,9 @@ export async function menuWindow({
     get closeButton() { return query("theme-center-close"); },
     get saveState() { return query("save-state"); },
     get currentHero() { return query("current-theme-hero"); },
+    get versionText() { return query("update-version"); },
+    get updateButton() { return query("update-check"); },
+    get runtime() { return window.__heigeCodexSkinRuntime; },
     get switch() { return query("persistence-switch"); },
     get confirmation() { return query("persistence-confirmation"); },
     get cancel() { return query("persistence-cancel"); },

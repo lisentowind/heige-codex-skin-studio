@@ -262,6 +262,178 @@ test("theme center renders native upload and built-in preview cards", async (t) 
   assert.match(appearanceHelp?.textContent ?? "", /左下角头像👉设置👉外观👉选择 浅色\/深色 主题✅即可/);
 });
 
+test("version bar stays offline until the user manually checks", async (t) => {
+  const page = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => page.close());
+
+  assert.equal(page.versionText.textContent, "当前版本 v5.2.2");
+  assert.equal(page.updateButton.textContent, "检查更新");
+  assert.equal(page.runtime.status().controlRequest, null);
+
+  page.updateButton.click();
+  await page.flush();
+  const request = page.runtime.status().controlRequest;
+  assert.equal(request.action, "check-update");
+  assert.equal(request.generation, page.runtime.generation);
+  assert.equal(page.updateButton.textContent, "检查中");
+  assert.equal(page.updateButton.disabled, true);
+});
+
+test("update results are request-bound and paint latest retry and available states", async (t) => {
+  const page = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => page.close());
+
+  page.updateButton.click();
+  await page.flush();
+  const first = page.runtime.status().controlRequest;
+  assert.equal(page.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: "0".repeat(32),
+    generation: page.runtime.generation,
+    status: "latest",
+    currentVersion: "5.2.2",
+    latestVersion: "5.2.2",
+    releaseUrl:
+      "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
+  }), false);
+  assert.equal(page.updateButton.textContent, "检查中");
+
+  assert.equal(page.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: first.requestId,
+    generation: first.generation,
+    status: "latest",
+    currentVersion: "5.2.2",
+    latestVersion: "5.2.2",
+    releaseUrl:
+      "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.2.2",
+  }), true);
+  assert.equal(page.versionText.textContent, "v5.2.2 已是最新版");
+  assert.equal(page.updateButton.textContent, "已是最新版");
+  assert.equal(page.updateButton.disabled, true);
+  assert.equal(page.runtime.status().controlRequest, null);
+
+  const retryPage = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => retryPage.close());
+  retryPage.updateButton.click();
+  await retryPage.flush();
+  const retry = retryPage.runtime.status().controlRequest;
+  assert.equal(retryPage.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: retry.requestId,
+    generation: retry.generation,
+    status: "error",
+    currentVersion: "5.2.2",
+  }), true);
+  assert.equal(retryPage.versionText.textContent, "暂时无法检查更新");
+  assert.equal(retryPage.updateButton.textContent, "重新检查");
+  assert.equal(retryPage.updateButton.disabled, false);
+});
+
+test("available update copies a complete Codex instruction with a fallback", async (t) => {
+  const page = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => page.close());
+  let copied = null;
+  Object.defineProperty(page.window.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async writeText(value) {
+        copied = value;
+      },
+    },
+  });
+
+  page.updateButton.click();
+  await page.flush();
+  const request = page.runtime.status().controlRequest;
+  assert.equal(page.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: request.requestId,
+    generation: request.generation,
+    status: "update-available",
+    currentVersion: "5.2.2",
+    latestVersion: "5.3.0",
+    releaseUrl:
+      "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.3.0",
+  }), true);
+  assert.equal(page.versionText.textContent, "发现新版本 v5.3.0");
+  assert.equal(page.updateButton.textContent, "复制更新指令");
+  assert.equal(page.updateButton.disabled, false);
+
+  page.updateButton.click();
+  await page.flush();
+  assert.match(copied, /github\.com\/HeiGeAi\/heige-codex-skin-studio/);
+  assert.match(copied, /当前安装版本：v5\.2\.2/);
+  assert.match(copied, /检测到最新版本：v5\.3\.0/);
+  assert.match(copied, /不要修改 Codex 的 app\.asar/);
+  assert.equal(page.alert.textContent, "更新指令已复制，请粘贴到 Codex 对话中执行。");
+
+  const fallback = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => fallback.close());
+  Object.defineProperty(fallback.window.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async writeText() {
+        throw new Error("clipboard permission denied");
+      },
+    },
+  });
+  let execCalls = 0;
+  fallback.document.execCommand = (command) => {
+    execCalls += 1;
+    return command === "copy";
+  };
+  fallback.updateButton.click();
+  await fallback.flush();
+  const fallbackRequest = fallback.runtime.status().controlRequest;
+  fallback.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: fallbackRequest.requestId,
+    generation: fallbackRequest.generation,
+    status: "update-available",
+    currentVersion: "5.2.2",
+    latestVersion: "5.3.0",
+    releaseUrl:
+      "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.3.0",
+  });
+  fallback.updateButton.click();
+  await fallback.flush();
+  assert.equal(execCalls, 1);
+  assert.equal(fallback.document.querySelectorAll("textarea").length, 0);
+  assert.match(fallback.alert.textContent, /已复制/);
+});
+
+test("clipboard failure never claims the update instruction was copied", async (t) => {
+  const page = await menuWindow({ currentVersion: "5.2.2" });
+  t.after(() => page.close());
+  Object.defineProperty(page.window.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async writeText() {
+        throw new Error("clipboard permission denied");
+      },
+    },
+  });
+  page.document.execCommand = () => false;
+  page.updateButton.click();
+  await page.flush();
+  const request = page.runtime.status().controlRequest;
+  page.runtime.receiveUpdateCheckResult({
+    schemaVersion: 1,
+    requestId: request.requestId,
+    generation: request.generation,
+    status: "update-available",
+    currentVersion: "5.2.2",
+    latestVersion: "5.3.0",
+    releaseUrl:
+      "https://github.com/HeiGeAi/heige-codex-skin-studio/releases/tag/v5.3.0",
+  });
+  page.updateButton.click();
+  await page.flush();
+  assert.match(page.alert.textContent, /复制失败/);
+  assert.doesNotMatch(page.alert.textContent, /已复制/);
+});
+
 test("switch exposes programmatic state and permanent re-enable guidance", async (t) => {
   const page = await menuWindow({ persistenceEnabled: true, revision: 7 });
   t.after(() => page.close());

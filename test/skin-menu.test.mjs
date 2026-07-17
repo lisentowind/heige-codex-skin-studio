@@ -11,6 +11,7 @@ import { THEME_CENTER_STYLE } from "../src/theme-center-style.mjs";
 const base = {
   styleId: "heige-codex-skin-style",
   menuId: "heige-codex-skin-menu",
+  currentVersion: "5.2.2",
 };
 
 test("extracts one validated hero data URL from generated theme CSS", () => {
