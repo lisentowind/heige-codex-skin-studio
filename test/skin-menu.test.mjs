@@ -55,6 +55,16 @@ test("ships the responsive Aurora Gallery dialog without animation", () => {
   assert.doesNotMatch(THEME_CENTER_STYLE, /@keyframes|animation:/);
 });
 
+test("limits Electron no-drag regions to interactive theme controls", () => {
+  const rootRule = /#heige-codex-skin-menu\s*\{([^}]*)\}/.exec(THEME_CENTER_STYLE)?.[1] ?? "";
+  const triggerRule = /\[data-heige-role="menu-trigger"\]\s*\{([^}]*)\}/.exec(THEME_CENTER_STYLE)?.[1] ?? "";
+  const backdropRule = /\[data-heige-role="theme-center-backdrop"\]\s*\{([^}]*)\}/.exec(THEME_CENTER_STYLE)?.[1] ?? "";
+
+  assert.doesNotMatch(rootRule, /-webkit-app-region:\s*no-drag/);
+  assert.match(triggerRule, /-webkit-app-region:\s*no-drag/);
+  assert.match(backdropRule, /-webkit-app-region:\s*no-drag/);
+});
+
 test("embeds every theme and the active id as JSON data", () => {
   const script = buildSkinMenuScript({
     ...base,
