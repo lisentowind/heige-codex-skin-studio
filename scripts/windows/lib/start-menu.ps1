@@ -1094,6 +1094,85 @@ function Remove-HeiGeStartMenuShortcut {
     return [pscustomobject][ordered]@{ PriorExisted = $true; Removed = $true; VerifiedAbsent = $true }
 }
 
+function Test-HeiGeUninstallOwnedStartMenuShortcut {
+    param(
+        [Parameter(Mandatory = $true)]$Observation,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+    if ([string]$Observation.Description -ceq $script:HeiGeStartMenuDescription) {
+        return $true
+    }
+    $workingDirectory = Join-Path $InstallRoot "scripts\windows"
+    $applyTarget = Join-Path $workingDirectory "apply.bat"
+    $legacyTarget = Join-Path $workingDirectory "enable-skin.bat"
+    if (Test-HeiGeSamePath -Left ([string]$Observation.TargetPath) -Right $applyTarget) { return $true }
+    if (Test-HeiGeSamePath -Left ([string]$Observation.TargetPath) -Right $legacyTarget) { return $true }
+    $normalizedTarget = ([string]$Observation.TargetPath) -replace '/', '\'
+    if ($normalizedTarget -imatch '\\heige-codex-skin-studio\\scripts\\windows\\(apply|enable-skin)\.bat$') {
+        return $true
+    }
+    return $false
+}
+
+function Remove-HeiGeStartMenuShortcutForUninstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [AllowNull()][string]$StartMenuRoot,
+        [scriptblock]$ReadShortcutProvider
+    )
+    if (-not $StartMenuRoot) { $StartMenuRoot = Get-HeiGeDefaultStartMenuRoot }
+    $resolvedStartMenuRoot = Get-HeiGeStartMenuFullPath -Path $StartMenuRoot -Description "开始菜单目录"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedStartMenuRoot -Description "开始菜单目录" | Out-Null
+    $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $resolvedStartMenuRoot
+    if (-not (Test-Path -LiteralPath $shortcutPath)) {
+        return [pscustomobject][ordered]@{
+            PriorExisted = $false
+            Removed = $false
+            VerifiedAbsent = $true
+            FolderRemoved = $false
+        }
+    }
+
+    $removedByOwnership = $false
+    try {
+        $owned = Remove-HeiGeStartMenuShortcut -InstallRoot $InstallRoot `
+            -StartMenuRoot $resolvedStartMenuRoot -ReadShortcutProvider $ReadShortcutProvider
+        $removedByOwnership = [bool]$owned.Removed
+    } catch {
+        if (-not $ReadShortcutProvider) {
+            $ReadShortcutProvider = { param($Value) Read-DefaultHeiGeShortcut -Path $Value }
+        }
+        $observed = @(& $ReadShortcutProvider $shortcutPath)
+        if ($observed.Count -ne 1 -or $null -eq $observed[0]) {
+            throw "开始菜单快捷方式无法读取，卸载中止：$shortcutPath"
+        }
+        if (-not (Test-HeiGeUninstallOwnedStartMenuShortcut -Observation $observed[0] `
+            -InstallRoot $InstallRoot)) {
+            throw "开始菜单快捷方式不属于 HeiGe，拒绝删除：$shortcutPath"
+        }
+        Remove-Item -LiteralPath $shortcutPath -Force
+        if (Test-Path -LiteralPath $shortcutPath) {
+            throw "快捷方式删除后仍存在：$shortcutPath"
+        }
+        $removedByOwnership = $true
+    }
+
+    $folderPath = Split-Path $shortcutPath -Parent
+    $folderRemoved = $false
+    if ((Test-Path -LiteralPath $folderPath -PathType Container) -and
+        (@(Get-ChildItem -LiteralPath $folderPath -Force -ErrorAction SilentlyContinue).Count -eq 0)) {
+        Remove-Item -LiteralPath $folderPath -Force -ErrorAction SilentlyContinue
+        $folderRemoved = -not (Test-Path -LiteralPath $folderPath)
+    }
+
+    return [pscustomobject][ordered]@{
+        PriorExisted = $true
+        Removed = $removedByOwnership
+        VerifiedAbsent = -not (Test-Path -LiteralPath $shortcutPath)
+        FolderRemoved = $folderRemoved
+    }
+}
+
 function Install-HeiGeStartMenuShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
