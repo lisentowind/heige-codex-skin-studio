@@ -6,6 +6,7 @@ import {
   acquireEphemeralControllerLease,
   controllerInjectionPreference,
   createBackgroundReadinessVerifier,
+  createControllerPortOwnerValidator,
   createWindowsRuntimeProbe,
   enforceLegacyMigrationFence,
   enforceMacosInstallFence,
@@ -20,6 +21,7 @@ import {
   runControllerProcess,
   validatePortOwner,
   waitForAppliedSkin,
+  withLockHeldRetry,
 } from "../src/cli.mjs";
 
 import { CODEX_RENDERER_ORIGIN, DEFAULT_THEME_ID } from "../src/constants.mjs";
@@ -83,6 +85,9 @@ function lifecycleDeps(overrides = {}) {
     stop: async () => ({ stopped: true }),
   };
   const fixture = deps({
+    // 生命周期夹具默认模拟 macOS：在 Windows 主机上跑测时也不要落到 process.platform=win32，
+    // 否则会误触 WINDOWS_LIFECYCLE_WRAPPER_REQUIRED。Windows 专用用例自行覆盖 platform: "win32"。
+    platform: "darwin",
     nodeVersion: "v22.14.0",
     readState: async () => structuredClone(state),
     preflightLifecycle: async (input) => {
@@ -398,6 +403,8 @@ test("Windows CLI help directs session lifecycle work to PowerShell or batch wra
   assert.match(help.lifecycleContract, /scripts\/windows\/apply\.ps1/);
   assert.match(help.lifecycleContract, /scripts\/windows\/enable-skin\.bat/);
   assert.match(help.lifecycleContract, /scripts\/windows\/restore\.ps1/);
+  assert.match(help.lifecycleContract, /scripts\/windows\/uninstall\.ps1/);
+  assert.match(help.lifecycleContract, /scripts\/windows\/uninstall\.bat/);
 });
 
 test("apply validates everything and registers only an ephemeral current-session controller", async () => {
@@ -516,6 +523,40 @@ test("launcher restores the last theme after a native restart and CLI cannot re-
   assert.equal(fx.state.persistenceEnabled, false, "only the top-menu switch may enable persistence");
 });
 
+test("withLockHeldRetry retries bounded LOCK_HELD then succeeds", async () => {
+  let attempts = 0;
+  const waits = [];
+  const value = await withLockHeldRetry(async () => {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error("LOCK_HELD: operation controller:start is held by live pid 31060");
+      error.code = "LOCK_HELD";
+      throw error;
+    }
+    return "applied";
+  }, {
+    delaysMs: [5, 7, 9],
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+  });
+  assert.equal(value, "applied");
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [5, 7]);
+});
+
+test("withLockHeldRetry does not retry non-LOCK_HELD failures", async () => {
+  let attempts = 0;
+  await assert.rejects(withLockHeldRetry(async () => {
+    attempts += 1;
+    throw new Error("boom");
+  }, {
+    delaysMs: [5, 7],
+    wait: async () => {
+      throw new Error("should not wait");
+    },
+  }), /boom/);
+  assert.equal(attempts, 1);
+});
+
 test("apply confirmation rejects a partial multi-window status result", async () => {
   const partial = {
     statuses: [{ installed: true, themeId: "miku-488137" }],
@@ -532,7 +573,34 @@ test("apply confirmation rejects a partial multi-window status result", async ()
     themeId: "miku-488137",
     attempts: 1,
     wait: async () => {},
+    progress: () => {},
   }), /未确认皮肤已应用/);
+});
+
+test("waitForAppliedSkin emits progress while confirmation is pending", async () => {
+  const messages = [];
+  let calls = 0;
+  await waitForAppliedSkin({
+    deps: {
+      skinStatus: async () => {
+        calls += 1;
+        if (calls < 3) {
+          return { statuses: [], failed: [], results: { succeeded: [], failed: [] } };
+        }
+        return {
+          statuses: [{ installed: true, mode: "active", themeId: "miku-488137" }],
+          failed: [],
+          results: { succeeded: [{ id: "main" }], failed: [] },
+        };
+      },
+    },
+    port: 9341,
+    themeId: "miku-488137",
+    attempts: 5,
+    wait: async () => {},
+    progress: (message) => messages.push(message),
+  });
+  assert.ok(messages.some((message) => /无需点击/.test(message)));
 });
 
 test("apply on a native Codex queues one detached CDP restart and applies only after restart", async () => {
@@ -1064,6 +1132,10 @@ test("macOS install authorization parser rejects unknown fields and noncanonical
 });
 
 test("recovery-cleared install journal rejects stale foreground and background under the real state lock", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX private-directory mode 0700 is not enforceable on Windows NTFS");
+    return;
+  }
   const { chmod, mkdir, mkdtemp, realpath, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -1725,6 +1797,10 @@ test("controller CLI rejects dynamic handshake credentials outside the one-shot 
 });
 
 test("long-lived Windows controller forwards a fixed background identity without dynamic credentials", async () => {
+  const { normalize: pathNormalize, join: pathJoin } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  // controllerPaths 要求「平台 normalize 后不变」的绝对路径；勿硬编码 /tmp（在 win32 上会被改成反斜杠）。
+  const isolatedStateDirectory = pathNormalize(pathJoin(tmpdir(), "heige-controller-isolated"));
   const taskName = "HeiGe Codex Skin Studio Test 123e4567-e89b-42d3-a456-426614174000";
   const fx = lifecycleDeps();
   await runCli([
@@ -1736,7 +1812,7 @@ test("long-lived Windows controller forwards a fixed background identity without
     "--task-name",
     taskName,
     "--state-directory",
-    "/tmp/heige-controller-isolated",
+    isolatedStateDirectory,
   ], fx.deps);
   assert.equal(fx.calls.createController[0].background, true);
   assert.equal(fx.calls.runController[0].startupHandshake, null);
@@ -2259,6 +2335,138 @@ test("ephemeral controller lease reuses one exact live singleton and recovers af
   const replacement = await acquireEphemeralControllerLease(paths);
   assert.notEqual(replacement, null);
   assert.equal(await replacement.release(), true);
+});
+
+test("macOS healthy port validation reuses the adjacent process snapshot but still checks lsof", async () => {
+  const identity = {
+    pid: 4242,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 08:00:00 2026",
+  };
+  let probes = 0;
+  let portChecks = 0;
+  const validate = createControllerPortOwnerValidator({
+    platform: "darwin",
+    port: 9341,
+    probe: async () => {
+      probes += 1;
+      return structuredClone(identity);
+    },
+    validatePortOwnerImpl: async (port, candidate, options) => {
+      portChecks += 1;
+      assert.equal(port, 9341);
+      assert.deepEqual(candidate, identity);
+      assert.deepEqual(options, { platform: "darwin" });
+      return true;
+    },
+  });
+
+  assert.equal(await validate(identity, { reuseCurrentProcessSnapshot: true }), true);
+  assert.equal(probes, 0, "the adjacent process snapshot must avoid one duplicate ps scan");
+  assert.equal(portChecks, 1, "lsof ownership proof must not be skipped");
+
+  assert.equal(await validate(identity), true);
+  assert.equal(probes, 1, "non-health operations must retain their fresh identity probe");
+  assert.equal(portChecks, 2);
+});
+
+test("macOS normal port validation fails closed on process identity drift before lsof", async () => {
+  const identity = {
+    pid: 4242,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 08:00:00 2026",
+  };
+  let portChecks = 0;
+  const validate = createControllerPortOwnerValidator({
+    platform: "darwin",
+    port: 9341,
+    probe: async () => ({ ...identity, startedAt: "Fri Jul 17 08:00:01 2026" }),
+    validatePortOwnerImpl: async () => {
+      portChecks += 1;
+      return true;
+    },
+  });
+
+  assert.equal(await validate(identity), false);
+  assert.equal(portChecks, 0);
+});
+
+test("Windows controller validation consumes the combined runtime port proof without re-querying", async () => {
+  const identity = {
+    pid: 4242,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  };
+  let proofs = 0;
+  const validate = createControllerPortOwnerValidator({
+    platform: "win32",
+    port: 9341,
+    probe: async () => {
+      throw new Error("an exact combined proof must not trigger another runtime query");
+    },
+    windowsProbe: {
+      consumePortProof(candidate) {
+        proofs += 1;
+        return candidate === identity;
+      },
+    },
+  });
+
+  assert.equal(await validate(identity), true);
+  assert.equal(proofs, 1);
+});
+
+test("Windows trailing runtime proof cannot outlive an explicit discard", async () => {
+  const identity = {
+    pid: 4242,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-17T08:00:00.0000000Z",
+  };
+  let queries = 0;
+  const probe = createWindowsRuntimeProbe({
+    port: 9341,
+    queryWindowsRuntime: async () => {
+      queries += 1;
+      return {
+        schemaVersion: 1,
+        app: {
+          kind: "Win32",
+          executablePath: identity.executablePath,
+          installPath: "C:\\Program Files\\Codex",
+          productName: "Codex",
+          packageFullName: null,
+          aumid: null,
+          launchTarget: identity.executablePath,
+        },
+        nodePath: "C:\\Program Files\\nodejs\\node.exe",
+        processes: [{
+          pid: identity.pid,
+          parentProcessId: 4,
+          executablePath: identity.executablePath,
+          startedAt: identity.startedAt,
+        }],
+        listeners: [{
+          pid: identity.pid,
+          executablePath: identity.executablePath,
+          processName: "Codex",
+          startedAt: identity.startedAt,
+          localAddress: "127.0.0.1",
+          localPort: 9341,
+        }],
+      };
+    },
+  });
+  const validate = createControllerPortOwnerValidator({
+    platform: "win32",
+    port: 9341,
+    probe,
+    windowsProbe: probe,
+  });
+
+  await probe();
+  probe.discardPortProof();
+  assert.equal(await validate(identity), true);
+  assert.equal(queries, 2, "discarded proof must force a fresh runtime query");
 });
 
 test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {
