@@ -262,6 +262,60 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
   return { id, path: destination, manifest };
 }
 
+/**
+ * 按主题 ID 安全定位并只加载目标主题，不扫描/加载其余主题资源。
+ * 用于主题保存临界路径的安装校验；菜单注入仍应使用完整 themeBundle。
+ */
+export async function resolveAndLoadTheme({ roots, id }) {
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.includes("\0") ||
+    id.includes("/") ||
+    id.includes("\\") ||
+    id.includes("..")
+  ) {
+    throw new TypeError("theme id is invalid");
+  }
+  if (!Array.isArray(roots) || roots.length === 0) {
+    throw new TypeError("theme roots are required");
+  }
+  const failures = [];
+  for (const root of roots) {
+    if (
+      typeof root !== "string" ||
+      !isAbsolute(root) ||
+      resolve(root) !== root ||
+      root.includes("\0")
+    ) {
+      throw new TypeError("theme root must be a canonical absolute path");
+    }
+    const candidate = join(root, id);
+    let loaded;
+    try {
+      loaded = await loadTheme(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      failures.push(error);
+      continue;
+    }
+    if (loaded.manifest.id !== id) {
+      throw new Error(`theme directory identity mismatch: expected ${id}`);
+    }
+    return {
+      loadedTheme: loaded,
+      selected: {
+        ...loaded.manifest,
+        path: loaded.root,
+      },
+    };
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `找不到有效主题：${id}`);
+  }
+  throw new Error(`找不到主题：${id}`);
+}
+
 export async function listThemes({ roots }) {
   const themes = [];
   for (const root of roots) {
