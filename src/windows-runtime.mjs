@@ -47,17 +47,18 @@ foreach ($record in $rawProcesses) {
   $pidValue = [int]$record.ProcessId
   $parentPid = [int]$record.ParentProcessId
   $path = [string]$record.ExecutablePath
-  if ($pidValue -le 0 -or $parentPid -lt 0 -or -not $path) {
-    throw 'Windows Codex process record is incomplete'
+  # Store/MSIX 子进程偶发 ExecutablePath 为空；跳过而不是整次快照失败。
+  if ($pidValue -le 0 -or $parentPid -lt 0 -or [string]::IsNullOrWhiteSpace($path)) {
+    continue
   }
   $owner = [pscustomobject]@{ Id = $pidValue; Path = $path; ProcessName = [string]$record.Name }
   if (-not (Test-CdpOwnerMatchesApp -Owner $owner -App $app)) {
     if ($AppIdentityToken) { throw 'foreign Windows Codex process conflicts with the immutable app identity' }
     continue
   }
-  $live = Get-Process -Id $pidValue -ErrorAction Stop
-  if ([int]$live.Id -ne $pidValue -or -not $live.Path) {
-    throw 'Windows Codex process changed during runtime snapshot'
+  $live = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+  if ($null -eq $live -or [int]$live.Id -ne $pidValue -or [string]::IsNullOrWhiteSpace([string]$live.Path)) {
+    continue
   }
   $processes += [pscustomobject][ordered]@{
     pid = $pidValue
@@ -67,10 +68,24 @@ foreach ($record in $rawProcesses) {
   }
 }
 $listeners = @()
-$connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $port })
+$connections = @()
+try {
+  Import-Module NetTCPIP -ErrorAction SilentlyContinue | Out-Null
+  $connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $port })
+} catch {
+  foreach ($line in @(netstat -ano -p tcp 2>$null)) {
+    if ($line -notmatch '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$') { continue }
+    if ([int]$Matches[2] -ne $port) { continue }
+    $connections += [pscustomobject]@{
+      OwningProcess = [int]$Matches[3]
+      LocalAddress = [string]$Matches[1]
+      LocalPort = [int]$port
+    }
+  }
+}
 foreach ($connection in $connections) {
-  $owner = Get-Process -Id ([int]$connection.OwningProcess) -ErrorAction Stop
-  if (-not $owner.Path) { throw 'Windows listener owner path is unavailable' }
+  $owner = Get-Process -Id ([int]$connection.OwningProcess) -ErrorAction SilentlyContinue
+  if ($null -eq $owner -or [string]::IsNullOrWhiteSpace([string]$owner.Path)) { continue }
   $listeners += [pscustomobject][ordered]@{
     pid = [int]$owner.Id
     executablePath = [System.IO.Path]::GetFullPath([string]$owner.Path)
