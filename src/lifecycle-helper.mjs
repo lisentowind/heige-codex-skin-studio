@@ -8,7 +8,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { execFile as execFileCallback } from "node:child_process";
 
-import { listCodexProcesses, sameProcessIdentity } from "./codex-app.mjs";
+import {
+  listCodexProcesses,
+  parseMacPsLstartRow,
+  parseMacPsTreeTable,
+  sameProcessIdentity,
+} from "./codex-app.mjs";
 
 const execFile = promisify(execFileCallback);
 const ACTION_BYTES = 16 * 1024;
@@ -348,15 +353,15 @@ async function defaultReadProcessIdentity(pid, expected, { run = execFile } = {}
     if (error?.code === 1) return null;
     throw error;
   }
-  const pattern = /^\s*(\d+)\s+(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([\s\S]+?)\s*$/;
-  const match = pattern.exec(stdout);
-  if (!match || Number(match[1]) !== pid) return null;
-  const command = match[3];
-  const executableMatches = command === expected.executablePath || command.startsWith(`${expected.executablePath} `);
+  const row = parseMacPsLstartRow(String(stdout).split(/\r?\n/).find(Boolean) ?? "");
+  if (!row || row.pid !== pid) return null;
+  const command = row.commandLine;
+  const executableMatches = command === expected.executablePath ||
+    command.startsWith(`${expected.executablePath} `);
   if (!executableMatches) {
-    return { pid, executablePath: command.split(" ")[0], startedAt: match[2] };
+    return { pid, executablePath: command.split(" ")[0], startedAt: row.startedAt };
   }
-  return { pid, executablePath: expected.executablePath, startedAt: match[2] };
+  return { pid, executablePath: expected.executablePath, startedAt: row.startedAt };
 }
 
 export async function requestNormalQuit({ process: identity }, { execFile: run = execFile } = {}) {
@@ -436,21 +441,6 @@ async function defaultVerifyPortReleased(port) {
   }
 }
 
-function parseMacProcessTree(output) {
-  const rows = [];
-  for (const line of String(output).split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(.*)$/);
-    if (!match) continue;
-    rows.push({
-      pid: Number(match[1]),
-      ppid: Number(match[2]),
-      startedAt: `${match[3]} ${match[4]} ${match[5]} ${match[6]} ${match[7]}`,
-      commandLine: match[8],
-    });
-  }
-  return rows;
-}
-
 export async function verifyMacProcessOwnerTree({ rootProcess, ownerPids, run = execFile } = {}) {
   const root = processIdentity({
     pid: rootProcess?.pid,
@@ -465,7 +455,7 @@ export async function verifyMacProcessOwnerTree({ rootProcess, ownerPids, run = 
     throw new Error("CDP listener owners do not include the exact Codex root process");
   }
   const { stdout } = await run("/bin/ps", ["-axo", "pid=,ppid=,lstart=,command="]);
-  const rows = new Map(parseMacProcessTree(stdout).map((row) => [row.pid, row]));
+  const rows = new Map(parseMacPsTreeTable(stdout).map((row) => [row.pid, row]));
   const rootRow = rows.get(root.pid);
   if (
     rootRow?.startedAt !== root.startedAt
