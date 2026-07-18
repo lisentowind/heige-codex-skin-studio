@@ -136,6 +136,7 @@ export function buildSkinMenuScript({
     customId: "custom-upload",
     storageKey: "heigeCodexCustomTheme",
     hiddenKey: "heigeCodexSkinMenuHidden",
+    panelOpenKey: "heigeCodexThemeCenterOpen",
     readabilityKey: "heigeCodexReadabilityEnabled",
     selectedKey: "heigeCodexSkinSelected",
     nativeSel: "__heige_native__",
@@ -464,6 +465,15 @@ export function buildSkinMenuScript({
   setReadability(readReadability(), false, false);
 
   let hidden = false;
+  const writePanelOpen = (open) => {
+    try {
+      if (open) sessionStorage.setItem(data.panelOpenKey, "1");
+      else sessionStorage.removeItem(data.panelOpenKey);
+    } catch {}
+  };
+  const readPanelOpen = () => {
+    try { return sessionStorage.getItem(data.panelOpenKey) === "1"; } catch { return false; }
+  };
   const setPanelOpen = (open, { focusTrigger = false } = {}) => {
     assertCurrent();
     const next = open === true && !hidden;
@@ -471,6 +481,7 @@ export function buildSkinMenuScript({
     panel.style.display = next ? "grid" : "none";
     button.setAttribute("aria-expanded", String(next));
     button.setAttribute("aria-label", hidden ? "显示主题入口" : "打开主题中心");
+    writePanelOpen(next);
     if (next) closeButton.focus();
     else if (focusTrigger) button.focus();
   };
@@ -1236,6 +1247,7 @@ export function buildSkinMenuScript({
   let getPersistenceState = () => null;
   let applyRemotePersistence = () => false;
   let controlRequest = null;
+  let themePending = false;
   if (data.control?.available === true) {
     const section = document.createElement("section");
     section.dataset.heigeRole = "persistence-section";
@@ -1315,7 +1327,6 @@ export function buildSkinMenuScript({
     let persistenceEnabled = data.control.persistenceEnabled;
     let controlRevision = data.control.revision;
     let pending = false;
-    let themePending = false;
     let optimisticPreviousThemeId = null;
     let controlRequestTimeout = null;
     const themeEndpoint = data.control.endpoint.slice(0, -"/v1/persistence".length) + "/v1/theme";
@@ -1451,6 +1462,43 @@ export function buildSkinMenuScript({
       return true;
     };
     runtime.receiveUpdateCheckResult = receiveUpdateCheckResult;
+    const receiveThemeSelectionResult = (result) => {
+      assertCurrent();
+      const pendingRequest = controlRequest;
+      if (pendingRequest?.action !== "set-theme") return false;
+      if (
+        result === null
+        || typeof result !== "object"
+        || Array.isArray(result)
+        || result.schemaVersion !== 1
+        || result.requestId !== pendingRequest.requestId
+        || result.themeId !== pendingRequest.themeId
+        || typeof result.persistenceEnabled !== "boolean"
+        || !isRevision(result.revision)
+        || result.revision < pendingRequest.expectedRevision
+        || result.revision < controlRevision
+      ) return false;
+      const keys = Object.keys(result).sort();
+      const expectedKeys = ["persistenceEnabled", "requestId", "revision", "schemaVersion", "themeId"];
+      if (
+        keys.length !== expectedKeys.length
+        || keys.some((key, index) => key !== expectedKeys[index])
+      ) return false;
+      clearControlRequest();
+      persistenceEnabled = result.persistenceEnabled;
+      controlRevision = result.revision;
+      optimisticPreviousThemeId = null;
+      themePending = false;
+      for (const item of rows.values()) item.disabled = false;
+      // 不广播：CDP 会投递给所有主窗口；随后 forceRepair 再对齐遗漏窗口。
+      // 若这里 publish persistence，仍挂起的 sibling 会被误判为「未保存」。
+      renderThemeSelection(result.themeId, true, false);
+      paintSaveState("saved", "已保存");
+      showAlert("主题选择已保存。", "success");
+      paintPersistence();
+      return true;
+    };
+    runtime.receiveThemeSelectionResult = receiveThemeSelectionResult;
     const queueUpdateCheck = () => {
       assertCurrent();
       if (controlRequest !== null) {
@@ -1561,7 +1609,7 @@ export function buildSkinMenuScript({
           for (const item of rows.values()) item.disabled = false;
         }
         showAlert("后台控制器未确认，请重试");
-      }, 15000);
+      }, 60000);
       showAlert("正在等待后台确认…", "success");
       return true;
     };
@@ -1569,7 +1617,9 @@ export function buildSkinMenuScript({
     requestThemeSelection = async (themeId) => {
       assertCurrent();
       const currentThemeId = document.documentElement.dataset.heigeCodexSkin ?? data.nativeSel;
-      if (themePending || themeId === currentThemeId) return false;
+      if (themeId === currentThemeId) return false;
+      // HTTP 进行中禁止重入；已排队 CDP 兜底时允许合并到最新主题选择。
+      if (themePending && controlRequest?.action !== "set-theme") return false;
       if (
         themeId !== data.nativeSel &&
         !data.themes.some((theme) => theme.id === themeId)
@@ -1593,7 +1643,8 @@ export function buildSkinMenuScript({
       hideAlert();
       for (const item of rows.values()) item.disabled = true;
       const abortController = childController();
-      const timeoutId = later(() => abortController.abort(), 3000);
+      // 主题提交含进程探测与校验，3s 过短会误走 CDP 兜底并触发 reinject，把打开中的主题中心拆掉。
+      const timeoutId = later(() => abortController.abort(), 15000);
       try {
         const response = await fetch(themeEndpoint, {
           method: "POST",
@@ -1606,7 +1657,11 @@ export function buildSkinMenuScript({
             "Content-Type": "application/json",
             "X-HeiGe-Control-Token": data.control.token,
           },
-          body: JSON.stringify({ revision: requestRevision, themeId }),
+          body: JSON.stringify({
+            revision: requestRevision,
+            themeId,
+            requestId: fallbackRequest.requestId,
+          }),
           signal: abortController.signal,
         });
         assertCurrent();
@@ -1651,6 +1706,7 @@ export function buildSkinMenuScript({
         return true;
       } catch (error) {
         if (isCurrent()) {
+          // 与 HTTP 使用同一 requestId，后端可合并进行中的提交，避免超时后重复 CAS/重注入。
           queued = queueControlRequest(fallbackRequest);
           if (!queued) {
             rollbackOptimisticTheme();
@@ -1662,10 +1718,14 @@ export function buildSkinMenuScript({
       } finally {
         clearLater(timeoutId);
         trackedControllers.delete(abortController);
-        if (isCurrent()) {
-          themePending = false;
+        if (!isCurrent()) return;
+        // 排队等待 ACK 时保持 themePending（阻止 tick reinject），但恢复主题行以便合并选择。
+        if (queued) {
           for (const item of rows.values()) item.disabled = false;
+          return;
         }
+        themePending = false;
+        for (const item of rows.values()) item.disabled = false;
       }
     };
     const requestPersistence = async (target, restoreFocus = false) => {
@@ -1958,6 +2018,8 @@ export function buildSkinMenuScript({
   };
   restore();
   if (readHidden()) setHidden(true, false, false);
+  // reinject 会销毁弹窗；若切换主题过程中被误修复，恢复打开态，避免「还没切完就关了」。
+  else if (readPanelOpen()) setPanelOpen(true);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
   statusSnapshot = () => {
@@ -1971,6 +2033,7 @@ export function buildSkinMenuScript({
       mode: themeId === null ? "native" : "active",
       persistenceEnabled: persistence?.persistenceEnabled ?? false,
       revision: persistence?.revision ?? 0,
+      themeTransitionPending: themePending === true || controlRequest?.action === "set-theme",
       controlRequest: controlRequest === null ? null : { ...controlRequest },
     };
   };
