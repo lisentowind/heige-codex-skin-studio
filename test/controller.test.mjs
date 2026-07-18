@@ -101,6 +101,8 @@ function fixture(overrides = {}) {
   const calls = {
     lease: [],
     leaseContext: [],
+    probe: [],
+    validatePort: [],
     server: [],
     close: 0,
     launch: [],
@@ -120,6 +122,7 @@ function fixture(overrides = {}) {
     restart: [],
     updateCheck: [],
     updateDelivery: [],
+    themeDelivery: [],
   };
   let nonceIndex = 0;
   let journalWriteCount = 0;
@@ -195,7 +198,10 @@ function fixture(overrides = {}) {
       transition = null;
       return { state: clone(state), session: clone(session), recovered: true };
     },
-    probeCurrentProcess: async () => clone(processIdentity),
+    probeCurrentProcess: async () => {
+      calls.probe.push(true);
+      return clone(processIdentity);
+    },
     ...(Object.hasOwn(overrides, "nativeProcess")
       ? {
         probeNativeProcess: async () => {
@@ -214,7 +220,11 @@ function fixture(overrides = {}) {
           return { queued: true };
         },
       }),
-    validatePortOwner: async (candidate) => {
+    validatePortOwner: async (candidate, options) => {
+      calls.validatePort.push({
+        candidate: clone(candidate),
+        options: clone(options),
+      });
       if (overrides.wrongPortOwner) return false;
       return candidate !== null;
     },
@@ -335,6 +345,11 @@ function fixture(overrides = {}) {
       if (overrides.updateDeliveryFailure) throw new Error("renderer disappeared");
       return { delivered: 1 };
     },
+    deliverThemeSelectionResult: async (input) => {
+      calls.themeDelivery.push(clone(input));
+      if (overrides.themeDeliveryFailure) throw new Error("renderer disappeared");
+      return { delivered: 1 };
+    },
   };
 
   return {
@@ -452,6 +467,8 @@ test("a stable healthy tick never acquires the durable operation lease", async (
   await controller.start();
   fx.calls.lease.length = 0;
   fx.calls.leaseContext.length = 0;
+  fx.calls.probe.length = 0;
+  fx.calls.validatePort.length = 0;
   fx.calls.inspect.length = 0;
 
   const current = await controller.tick();
@@ -459,12 +476,33 @@ test("a stable healthy tick never acquires the durable operation lease", async (
   assert.equal(current.action, "idle");
   assert.deepEqual(fx.calls.lease, []);
   assert.deepEqual(fx.calls.leaseContext, []);
+  assert.equal(fx.calls.probe.length, 2, "the stable snapshot must retain its before/after race check");
+  assert.deepEqual(fx.calls.validatePort, [{
+    candidate: CURRENT_PROCESS,
+    options: { reuseCurrentProcessSnapshot: true },
+  }]);
   assert.equal(fx.calls.inspect.length, 1, "one healthy tick must scan the renderer only once");
   assert.equal(
     fx.calls.inspect[0].purpose,
     "renderer-control-request",
     "the combined health scan must still expose queued renderer requests",
   );
+});
+
+test("a healthy tick discards unused trailing port proof", async () => {
+  let discarded = 0;
+  const fx = fixture();
+  fx.deps.discardPortProof = () => {
+    discarded += 1;
+  };
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  discarded = 0;
+
+  const current = await controller.tick();
+
+  assert.equal(current.action, "idle");
+  assert.equal(discarded, 1);
 });
 
 test("an unhealthy fast snapshot falls back to the leased repair path", async () => {
@@ -986,6 +1024,12 @@ test("a polled menu theme request commits and reinjects the authoritative select
   assert.equal(fx.state.lastNonNativeThemeId, selected);
   assert.equal(fx.calls.inject.at(-1).themeId, selected);
   assert.equal(fx.calls.inject.at(-1).preferStored, false);
+  assert.deepEqual(fx.calls.themeDelivery, [{
+    requestId: "d".repeat(32),
+    themeId: selected,
+    revision: 2,
+    persistenceEnabled: true,
+  }]);
 });
 
 test("serializes overlapping controller lease operations before theme selection", async () => {
@@ -1240,6 +1284,61 @@ test("a divergent formal renderer is repaired from authoritative state without a
   assert.equal(fx.session.activeThemeId, DEFAULT_THEME_ID);
   assert.equal(fx.calls.inject.at(-1).themeId, DEFAULT_THEME_ID);
   assert.equal(fx.calls.inject.at(-1).control.revision, 1);
+});
+
+test("a theme transition pending renderer is not repaired for revision lag", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const injectBefore = fx.calls.inject.length;
+  const pending = rendererStatus({
+    themeId: "genshin-night",
+    revision: 1,
+    themeTransitionPending: true,
+  });
+  fx.setHealth({
+    statuses: [pending],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value: pending }],
+      failed: [],
+      skipped: [],
+    },
+  });
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.calls.inject.length, injectBefore);
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.revision, 1);
+});
+
+test("a revision-lagging renderer without a theme transition is still repaired", async () => {
+  const fx = fixture({
+    state: { revision: 8 },
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  const lagging = rendererStatus({
+    themeId: DEFAULT_THEME_ID,
+    revision: 7,
+  });
+  fx.setHealth({
+    statuses: [lagging],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value: lagging }],
+      failed: [],
+      skipped: [],
+    },
+  });
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "repair");
+  assert.equal(fx.calls.inject.at(-1).themeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.at(-1).control.revision, 8);
 });
 
 test("a divergent native renderer is repaired without changing the formal selection", async () => {
