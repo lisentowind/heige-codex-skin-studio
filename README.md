@@ -96,9 +96,9 @@ Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/wind
 
 ## 交流群
 
-扫码进微信群「Codex 皮肤共创交流」：纯技术交流，非盈利，互相学习。分享你做的主题、聊实现、提问题都欢迎。二维码过期了就开个 Issue，我会换新的。
+微信群「Codex 皮肤共创交流」已满 200 人上限，扫码加我微信，我手动拉你进群。加好友记得备注：codex。纯技术交流，非盈利，互相学习，分享你做的主题、聊实现、提问题都欢迎。
 
-<img src="docs/images/wechat-group-qr.png" width="340" alt="Codex 皮肤共创交流微信群二维码">
+<img src="docs/images/wechat-group-qr.png" width="340" alt="加黑哥微信（备注 codex）手动拉进 Codex 皮肤共创交流群">
 
 ## English
 
