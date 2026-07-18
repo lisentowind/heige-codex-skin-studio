@@ -28,6 +28,22 @@ foreach ($path in @(
 }
 New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
 
+function New-TestOwnedInstallMarker {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $marker = [ordered]@{
+        kind = "stable-tree"
+        manifestSha256 = ("a" * 64)
+        product = "heige-codex-skin-studio"
+        schemaVersion = 1
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $InstallRoot ".heige-install.json"),
+        ($marker | ConvertTo-Json -Compress),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
 function New-TestEntrypointContext {
     return [pscustomobject][ordered]@{
         App = [pscustomobject]@{
@@ -181,6 +197,231 @@ try {
         Assert-False $result.PersistenceEnabled
         Assert-False $result.PersistenceChanged
         Assert-Equal "stored-or-default" $result.ThemeSelection
+    }
+
+    Test-Case "Apply retries transient LOCK_HELD before succeeding" {
+        $script:Events = @()
+        $script:ApplyAttempts = 0
+        $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
+            -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+            -SleepProvider { param($Milliseconds) $script:Events += "sleep:$Milliseconds" } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:ApplyAttempts += 1
+                $script:Events += "apply:$script:ApplyAttempts"
+                Assert-ExactCliCall -Actual $Arguments `
+                    -Expected @("apply", "--theme", "miku-488137", "--port", "9341")
+                if ($script:ApplyAttempts -lt 3) {
+                    throw "HeiGe Codex Skin Studio：LOCK_HELD: operation controller:start is held by live pid 31060"
+                }
+                return [pscustomobject]@{ mode = "active"; persistenceEnabled = $false }
+            }
+        Assert-Equal "active" $result.Mode
+        Assert-Equal @(
+            "start-cdp", "apply:1", "sleep:1000", "apply:2", "sleep:2000", "apply:3"
+        ) $script:Events
+    }
+
+    Test-Case "Apply does not retry non-LOCK_HELD failures" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $true } `
+                -StartCdpProvider { param($Context, $Port) } `
+                -SleepProvider { param($Milliseconds) $script:Events += "sleep" } `
+                -CliProvider {
+                    param($Context, $Arguments)
+                    $script:Events += "apply"
+                    throw "apply failed visibly"
+                }
+        } "apply failed visibly"
+        Assert-Equal @("apply") $script:Events
+    }
+
+    Test-Case "Bootstrap aborts when doctor reports flag-present-port-closed" {
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -DoctorProvider {
+                    param($Context, $Port)
+                    [pscustomobject]@{
+                        diagnosis = "flag-present-port-closed：进程已带调试参数但端口未开放"
+                    }
+                } `
+                -HygieneProvider { param($Context, $Port) } `
+                -CdpStatusProvider { param($Context, $Port) $false } `
+                -CliProvider { param($Context, $Arguments) throw "should not apply" } `
+                -StatusProvider { param($Context, $Port) throw "should not status" }
+        } "abort-incompatible"
+    }
+
+    Test-Case "Bootstrap aborts CDP-disabled launch errors without endless retry" {
+        Assert-Throws {
+            Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+                -MaxApplyAttempts 2 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -SkipDoctor `
+                -HygieneProvider { param($Context, $Port) } `
+                -CdpStatusProvider { param($Context, $Port) $false } `
+                -ProcessProvider { param($Context) @() } `
+                -StartCdpProvider {
+                    param($Context, $Port)
+                    throw "Codex 已带调试参数启动，但端口 9341 未开放：当前 Codex 版本或本机 MSIX 会话可能禁用了本机调试端口。"
+                } `
+                -SleepProvider { param($Milliseconds) throw "should not whole-chain retry incompatible CDP" } `
+                -CliProvider { param($Context, $Arguments) throw "should not apply" }
+        } "abort-incompatible"
+    }
+
+    Test-Case "Process mode ignores LOCALAPPDATA Codex bin backend under a Store app" {
+        $backend = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin\unit-test\codex.exe"
+        if (-not $env:LOCALAPPDATA) { throw "LOCALAPPDATA required" }
+        New-Item -ItemType Directory -Path (Split-Path $backend -Parent) -Force | Out-Null
+        New-Item -ItemType File -Path $backend -Force | Out-Null
+        try {
+            $context = New-TestEntrypointContext
+            $context.App = [pscustomobject]@{
+                Kind = "StoreAumid"
+                ExecutablePath = $null
+                InstallPath = "C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0"
+                ProductName = "Codex"
+                PackageFullName = "OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0"
+                Aumid = "OpenAI.Codex_2p2nqsd0c76g0!App"
+            }
+            $mode = Get-HeiGeEntrypointProcessMode -Context $context -ProcessProvider {
+                param($Context)
+                @(
+                    (New-TestCodexProcess -Id 41 -Path "C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe"),
+                    (New-TestCodexProcess -Id 51 -Path $backend)
+                )
+            }
+            Assert-Equal "native" $mode
+        } finally {
+            Remove-Item -LiteralPath (Split-Path (Split-Path $backend -Parent) -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Test-Case "Bootstrap runs doctor hygiene apply verify then succeeds" {
+        $script:Events = @()
+        $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -DoctorProvider {
+                param($Context, $Port)
+                $script:Events += "doctor"
+                [pscustomobject]@{ diagnosis = "running-no-flag：实例未带调试参数" }
+            } `
+            -HygieneProvider { param($Context, $Port) $script:Events += "hygiene" } `
+            -CdpStatusProvider { param($Context, $Port) $false } `
+            -ProcessProvider { param($Context) @() } `
+            -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+            -SleepProvider { param($Milliseconds) $script:Events += "sleep:$Milliseconds" } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:Events += ("cli:" + $Arguments[0])
+                Assert-ExactCliCall -Actual $Arguments `
+                    -Expected @("apply", "--theme", "miku-488137", "--port", "9341")
+                [pscustomobject]@{ mode = "active"; persistenceEnabled = $false }
+            } `
+            -StatusProvider {
+                param($Context, $Port)
+                $script:Events += "status"
+                [pscustomobject]@{
+                    statuses = @(
+                        [pscustomobject]@{
+                            installed = $true
+                            mode = "active"
+                            themeId = "miku-488137"
+                            persistenceEnabled = $false
+                        }
+                    )
+                    failed = @()
+                }
+            } `
+            -CompensateProvider { param($Context, $Port, $Mode) throw "should not compensate" }
+        Assert-Equal "active" $result.Mode
+        Assert-False $result.BootstrapIdempotent
+        Assert-Equal @("doctor", "hygiene", "start-cdp", "cli:apply", "status") $script:Events
+        Assert-True ($result.BootstrapSteps -contains "doctor")
+        Assert-True ($result.BootstrapSteps -contains "apply:1")
+        Assert-True ($result.BootstrapSteps -contains "verify:1")
+    }
+
+    Test-Case "Bootstrap retries a whole apply attempt after ephemeral timeout" {
+        $script:Events = @()
+        $script:ApplyAttempts = 0
+        $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Port 9341 -MaxApplyAttempts 2 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -SkipDoctor `
+            -HygieneProvider { param($Context, $Port) $script:Events += "hygiene" } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
+            -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+            -SleepProvider { param($Milliseconds) $script:Events += "sleep:$Milliseconds" } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:ApplyAttempts += 1
+                $script:Events += "apply:$script:ApplyAttempts"
+                if ($script:ApplyAttempts -eq 1) {
+                    throw "HeiGe Codex Skin Studio：ephemeral controller 未确认皮肤已应用"
+                }
+                [pscustomobject]@{ mode = "active"; persistenceEnabled = $false }
+            } `
+            -StatusProvider {
+                param($Context, $Port)
+                $script:Events += "status"
+                if ($script:ApplyAttempts -ge 2) {
+                    return [pscustomobject]@{
+                        statuses = @(
+                            [pscustomobject]@{
+                                installed = $true
+                                mode = "active"
+                                themeId = "miku-488137"
+                                persistenceEnabled = $false
+                            }
+                        )
+                        failed = @()
+                    }
+                }
+                return [pscustomobject]@{ statuses = @(); failed = @() }
+            }
+        Assert-Equal "active" $result.Mode
+        Assert-Equal @(
+            "hygiene", "status", "start-cdp", "apply:1", "sleep:1000", "start-cdp", "apply:2", "status"
+        ) $script:Events
+        Assert-True ($result.BootstrapSteps -contains "retry:1")
+    }
+
+    Test-Case "Bootstrap returns idempotent success when skin is already active" {
+        $script:Events = @()
+        $result = Invoke-HeiGeApplyFlow -Root $script:InstallRoot -Theme "miku-488137" -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -SkipDoctor `
+            -HygieneProvider { param($Context, $Port) $script:Events += "hygiene" } `
+            -CdpStatusProvider { param($Context, $Port) $true } `
+            -StartCdpProvider { param($Context, $Port) $script:Events += "start-cdp" } `
+            -CliProvider { param($Context, $Arguments) throw "should not apply" } `
+            -StatusProvider {
+                param($Context, $Port)
+                $script:Events += "status"
+                [pscustomobject]@{
+                    statuses = @(
+                        [pscustomobject]@{
+                            installed = $true
+                            mode = "active"
+                            themeId = "miku-488137"
+                            persistenceEnabled = $true
+                        }
+                    )
+                    failed = @()
+                }
+            }
+        Assert-equal "active" $result.Mode
+        Assert-True $result.BootstrapIdempotent
+        Assert-True $result.PersistenceEnabled
+        Assert-Equal @("hygiene", "status") $script:Events
+        Assert-False ($script:Events -contains "start-cdp")
     }
 
     Test-Case "Apply failure restores the exact native prestate and remains visible" {
@@ -1029,29 +1270,275 @@ try {
         Assert-Match 'Codex 保持原生界面运行' $wrapper
     }
 
+    Test-Case "Uninstall cleans task shortcut state and install tree even when soft disable fails" {
+        $uninstallRoot = Join-Path $script:Root ("heige-codex-skin-studio-" + [guid]::NewGuid().ToString("N"))
+        $installTree = Join-Path $uninstallRoot "heige-codex-skin-studio"
+        $scriptTree = Join-Path $uninstallRoot "source-checkout"
+        New-Item -ItemType Directory -Path (Join-Path $installTree "src") -Force | Out-Null
+        New-TestOwnedInstallMarker -InstallRoot $installTree
+        Set-Content -LiteralPath (Join-Path $installTree "src\cli.mjs") -Value "export {}" -Encoding UTF8
+        $script:Events = @()
+        $result = Invoke-HeiGeUninstallFlow `
+            -InstallRoot $installTree `
+            -ScriptTreeRoot $scriptTree `
+            -Port 9341 `
+            -SoftDisableProvider {
+                param($Root, $Port)
+                $script:Events += "soft-disable"
+                throw "cli broken"
+            } `
+            -UnregisterProvider {
+                param($Root, $TaskName, $StateDirectory)
+                $script:Events += "unregister:$TaskName"
+                [pscustomobject]@{ VerifiedAbsent = $true; Removed = $true }
+            } `
+            -ShortcutProvider {
+                param($Root, $StartMenuRoot)
+                $script:Events += "shortcut"
+                [pscustomobject]@{
+                    PriorExisted = $true
+                    Removed = $true
+                    VerifiedAbsent = $true
+                    FolderRemoved = $true
+                }
+            } `
+            -ResidueProvider {
+                param($Root)
+                $script:Events += "residue"
+                [pscustomobject]@{ StoppedProcessIds = @(42) }
+            } `
+            -StateRemoveProvider {
+                param($StateDirectory)
+                $script:Events += "state"
+                [pscustomobject]@{
+                    Path = "state"
+                    PriorExisted = $true
+                    Removed = $true
+                    VerifiedAbsent = $true
+                }
+            } `
+            -InstallRemoveProvider {
+                param($Root, $CallerScriptPath)
+                $script:Events += "install-tree"
+                [pscustomobject]@{
+                    Path = $Root
+                    PriorExisted = $true
+                    Removed = $true
+                    Deferred = $false
+                    VerifiedAbsent = $true
+                }
+            }
+        Assert-Equal @(
+            "soft-disable", "unregister:HeiGe Codex Skin Studio Controller",
+            "shortcut", "residue", "state", "install-tree"
+        ) $script:Events
+        Assert-True $result.SoftDisableAttempted
+        Assert-False $result.SoftDisableSucceeded
+        Assert-True $result.TaskUnregistered
+        Assert-equal "complete" $result.Completion
+    }
+
+    Test-Case "Uninstall still cleans orphans when the install tree is already gone" {
+        $missingInstall = Join-Path $script:Root ("missing\heige-codex-skin-studio")
+        $scriptTree = Join-Path $script:Root "source-checkout-orphan"
+        $script:Events = @()
+        $result = Invoke-HeiGeUninstallFlow `
+            -InstallRoot $missingInstall `
+            -ScriptTreeRoot $scriptTree `
+            -Port 9341 `
+            -SoftDisableProvider { param($Root, $Port) throw "must not soft-disable missing install" } `
+            -UnregisterProvider {
+                param($Root, $TaskName, $StateDirectory)
+                $script:Events += "unregister"
+                [pscustomobject]@{ VerifiedAbsent = $true }
+            } `
+            -ShortcutProvider {
+                param($Root, $StartMenuRoot)
+                $script:Events += "shortcut"
+                [pscustomobject]@{
+                    PriorExisted = $false
+                    Removed = $false
+                    VerifiedAbsent = $true
+                    FolderRemoved = $false
+                }
+            } `
+            -ResidueProvider {
+                param($Root)
+                $script:Events += "residue"
+                [pscustomobject]@{ StoppedProcessIds = @() }
+            } `
+            -StateRemoveProvider {
+                param($StateDirectory)
+                $script:Events += "state"
+                [pscustomobject]@{
+                    Path = "state"
+                    PriorExisted = $true
+                    Removed = $true
+                    VerifiedAbsent = $true
+                }
+            } `
+            -InstallRemoveProvider {
+                param($Root, $CallerScriptPath)
+                $script:Events += "install-tree"
+                [pscustomobject]@{
+                    Path = $Root
+                    PriorExisted = $false
+                    Removed = $false
+                    Deferred = $false
+                    VerifiedAbsent = $true
+                }
+            }
+        Assert-equal @("unregister", "shortcut", "residue", "state", "install-tree") $script:Events
+        Assert-False $result.SoftDisableAttempted
+        Assert-True $result.TaskUnregistered
+    }
+
+    Test-Case "Uninstall refuses to delete a non-standard install directory name" {
+        Assert-Throws {
+            Invoke-HeiGeUninstallFlow `
+                -InstallRoot (Join-Path $script:Root "not-heige") `
+                -ScriptTreeRoot (Join-Path $script:Root "source") `
+                -UnregisterProvider { param($a, $b, $c) [pscustomobject]@{ VerifiedAbsent = $true } }
+        } "heige-codex-skin-studio"
+    }
+
+    Test-Case "Uninstall recognizes an owned custom install and rejects an unowned one" {
+        $ownedParent = Join-Path $script:Root ("owned-custom-" + [guid]::NewGuid().ToString("N"))
+        $ownedInstall = Join-Path $ownedParent "heige-codex-skin-studio"
+        New-TestOwnedInstallMarker -InstallRoot $ownedInstall
+        $resolved = Resolve-HeiGeUninstallInstallRoot `
+            -ScriptTreeRoot $ownedInstall
+        Assert-Equal $ownedInstall $resolved
+        Assert-Equal $ownedInstall (Assert-HeiGeRemovableInstallRoot -InstallRoot $ownedInstall)
+
+        $unownedParent = Join-Path $script:Root ("unowned-custom-" + [guid]::NewGuid().ToString("N"))
+        $unownedInstall = Join-Path $unownedParent "heige-codex-skin-studio"
+        New-Item -ItemType Directory -Path $unownedInstall -Force | Out-Null
+        Assert-Throws {
+            Assert-HeiGeRemovableInstallRoot -InstallRoot $unownedInstall
+        } "ownership marker"
+    }
+
+    Test-Case "Uninstall stops only processes carrying the exact install paths" {
+        $installTree = Join-Path $script:Root ("process-owner\heige-codex-skin-studio")
+        $exactCli = Join-Path $installTree "src\cli.mjs"
+        $script:StoppedIds = @()
+        $result = Stop-HeiGeControllerResidue `
+            -InstallRoot $installTree `
+            -ProcessProvider {
+                @(
+                    [pscustomobject]@{
+                        ProcessId = 41001
+                        CommandLine = "node other-cli.mjs controller --background --platform windows"
+                    },
+                    [pscustomobject]@{
+                        ProcessId = 41002
+                        CommandLine = "node `"$exactCli`" controller --background --platform windows"
+                    }
+                )
+            } `
+            -StopProvider { param($Process) $script:StoppedIds += [int]$Process.ProcessId }
+        Assert-Equal @(41002) $script:StoppedIds
+        Assert-Equal @(41002) $result.StoppedProcessIds
+    }
+
+    Test-Case "Uninstall removes a real isolated install tree immediately from outside it" {
+        $parent = Join-Path $script:Root ("real-remove-" + [guid]::NewGuid().ToString("N"))
+        $installTree = Join-Path $parent "heige-codex-skin-studio"
+        $nestedFile = Join-Path $installTree "src\nested\payload.txt"
+        New-Item -ItemType Directory -Path (Split-Path $nestedFile -Parent) -Force | Out-Null
+        New-TestOwnedInstallMarker -InstallRoot $installTree
+        Set-Content -LiteralPath $nestedFile -Value "remove me" -Encoding UTF8
+
+        $result = Remove-HeiGeInstallTreeForUninstall `
+            -InstallRoot $installTree `
+            -CallerScriptPath (Join-Path $script:Root "outside\uninstall.ps1")
+
+        Assert-True $result.PriorExisted
+        Assert-True $result.Removed
+        Assert-False $result.Deferred
+        Assert-True $result.VerifiedAbsent
+        Assert-False (Test-Path -LiteralPath $installTree)
+    }
+
+    Test-Case "Uninstall defers self-removal when launched from the install tree" {
+        $parent = Join-Path $script:Root ("deferred-remove-" + [guid]::NewGuid().ToString("N"))
+        $installTree = Join-Path $parent "heige-codex-skin-studio"
+        $caller = Join-Path $installTree "scripts\windows\uninstall.ps1"
+        New-Item -ItemType Directory -Path (Split-Path $caller -Parent) -Force | Out-Null
+        New-TestOwnedInstallMarker -InstallRoot $installTree
+        New-Item -ItemType File -Path $caller -Force | Out-Null
+        $script:DeferredRoot = $null
+
+        $result = Remove-HeiGeInstallTreeForUninstall `
+            -InstallRoot $installTree `
+            -CallerScriptPath $caller `
+            -DeferProvider { param($Root) $script:DeferredRoot = $Root }
+
+        Assert-True $result.PriorExisted
+        Assert-False $result.Removed
+        Assert-True $result.Deferred
+        Assert-False $result.VerifiedAbsent
+        Assert-Equal $installTree $script:DeferredRoot
+        Assert-True (Test-Path -LiteralPath $installTree -PathType Container)
+        Remove-Item -LiteralPath $installTree -Recurse -Force
+    }
+
+    Test-Case "Uninstall wrapper and controller self-heal missing install trees" {
+        $uninstall = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\uninstall.ps1")
+        )
+        $controller = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\controller.ps1")
+        )
+        $flow = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\entrypoints.ps1")
+        )
+        Assert-Match 'Invoke-HeiGeUninstallFlow' $uninstall
+        Assert-Match 'Invoke-HeiGeUninstallFlow' $flow
+        Assert-Match 'Stop-HeiGeControllerResidue' $flow
+        Assert-Match '安装目录缺失' $controller
+        Assert-Match 'exit 0' $controller
+    }
+
     Test-Case "BAT wrappers preserve the captured PowerShell failure code" {
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat"
+            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
         )) {
             $source = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
             )
             Assert-Match 'set "HEIGE_EXIT=%ERRORLEVEL%"' $source
+            Assert-Match 'if not "%HEIGE_EXIT%"=="0"' $source
+            Assert-Match 'pause' $source
+            Assert-Match 'HEIGE_NO_PAUSE' $source
             Assert-Match 'exit /b %HEIGE_EXIT%' $source
+            # cmd.exe mis-decodes UTF-8 CJK; keep bat ASCII-only.
+            Assert-False ([regex]::IsMatch($source, '[\u4e00-\u9fff]'))
         }
+        $batExit = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\bat-exit.ps1")
+        )
+        Assert-Match 'Write-HeiGeInteractivePauseHint' $batExit
+        Assert-Match '任务栏' $batExit
+        Assert-Match 'HEIGE_PAUSE_HINT_STYLE' $batExit
+        $uninstallBat = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\uninstall.bat")
+        )
+        Assert-Match 'HEIGE_PAUSE_HINT_STYLE=uninstall' $uninstallBat
     }
 
     Test-Case "PowerShell entrypoints retain BOM and BAT wrappers retain CRLF" {
         foreach ($name in @(
-            "apply.ps1", "customize.ps1", "enable-skin.ps1", "pause.ps1", "resume.ps1", "restore.ps1"
+            "apply.ps1", "customize.ps1", "enable-skin.ps1", "pause.ps1", "resume.ps1", "restore.ps1", "uninstall.ps1"
         )) {
             $bytes = [System.IO.File]::ReadAllBytes(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
             )
-            Assert-Equal @(0xef, 0xbb, 0xbf) @($bytes[0], $bytes[1], $bytes[2])
+            Assert-equal @(0xef, 0xbb, 0xbf) @($bytes[0], $bytes[1], $bytes[2])
         }
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat"
+            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
         )) {
             $text = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
@@ -1072,6 +1559,8 @@ try {
             Assert-Match '正常重启' $text
             Assert-Match 'status[^\r\n]*只读|只读[^\r\n]*status' $text
             Assert-Match 'HeiGe 皮肤启动器' $text
+            Assert-Match 'uninstall\.(ps1|bat)' $text
+            Assert-Match '计划任务' $text
         }
     }
 
@@ -1145,6 +1634,34 @@ try {
         Assert-False ($bat -match '(?<!\r)\n')
         Assert-Match 'set "HEIGE_EXIT=%ERRORLEVEL%"' $bat
         Assert-Match 'exit /b %HEIGE_EXIT%' $bat
+    }
+
+    Test-Case "Wait-HeiGeCodexMainRenderer nudges the window until the main renderer appears" {
+        $context = New-TestEntrypointContext
+        $sleeps = New-Object System.Collections.Generic.List[int]
+        $shows = New-Object System.Collections.Generic.List[object]
+        $state = [pscustomobject]@{ Checks = 0 }
+        $result = Wait-HeiGeCodexMainRenderer -Port 9341 -AppInfo $context.App -TimeoutSeconds 5 `
+            -MainRendererProvider {
+                param($Port)
+                Assert-Equal 9341 $Port
+                $state.Checks += 1
+                return ($state.Checks -ge 3)
+            } `
+            -ShowWindowProvider {
+                param($Info)
+                $shows.Add($Info) | Out-Null
+                return $true
+            } `
+            -SleepProvider {
+                param($Milliseconds)
+                $sleeps.Add([int]$Milliseconds) | Out-Null
+            }
+        Assert-True $result.Ready
+        Assert-equal 3 $result.Attempts
+        Assert-True ($shows.Count -ge 1)
+        Assert-True ($sleeps.Count -ge 2)
+        Assert-True (@($sleeps | Where-Object { $_ -eq 250 }).Count -ge 1)
     }
 } finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue
