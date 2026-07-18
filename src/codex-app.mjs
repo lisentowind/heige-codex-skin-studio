@@ -126,16 +126,53 @@ export function sameProcessIdentity(left, right) {
     left.startedAt === right.startedAt;
 }
 
+// lstart 尾部 HH:MM:SS YYYY 在常见 locale 下稳定；前缀则随区域变化：
+// 英文 C：Thu Jul 16 16:49:24 2026（weekday month day）
+// 中文：  六  7月/18 21:47:13 2026（weekday +「月/日」合并为一字段）
+// 勿再假设固定英文五段，否则会漏掉刚启动的 Codex，表现为「端口就绪但进程验证失败」。
+const PS_LSTART_TAIL = String.raw`\d{2}:\d{2}:\d{2}\s+\d{4}`;
+const PS_PID_LSTART_COMMAND = new RegExp(
+  String.raw`^\s*(\d+)\s+(.+?\s+${PS_LSTART_TAIL})\s+(.*)$`,
+);
+const PS_PID_PPID_LSTART_COMMAND = new RegExp(
+  String.raw`^\s*(\d+)\s+(\d+)\s+(.+?\s+${PS_LSTART_TAIL})\s+(.*)$`,
+);
+
+export function parseMacPsLstartRow(line) {
+  const match = PS_PID_LSTART_COMMAND.exec(String(line));
+  if (!match) return null;
+  return {
+    pid: Number(match[1]),
+    startedAt: match[2],
+    commandLine: match[3],
+  };
+}
+
+export function parseMacPsTreeRow(line) {
+  const match = PS_PID_PPID_LSTART_COMMAND.exec(String(line));
+  if (!match) return null;
+  return {
+    pid: Number(match[1]),
+    ppid: Number(match[2]),
+    startedAt: match[3],
+    commandLine: match[4],
+  };
+}
+
 export function parseMacPsTable(output) {
   const rows = [];
   for (const line of String(output).split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(.*)$/);
-    if (!match) continue;
-    rows.push({
-      pid: Number(match[1]),
-      startedAt: `${match[2]} ${match[3]} ${match[4]} ${match[5]} ${match[6]}`,
-      commandLine: match[7],
-    });
+    const row = parseMacPsLstartRow(line);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+export function parseMacPsTreeTable(output) {
+  const rows = [];
+  for (const line of String(output).split(/\r?\n/)) {
+    const row = parseMacPsTreeRow(line);
+    if (row) rows.push(row);
   }
   return rows;
 }
