@@ -171,6 +171,43 @@ test("installs an absent stable tree with an exact ownership marker", async (t) 
   assert.match(marker.manifestSha256, /^[a-f0-9]{64}$/);
 });
 
+test("heals a drifted owned tree at the current-user canonical target", async (t) => {
+  const { root, sourceRoot, targetRoot } = await sourceFixture(t);
+  const home = join(root, "home");
+  await mkdir(home, { recursive: true });
+
+  const first = await installTree({
+    sourceRoot,
+    targetRoot,
+    testMode: { currentUserHome: home },
+  });
+  assert.equal(first.installed, true);
+
+  await writeFile(join(targetRoot, "scripts", "scripts.txt"), "drifted-by-hand\n");
+  await assert.rejects(
+    prepareInstallTree({ sourceRoot, targetRoot }),
+    /owned tree manifest does not match its ownership marker/,
+  );
+
+  const healed = await installTree({
+    sourceRoot,
+    targetRoot,
+    testMode: { currentUserHome: home },
+  });
+  assert.equal(healed.installed, true);
+  assert.equal(await readFile(join(targetRoot, "scripts", "scripts.txt"), "utf8"), "scripts\n");
+  const marker = JSON.parse(await readFile(join(targetRoot, INSTALL_MARKER_NAME), "utf8"));
+  assert.match(marker.manifestSha256, /^[a-f0-9]{64}$/);
+
+  const again = await installTree({
+    sourceRoot,
+    targetRoot,
+    testMode: { currentUserHome: home },
+  });
+  assert.equal(again.unchanged, true);
+  assert.equal(again.installed, false);
+});
+
 test("refuses a foreign target without deleting its sentinel", async (t) => {
   const { sourceRoot, targetRoot } = await sourceFixture(t);
   await mkdir(targetRoot, { recursive: true });
