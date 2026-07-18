@@ -95,6 +95,16 @@ export const THEME_CENTER_STYLE = String.raw`
   position: relative;
   border-top: 1px solid rgba(23,77,102,.1);
 }
+[data-heige-role="readability-section"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 1 260px;
+  min-width: 190px;
+  gap: 14px;
+  padding-right: 16px;
+  border-right: 1px solid rgba(23,77,102,.1);
+}
 [data-heige-role="theme-center-scroll"] {
   min-height: 0;
   overflow-y: auto;

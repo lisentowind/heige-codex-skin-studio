@@ -130,6 +130,7 @@ export function buildSkinMenuScript({
     customId: "custom-upload",
     storageKey: "heigeCodexCustomTheme",
     hiddenKey: "heigeCodexSkinMenuHidden",
+    readabilityKey: "heigeCodexReadabilityEnabled",
     selectedKey: "heigeCodexSkinSelected",
     nativeSel: "__heige_native__",
     preferStored,
@@ -234,6 +235,7 @@ export function buildSkinMenuScript({
     ownedChromeStyle?.remove();
     if (window.__heigeCodexSkinRuntime === runtime) {
       delete document.documentElement.dataset.heigeCodexSkin;
+      delete document.documentElement.dataset.heigeReadability;
       try { delete window.__heigeCodexSkin; } catch { window.__heigeCodexSkin = undefined; }
       try { delete window.__heigeCodexSkinRuntime; } catch { window.__heigeCodexSkinRuntime = undefined; }
     }
@@ -392,6 +394,68 @@ export function buildSkinMenuScript({
   footer.dataset.heigeRole = "theme-center-footer";
   panel.append(header, scroll, footer);
   backdrop.appendChild(panel);
+
+  const readReadability = () => {
+    assertCurrent();
+    try { return localStorage.getItem(data.readabilityKey) !== "0"; } catch { return true; }
+  };
+  const writeReadability = (value) => {
+    assertCurrent();
+    try { localStorage.setItem(data.readabilityKey, value ? "1" : "0"); } catch {}
+  };
+  const readabilitySection = document.createElement("section");
+  readabilitySection.dataset.heigeRole = "readability-section";
+  const readabilityCopy = document.createElement("div");
+  readabilityCopy.style.cssText = "min-width:0;";
+  const readabilityTitle = document.createElement("div");
+  readabilityTitle.id = data.menuId + "-readability-title";
+  readabilityTitle.textContent = "阅读增强";
+  readabilityTitle.style.cssText = "font-weight:750;letter-spacing:.01em;color:#17344f;";
+  const readabilityState = document.createElement("div");
+  readabilityState.id = data.menuId + "-readability-state";
+  readabilityState.dataset.heigeRole = "readability-state";
+  readabilityState.style.cssText = "margin-top:1px;font-size:11px;color:rgba(23,52,79,.68);";
+  readabilityCopy.append(readabilityTitle, readabilityState);
+  const readabilitySwitch = document.createElement("button");
+  readabilitySwitch.type = "button";
+  readabilitySwitch.dataset.heigeRole = "readability-switch";
+  readabilitySwitch.setAttribute("role", "switch");
+  readabilitySwitch.setAttribute("tabindex", "0");
+  readabilitySwitch.setAttribute("aria-labelledby", readabilityTitle.id);
+  readabilitySwitch.setAttribute("aria-describedby", readabilityState.id);
+  readabilitySwitch.style.cssText = "position:relative;flex:none;width:42px;height:24px;padding:0;border:1px solid #31526b;border-radius:999px;cursor:pointer;-webkit-app-region:no-drag;";
+  const readabilityKnob = document.createElement("span");
+  readabilityKnob.setAttribute("aria-hidden", "true");
+  readabilityKnob.style.cssText = "position:absolute;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.24);";
+  readabilitySwitch.appendChild(readabilityKnob);
+  readabilitySection.append(readabilityCopy, readabilitySwitch);
+  footer.appendChild(readabilitySection);
+
+  let readabilityEnabled = true;
+  const paintReadability = () => {
+    assertCurrent();
+    readabilitySwitch.setAttribute("aria-checked", String(readabilityEnabled));
+    readabilitySwitch.style.background = readabilityEnabled ? "#087d8a" : "#66788a";
+    readabilityKnob.style.left = readabilityEnabled ? "21px" : "4px";
+    readabilityState.textContent = readabilityEnabled ? "已开启，文字更清晰" : "已关闭，背景完全通透";
+  };
+  const setReadability = (value, persist = true, broadcast = true) => {
+    assertCurrent();
+    if (typeof value !== "boolean") return false;
+    readabilityEnabled = value;
+    document.documentElement.dataset.heigeReadability = value ? "on" : "off";
+    paintReadability();
+    if (persist) writeReadability(value);
+    if (broadcast) publish("readability", value);
+    return true;
+  };
+  listen(readabilitySwitch, "click", () => setReadability(!readabilityEnabled));
+  listen(readabilitySwitch, "keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    setReadability(!readabilityEnabled);
+  });
+  setReadability(readReadability(), false, false);
 
   let hidden = false;
   const setPanelOpen = (open, { focusTrigger = false } = {}) => {
@@ -1784,7 +1848,7 @@ export function buildSkinMenuScript({
       || message.senderGeneration === generation
       || !Number.isSafeInteger(message.sequence)
       || message.sequence < 1
-      || !["theme", "menu-hidden", "persistence"].includes(message.kind)
+      || !["theme", "menu-hidden", "persistence", "readability"].includes(message.kind)
     ) return null;
     if (message.kind === "theme") {
       if (
@@ -1796,6 +1860,8 @@ export function buildSkinMenuScript({
         )
       ) return null;
     } else if (message.kind === "menu-hidden") {
+      if (typeof message.value !== "boolean") return null;
+    } else if (message.kind === "readability") {
       if (typeof message.value !== "boolean") return null;
     } else if (
       !exactKeys(message.value, ["enabled", "revision"])
@@ -1821,6 +1887,8 @@ export function buildSkinMenuScript({
         setTheme(message.value, true, false);
       } else if (message.kind === "menu-hidden") {
         setHidden(message.value, true, false);
+      } else if (message.kind === "readability") {
+        setReadability(message.value, true, false);
       } else {
         applyRemotePersistence(message.value);
       }
@@ -1840,6 +1908,11 @@ export function buildSkinMenuScript({
         }
       } else if (event.key === data.hiddenKey && (event.newValue === "1" || event.newValue === null)) {
         setHidden(event.newValue === "1", false, false);
+      } else if (
+        event.key === data.readabilityKey
+        && (event.newValue === "0" || event.newValue === "1" || event.newValue === null)
+      ) {
+        setReadability(event.newValue !== "0", false, false);
       }
     } catch {}
   });
@@ -1883,7 +1956,16 @@ export function buildSkinMenuScript({
       controlRequest: controlRequest === null ? null : { ...controlRequest },
     };
   };
-  window.__heigeCodexSkin = { generation, importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden, getPersistenceState };
+  window.__heigeCodexSkin = {
+    generation,
+    importFromDataUrl,
+    setTheme,
+    clearTheme,
+    deleteCustom,
+    setHidden,
+    setReadability,
+    getPersistenceState,
+  };
   return true;
 })()`;
 }

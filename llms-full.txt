@@ -55,7 +55,7 @@
 
 ![真机截图：HeiGe 主题中心](docs/images/theme-center-live.webp)
 
-*真机截图：主题中心。当前主题、自定义图片、原生界面、内置主题预览和皮肤常驻开关都在一屏里，主题卡片即点即换。*
+*真机截图：主题中心。当前主题、自定义图片、原生界面、内置主题预览、阅读增强和皮肤常驻开关都在一屏里，主题卡片即点即换。*
 
 ## 它长这样
 
@@ -119,6 +119,7 @@ Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/wind
 
 - 注入走本机回环 CDP（`127.0.0.1:9341`），不修改 `app.asar`、应用二进制或签名资源；未来 Codex Desktop 改变启动参数或界面结构时，本项目仍可能需要适配。
 - 常驻由你决定：顶部菜单「皮肤常驻」开关是唯一受支持的开启常驻入口，关闭时会先确认，并提示「关闭后本次继续使用；下次启动恢复原生界面」。
+- 阅读增强默认开启：最终回复和过程回复都使用 90％ 主题自适应半透明底色，并保留对称留白保护文字可读性；可在主题中心随时关闭，不使用大面积实时模糊、阴影、观察器、滚动监听或后台请求。
 - 想让皮肤重启后一直在：先打开「HeiGe 皮肤启动器」恢复当前会话，再到顶部菜单打开开关进入常驻。
 - 「HeiGe 皮肤启动器」和兼容名 `enable-skin.command` 都只恢复当前会话；`enable-persist.command` 是弃用的非零退出入口，不再执行任何启用动作。
 - 支持范围：macOS 有日期化真机验证；Windows 走跨 PowerShell 自动化，Microsoft Store/MSIX 真机待验证；使用系统 Node 时要求 Node.js 22 或更新版本。
@@ -127,9 +128,9 @@ Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/wind
 
 ## 交流群
 
-扫码进微信群「Codex 皮肤共创交流」：纯技术交流，非盈利，互相学习。分享你做的主题、聊实现、提问题都欢迎。二维码过期了就开个 Issue，我会换新的。
+微信群「Codex 皮肤共创交流」已满 200 人上限，扫码加我微信，我手动拉你进群。加好友记得备注：codex。纯技术交流，非盈利，互相学习，分享你做的主题、聊实现、提问题都欢迎。
 
-<img src="docs/images/wechat-group-qr.png" width="340" alt="Codex 皮肤共创交流微信群二维码">
+<img src="docs/images/wechat-group-qr.png" width="340" alt="加黑哥微信（备注 codex）手动拉进 Codex 皮肤共创交流群">
 
 ## English
 
