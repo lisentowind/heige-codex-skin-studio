@@ -13,8 +13,11 @@ test("Windows source installer BAT preserves the captured PowerShell exit code",
   const bareLf = bytes.findIndex((byte, index) => byte === 0x0a && bytes[index - 1] !== 0x0d);
   assert.equal(bareLf, -1);
   assert.match(installer, /set "HEIGE_EXIT=%ERRORLEVEL%"/);
-  assert.match(installer, /if not "%HEIGE_EXIT%"=="0" pause/);
+  assert.match(installer, /if not "%HEIGE_EXIT%"=="0"/);
+  assert.match(installer, /pause/);
+  assert.match(installer, /HEIGE_NO_PAUSE/);
   assert.match(installer, /exit \/b %HEIGE_EXIT%/);
+  assert.equal(/[\u4e00-\u9fff]/.test(installer), false);
 });
 
 test("Windows payload installer binds the Skill wrapper parameters instead of ignoring them", async () => {
