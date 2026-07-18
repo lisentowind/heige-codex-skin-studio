@@ -262,6 +262,39 @@ test("theme center renders native upload and built-in preview cards", async (t) 
   assert.match(appearanceHelp?.textContent ?? "", /左下角头像👉设置👉外观👉选择 浅色\/深色 主题✅即可/);
 });
 
+test("readability enhancement defaults on and persists an explicit off choice", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+
+  assert.equal(page.readabilitySwitch.getAttribute("role"), "switch");
+  assert.equal(page.readabilitySwitch.getAttribute("aria-checked"), "true");
+  assert.equal(page.readabilityEnabled, true);
+  assert.equal(page.window.localStorage.getItem("heigeCodexReadabilityEnabled"), null);
+
+  await page.toggleReadability();
+  assert.equal(page.readabilitySwitch.getAttribute("aria-checked"), "false");
+  assert.equal(page.readabilityEnabled, false);
+  assert.equal(page.window.localStorage.getItem("heigeCodexReadabilityEnabled"), "0");
+
+  await page.injectAgain();
+  assert.equal(page.readabilitySwitch.getAttribute("aria-checked"), "false");
+  assert.equal(page.readabilityEnabled, false);
+});
+
+test("readability switch supports keyboard input and a saved on choice", async (t) => {
+  const page = await menuWindow({
+    initialStorage: { heigeCodexReadabilityEnabled: "0" },
+  });
+  t.after(() => page.close());
+
+  assert.equal(page.readabilityEnabled, false);
+  await page.keyReadabilitySwitch("Enter");
+  assert.equal(page.readabilityEnabled, true);
+  assert.equal(page.window.localStorage.getItem("heigeCodexReadabilityEnabled"), "1");
+  await page.keyReadabilitySwitch(" ");
+  assert.equal(page.readabilityEnabled, false);
+});
+
 test("version bar stays offline until the user manually checks", async (t) => {
   const page = await menuWindow({ currentVersion: "5.2.2" });
   t.after(() => page.close());
@@ -1119,6 +1152,16 @@ test("theme native hidden and persistence ACK synchronize to a second renderer",
   assert.equal(right.hidden, true);
   assert.equal(right.window.localStorage.getItem("heigeCodexSkinMenuHidden"), "1");
 
+  await left.toggleReadability();
+  await right.flush();
+  assert.equal(left.readabilityEnabled, false);
+  assert.equal(right.readabilityEnabled, false);
+  assert.equal(right.window.localStorage.getItem("heigeCodexReadabilityEnabled"), "0");
+  assert.equal(
+    SharedBroadcastChannel.messages.filter(({ kind }) => kind === "readability").length,
+    1,
+  );
+
   await left.disablePersistence();
   await right.flush();
   assert.equal(right.switch.getAttribute("aria-checked"), "false");
@@ -1128,6 +1171,15 @@ test("theme native hidden and persistence ACK synchronize to a second renderer",
     "kind", "schemaVersion", "senderGeneration", "sequence", "value",
   ]);
   assert.doesNotMatch(JSON.stringify(persistenceMessage), /token|endpoint|43123/i);
+});
+
+test("disposing the current generation removes its readability marker", async () => {
+  const page = await menuWindow();
+  assert.equal(page.readabilityEnabled, true);
+
+  assert.equal(page.runtime.dispose(), true);
+  assert.equal(page.document.documentElement.hasAttribute("data-heige-readability"), false);
+  page.window.close();
 });
 
 test("a menu theme choice renders immediately while durable confirmation is pending", async (t) => {

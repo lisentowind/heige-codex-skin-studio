@@ -125,6 +125,10 @@ export async function menuWindow({
     get updateButton() { return query("update-check"); },
     get runtime() { return window.__heigeCodexSkinRuntime; },
     get switch() { return query("persistence-switch"); },
+    get readabilitySwitch() { return query("readability-switch"); },
+    get readabilityEnabled() {
+      return window.document.documentElement.dataset.heigeReadability === "on";
+    },
     get confirmation() { return query("persistence-confirmation"); },
     get cancel() { return query("persistence-cancel"); },
     get confirm() { return query("persistence-confirm"); },
@@ -138,6 +142,18 @@ export async function menuWindow({
     },
     async clickPersistenceSwitch() {
       query("persistence-switch").click();
+      await flushMicrotasks(window);
+    },
+    async toggleReadability() {
+      query("readability-switch").click();
+      await flushMicrotasks(window);
+    },
+    async keyReadabilitySwitch(key) {
+      query("readability-switch").dispatchEvent(new window.KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }));
       await flushMicrotasks(window);
     },
     async clickConfirmOff() {
