@@ -22,7 +22,7 @@ One image becomes one theme. After install, switching skins is a single click in
 
 ![Live screenshot: theme center](docs/images/theme-center-live.webp)
 
-*Live screenshot: the theme center. Current theme, custom image slot, native UI, built-in previews, and the persistence switch, all in one panel.*
+*Live screenshot: the theme center. Current theme, custom image slot, native UI, built-in previews, readability enhancement, and persistence controls, all in one panel.*
 
 ## What it is
 
@@ -34,6 +34,7 @@ A local skin switcher for OpenAI Codex Desktop. It injects themes at runtime thr
 - **10 built-in presets**: the high-detail `Miku 488137`, two lightweight themes each for Genshin Impact, Wuthering Waves, Naruto, and Love and Deepspace, plus one easter-egg preset.
 - **Optional pet**: the package ships an independent `Miku Future` animated desktop pet. Installing it is your call.
 - **User-controlled persistence**: the top-menu switch is the only supported way to enable next-launch persistence. Turning it off keeps the current session skinned and restores the native UI on the next launch.
+- **Readability by default**: assistant responses use a theme-aware translucent surface. The Theme Center switch can turn it off, and the implementation avoids a large live blur layer, scroll listeners, and background requests.
 
 ## Quick start
 
