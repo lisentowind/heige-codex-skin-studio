@@ -46,13 +46,14 @@ Windows 用户也可双击 `scripts\install.bat`。Windows 入口只转发到包
 - `enable-persist.command` 是弃用的非零退出入口，不得将它当作上述步骤的替代方案。
 - 启动器未显式指定主题时，优先恢复上次非原生主题，只有没有历史选择时才使用 `miku-488137`。
 
-macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 生命周期操作必须使用 `scripts\windows` 下的同名 `.ps1` 或 `.bat`，不得直接运行 Node CLI 代替 Windows Store/MSIX 激活或进程重启。
+macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 生命周期操作必须使用 `scripts\windows` 下的同名 `.ps1` 或 `.bat`，不得直接运行 Node CLI 代替 Windows Store/MSIX 激活或进程重启。Windows 彻底卸载必须使用 `scripts\windows\uninstall.ps1` 或 `scripts\windows\uninstall.bat`；该入口会清理当前用户计划任务、开始菜单、AppData 状态、残留控制器进程和稳定安装目录。若稳定安装目录已被手动删除，从源码目录运行卸载入口清理残留。
 
 用户意图必须分开：
 
 - `pause` 只移除当前会话的皮肤与菜单，不改变常驻选择。
 - `resume` 只恢复同一个已验证进程中被 `pause` 暂停的皮肤，不是通用重启入口。
 - `restore` 关闭常驻、注销后台控制器并恢复原生界面。Codex 已关闭时保持关闭；已是原生状态时不为了恢复而额外启动。
+- `uninstall` 只用于 Windows 完整移除，不等同于 `restore`。执行前告知用户会删除稳定安装目录和本地状态；不得用 Node CLI 模拟卸载。
 
 ## 内置预设与菜单自定义
 
