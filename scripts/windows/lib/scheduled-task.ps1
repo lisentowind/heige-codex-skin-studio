@@ -14,6 +14,29 @@ function Assert-HeiGeKnownTaskName {
     throw "Scheduled Task 名称必须是精确生产名或包含 GUID 的隔离测试名。"
 }
 
+function Get-HeiGeControllerTaskRunLevel {
+    # Elevated（High IL）前台创建的 operation.lock 带 MIC；Limited 任务无法 verify/heal → LOCK_PERMISSIONS。
+    # 注册进程若已提升，控制器任务必须同级 Highest，否则常驻开启握手后无法 finalize。
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        foreach ($group in @($identity.Groups)) {
+            if ([string]$group.Value -ceq "S-1-16-12288") {
+                return "Highest"
+            }
+        }
+    } catch {
+    }
+    # WindowsIdentity.Groups 不一定包含完整性标签；whoami 更可靠。
+    try {
+        $groups = & "$env:SystemRoot\System32\whoami.exe" /groups /fo csv 2>$null | Out-String
+        if ($groups -match "S-1-16-12288") {
+            return "Highest"
+        }
+    } catch {
+    }
+    return "Limited"
+}
+
 function Assert-HeiGeTaskScope {
     param(
         [Parameter(Mandatory = $true)][string]$TaskName,
@@ -220,6 +243,7 @@ function New-HeiGeTaskDefinition {
         (ConvertTo-HeiGeQuotedArgument -Value $AppIdentityToken)
     )
     $arguments = $argumentList -join " "
+    $runLevel = Get-HeiGeControllerTaskRunLevel
     return [pscustomobject][ordered]@{
         TaskName = $TaskName
         TaskPath = "\"
@@ -233,7 +257,7 @@ function New-HeiGeTaskDefinition {
         Principal = [pscustomobject][ordered]@{
             UserId = $CurrentUserId
             LogonType = "InteractiveToken"
-            RunLevel = "Limited"
+            RunLevel = $runLevel
         }
         Trigger = [pscustomobject][ordered]@{
             Type = "AtLogOn"
@@ -244,7 +268,7 @@ function New-HeiGeTaskDefinition {
             StartWhenAvailable = $true
             ExecutionTimeLimit = "PT0S"
         }
-        RequiresElevation = $false
+        RequiresElevation = $runLevel -ne "Limited"
     }
 }
 
@@ -253,7 +277,7 @@ function Register-DefaultHeiGeScheduledTask {
     $action = New-ScheduledTaskAction -Execute $Definition.Action.Execute `
         -Argument $Definition.Action.Arguments -WorkingDirectory $Definition.Action.WorkingDirectory
     $principal = New-ScheduledTaskPrincipal -UserId $Definition.Principal.UserId `
-        -LogonType Interactive -RunLevel Limited
+        -LogonType Interactive -RunLevel $Definition.Principal.RunLevel
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $Definition.Trigger.UserId
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
         -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
@@ -357,7 +381,7 @@ function Assert-HeiGeStoredTaskDefinition {
     if (-not [bool]$Stored.Settings.StartWhenAvailable) {
         throw "stored task definition mismatch: StartWhenAvailable"
     }
-    if ([bool]$Stored.RequiresElevation) {
+    if ([bool]$Stored.RequiresElevation -ne [bool]$Expected.RequiresElevation) {
         throw "stored task definition mismatch: RequiresElevation"
     }
 }
