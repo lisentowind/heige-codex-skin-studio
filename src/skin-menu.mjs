@@ -1595,6 +1595,8 @@ export function buildSkinMenuScript({
         clearControlRequest();
       }
       controlRequest = request;
+      // 常驻 CDP 兜底不宜拖太久；主题仍保留较长窗口以便合并选择。
+      const fallbackTimeoutMs = request.action === "set-persistence" ? 20_000 : 60_000;
       controlRequestTimeout = later(() => {
         if (controlRequest?.requestId !== request.requestId) return;
         clearControlRequest();
@@ -1609,7 +1611,7 @@ export function buildSkinMenuScript({
           for (const item of rows.values()) item.disabled = false;
         }
         showAlert("后台控制器未确认，请重试");
-      }, 60000);
+      }, fallbackTimeoutMs);
       showAlert("正在等待后台确认…", "success");
       return true;
     };
@@ -1751,7 +1753,8 @@ export function buildSkinMenuScript({
       hideAlert();
       paintPersistence();
       const abortController = childController();
-      const timeoutId = later(() => abortController.abort(), 3000);
+      // 开启常驻含计划任务注册与握手（默认 10s）；3s 会误超时并排队 CDP，掩盖 BACKGROUND_START_FAILED。
+      const timeoutId = later(() => abortController.abort(), 15000);
       try {
         const response = await fetch(data.control.endpoint, {
           method: "POST",
@@ -1796,6 +1799,7 @@ export function buildSkinMenuScript({
           ) {
             controlRevision = body.revision;
           }
+          // 业务拒绝（含后台启动失败补偿）必须立刻可见，禁止再静默走 CDP 兜底。
           const message = typeof body?.message === "string" && body.message.length <= 160
             ? body.message
             : "后台拒绝了常驻设置，开关未更改";
@@ -1805,9 +1809,15 @@ export function buildSkinMenuScript({
         if (!isCurrent()) return;
         if (error?.message?.includes("后台响应无效")) {
           showAlert(error.message);
-        } else {
+        } else if (
+          error?.name === "AbortError" ||
+          /Failed to fetch|NetworkError|Load failed|CSP|blocked/i.test(String(error?.message ?? error))
+        ) {
+          // 仅超时/网络/CSP 才排队 CDP 兜底。
           queued = queueControlRequest(fallbackRequest);
           if (!queued) showAlert(safeClientError(error));
+        } else {
+          showAlert(safeClientError(error));
         }
       } finally {
         clearLater(timeoutId);
