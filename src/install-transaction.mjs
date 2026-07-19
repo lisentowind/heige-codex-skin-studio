@@ -1305,7 +1305,17 @@ export async function publishInstallTree(value, { faultAt, onBoundary, testMode 
   if (participant.beforeExisted) {
     if (target === null) throw new Error("owned target disappeared before publication");
     await validateParticipantBeforeTree(participant, participant.targetRoot, testMode);
-    await rename(participant.targetRoot, participant.backupPath);
+    try {
+      await rename(participant.targetRoot, participant.backupPath);
+    } catch (error) {
+      if (error?.code === "EPERM" || error?.code === "EBUSY") {
+        throw new Error(
+          `cannot detach the current stable tree for backup (${error.code}): stop the HeiGe background controller (and any process using that install root), then retry`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
     await syncDirectory(parent);
     await onBoundary?.("backup-detached", participant);
     injectFailure(faultAt, "after-backup-detached");
