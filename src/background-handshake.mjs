@@ -662,6 +662,35 @@ function exactExpected(document, expected) {
   }
 }
 
+function isLiveHandshakeProcess(document, observed) {
+  return isRecord(observed) &&
+    observed.pid === document.pid &&
+    observed.startedAt === document.startedAt;
+}
+
+async function clearDeadMismatchedHandshake({
+  stateRoot,
+  document,
+  readProcessIdentity,
+}) {
+  if (!isRecord(document) || !Number.isSafeInteger(document.pid) || document.pid <= 0) {
+    return false;
+  }
+  if (typeof readProcessIdentity !== "function") return false;
+  let observed = null;
+  try {
+    observed = await readProcessIdentity(document.pid);
+  } catch {
+    observed = null;
+  }
+  if (isLiveHandshakeProcess(document, observed)) return false;
+  try {
+    return await removeBackgroundHandshake({ stateRoot });
+  } catch {
+    return false;
+  }
+}
+
 function defaultWait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -709,17 +738,23 @@ export async function waitForBackgroundHandshake({
         }
         if (expected.outcome === "ready") {
           const observed = await readProcessIdentity(document.pid);
-          if (
-            !isRecord(observed) ||
-            observed.pid !== document.pid ||
-            observed.startedAt !== document.startedAt
-          ) {
+          if (!isLiveHandshakeProcess(document, observed)) {
             throw new Error("background handshake process identity is no longer live and exact");
           }
         }
         return document;
       } catch (error) {
-        lastMismatch = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const fieldMismatch = /^background handshake [A-Za-z]+ mismatch$/.test(message);
+        // 仅清「字段不匹配 + PID 已死」的孤儿文档；精确匹配但进程已死仍按原错误失败。
+        const cleared = fieldMismatch
+          ? await clearDeadMismatchedHandshake({
+            stateRoot,
+            document,
+            readProcessIdentity,
+          })
+          : false;
+        if (!cleared) lastMismatch = error;
       }
     }
     if (attempt === maxAttempts - 1 || clock() >= deadline) break;
