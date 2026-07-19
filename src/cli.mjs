@@ -670,6 +670,7 @@ export async function spawnWindowsRestartIntoCdp({
   scriptPath = join(repositoryRoot, "scripts", "windows", "lib", "restart-into-cdp.ps1"),
   env = process.env,
   spawnImpl = spawn,
+  timeoutMs = 120_000,
 }) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("Windows restart-into-cdp port is invalid");
@@ -681,10 +682,15 @@ export async function spawnWindowsRestartIntoCdp({
   if (typeof scriptPath !== "string" || !win32.isAbsolute(scriptPath)) {
     throw new Error("Windows restart-into-cdp script path must be absolute");
   }
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+    throw new Error("Windows restart-into-cdp timeout is invalid");
+  }
   const identityToken = env?.HEIGE_WINDOWS_APP_IDENTITY;
   if (typeof identityToken !== "string" || identityToken.length === 0) {
     throw new Error("Windows restart-into-cdp requires HEIGE_WINDOWS_APP_IDENTITY");
   }
+  // 不可 detached：Store ActivateApplication 依赖当前交互会话；detached 子进程会静默失败且 stdio ignore 无日志。
+  // 控制器 await 本调用，同步跑完 Stop→Start-CodexWithCdp（通常十余秒）。
   const child = spawnImpl(powershellPath, [
     "-NoLogo",
     "-NoProfile",
@@ -702,8 +708,8 @@ export async function spawnWindowsRestartIntoCdp({
     "-ExpectedStartedAt",
     processIdentity.startedAt,
   ], {
-    detached: true,
-    stdio: "ignore",
+    detached: false,
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     env: {
       ...isolatedWindowsPowerShellEnvironment(env),
@@ -711,10 +717,54 @@ export async function spawnWindowsRestartIntoCdp({
     },
   });
   if (!child || (child.pid !== undefined && child.pid !== null && !Number.isSafeInteger(child.pid))) {
-    throw new Error("无法创建 Windows restart-into-cdp 后台进程");
+    throw new Error("无法创建 Windows restart-into-cdp 进程");
   }
-  if (typeof child.unref === "function") child.unref();
-  return { pid: child.pid ?? null };
+
+  const stdout = [];
+  const stderr = [];
+  if (child.stdout && typeof child.stdout.on === "function") {
+    child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+  }
+  if (child.stderr && typeof child.stderr.on === "function") {
+    child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  }
+
+  const exitCode = await new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch {}
+      reject(new Error(`Windows restart-into-cdp timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(code);
+    };
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      if (signal) {
+        finish(1);
+        return;
+      }
+      finish(code ?? 1);
+    });
+  });
+
+  if (exitCode !== 0) {
+    const detail = Buffer.concat(stderr).toString("utf8").trim()
+      || Buffer.concat(stdout).toString("utf8").trim()
+      || `exit ${exitCode}`;
+    throw new Error(`Windows restart-into-cdp failed: ${detail.slice(0, 500)}`);
+  }
+  return { pid: child.pid ?? null, exitCode: 0 };
 }
 
 export function createControllerPortOwnerValidator({
@@ -1397,7 +1447,7 @@ export async function productionController({
     }, action),
     probeCurrentProcess: probe,
     // 常驻开启后，用户正常启动的 Codex 不带 CDP；后台控制器必须把它拉回调试模式再注入。
-    // macOS 走 lifecycle-helper；Windows 必须走 PowerShell Stop/Start-CodexWithCdp（detached）。
+    // macOS 走 lifecycle-helper；Windows 走 PowerShell Stop/Start-CodexWithCdp（附着等待，非 detached）。
     ...(platform === "darwin"
       ? {
         probeNativeProcess: probeNative,
