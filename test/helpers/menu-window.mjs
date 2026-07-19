@@ -74,6 +74,22 @@ export async function menuWindow({
   window.fetch = fetch ?? (async (url, options) => {
     const body = JSON.parse(options.body);
     backendRevision += 1;
+    if (String(url).endsWith("/v1/user-theme")) {
+      if (body.action === "delete") {
+        return jsonResponse(200, {
+          ok: true,
+          persistenceEnabled: backendPersistence,
+          revision: backendRevision,
+          themeId: "miku-488137",
+        });
+      }
+      return jsonResponse(200, {
+        ok: true,
+        persistenceEnabled: backendPersistence,
+        revision: backendRevision,
+        themeId: "uploaded-skin-0123456789abcdef",
+      });
+    }
     if (String(url).endsWith("/v1/theme")) {
       return jsonResponse(200, {
         ok: true,
@@ -183,6 +199,14 @@ export async function menuWindow({
     },
     async pickTheme(id) {
       window.document.querySelector(`[data-heige-theme-id="${id}"]`).click();
+      await flushMicrotasks(window);
+    },
+    async deleteUserTheme(id) {
+      const button = window.document.querySelector(
+        `[data-heige-role="user-theme-row"][data-heige-theme-id="${id}"] [data-heige-role="user-theme-delete"]`,
+      );
+      if (!button) throw new Error("missing delete button for " + id);
+      button.click();
       await flushMicrotasks(window);
     },
     async openThemeCenter() {
