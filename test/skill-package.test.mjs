@@ -218,6 +218,8 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/payload/scripts/windows/install.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/controller.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/restore.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/close-codex.bat",
+    "heige-codex-skin-studio/payload/scripts/windows/close-codex.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/uninstall.bat",
     "heige-codex-skin-studio/payload/scripts/windows/uninstall.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/lib/entrypoints.ps1",
