@@ -2,7 +2,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, normalize, posix, resolve, win32 } from "node:path";
+import { dirname, isAbsolute, join, normalize, posix, relative, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -85,7 +85,13 @@ import {
 } from "./state-store.mjs";
 import { createStudioLogger } from "./studio-logger.mjs";
 import { loadTheme } from "./theme-schema.mjs";
-import { createSingleImageTheme, listThemes, resolveAndLoadTheme } from "./theme-store.mjs";
+import {
+  createSingleImageTheme,
+  createSingleImageThemeFromBytes,
+  listThemes,
+  removeUserTheme as removeUserThemeFromStore,
+  resolveAndLoadTheme,
+} from "./theme-store.mjs";
 import {
   classifyWindowsPreflightSnapshot,
   queryWindowsRuntimeSnapshot,
@@ -767,6 +773,77 @@ export async function spawnWindowsRestartIntoCdp({
   return { pid: child.pid ?? null, exitCode: 0 };
 }
 
+/**
+ * 后台 Node 启动时再清一次同 task/state 的兄弟进程，避免 Stop-ScheduledTask 留下的孤儿
+ * 与当前实例叠成多后台抢锁（LOCK_DISAPPEARED / LOCK_HELD）。
+ */
+export async function ensureSoleWindowsBackgroundController({
+  taskName,
+  stateDirectory,
+  excludePid = process.pid,
+  powershellPath = windowsPowerShellPath(),
+  scheduledTaskScriptPath = join(
+    repositoryRoot,
+    "scripts",
+    "windows",
+    "lib",
+    "scheduled-task.ps1",
+  ),
+  env = process.env,
+  execFileImpl = execFile,
+} = {}) {
+  if (typeof taskName !== "string" || taskName.length === 0) {
+    throw new Error("Windows background singleton requires a task name");
+  }
+  if (typeof stateDirectory !== "string" || !win32.isAbsolute(stateDirectory)) {
+    throw new Error("Windows background singleton state directory must be absolute");
+  }
+  if (!Number.isSafeInteger(excludePid) || excludePid <= 0) {
+    throw new Error("Windows background singleton excludePid is invalid");
+  }
+  if (typeof powershellPath !== "string" || powershellPath.length === 0) {
+    throw new Error("Windows background singleton PowerShell path is invalid");
+  }
+  if (typeof scheduledTaskScriptPath !== "string" || !win32.isAbsolute(scheduledTaskScriptPath)) {
+    throw new Error("Windows background singleton script path must be absolute");
+  }
+  // 用 -Command 点源脚本后调用，便于传 ExcludePid（保留本进程）。
+  const command = [
+    `$ErrorActionPreference = 'Stop'`,
+    `. '${scheduledTaskScriptPath.replace(/'/g, "''")}'`,
+    `Stop-HeiGeBackgroundControllerProcesses -TaskName '${taskName.replace(/'/g, "''")}' `,
+    `-StateDirectory '${stateDirectory.replace(/'/g, "''")}' -ExcludePid ${excludePid} `,
+    `| ConvertTo-Json -Compress`,
+  ].join("; ");
+  const { stdout } = await execFileImpl(powershellPath, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    command,
+  ], {
+    env: isolatedWindowsPowerShellEnvironment(env),
+    windowsHide: true,
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const text = String(stdout ?? "").trim();
+  if (!text) return { stoppedCount: 0, stoppedPids: [] };
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      stoppedCount: Number(parsed.StoppedCount) || 0,
+      stoppedPids: Array.isArray(parsed.StoppedPids)
+        ? parsed.StoppedPids.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value))
+        : [],
+    };
+  } catch {
+    return { stoppedCount: 0, stoppedPids: [], raw: text.slice(0, 200) };
+  }
+}
+
 export function createControllerPortOwnerValidator({
   platform,
   port,
@@ -1036,8 +1113,14 @@ function isTransientLockAcquisitionError(error) {
   try {
     const code = error?.code;
     // LOCK_HELD：他人持有；LOCK_MALFORMED：staging 尚未写完 owner.json；
-    // LOCK_PERMISSIONS：他人仍打开目录时 protect/heal 会失败，属瞬时争用而非永久 ACL 损坏。
-    return code === "LOCK_HELD" || code === "LOCK_MALFORMED" || code === "LOCK_PERMISSIONS";
+    // LOCK_PERMISSIONS：他人仍打开目录时 protect/heal 会失败，属瞬时争用而非永久 ACL 损坏；
+    // LOCK_DISAPPEARED：并发 cleanup/rename 让 staging 在两步之间消失，属瞬时竞态。
+    return (
+      code === "LOCK_HELD" ||
+      code === "LOCK_MALFORMED" ||
+      code === "LOCK_PERMISSIONS" ||
+      code === "LOCK_DISAPPEARED"
+    );
   } catch {
     return false;
   }
@@ -1160,11 +1243,22 @@ async function ensureProductionState({ paths, themeId, process: processIdentity,
   });
 }
 
-async function themeBundle({ deps, roots, themeId }) {
+async function themeBundle({ deps, roots, themeId, userThemesRoot = null }) {
   const themes = await deps.listThemes({ roots });
   const selected = themes.find((theme) => theme.id === themeId);
   if (!selected) throw new Error(`找不到主题：${themeId}`);
+  const originFor = (themePath) => {
+    if (typeof userThemesRoot !== "string" || userThemesRoot.length === 0) return "bundled";
+    try {
+      const rel = relative(userThemesRoot, themePath);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return "user";
+    } catch {
+      return "bundled";
+    }
+    return "bundled";
+  };
   const loadedTheme = await deps.loadTheme(selected.path);
+  loadedTheme.origin = originFor(selected.path);
   const menuThemes = [];
   for (const theme of themes) {
     if (theme.id === themeId) {
@@ -1172,7 +1266,9 @@ async function themeBundle({ deps, roots, themeId }) {
       continue;
     }
     try {
-      menuThemes.push(await deps.loadTheme(theme.path));
+      const loaded = await deps.loadTheme(theme.path);
+      loaded.origin = originFor(theme.path);
+      menuThemes.push(loaded);
     } catch {
       // 坏主题不进入菜单，也不阻断一个已经完整验证的目标主题。
     }
@@ -1497,12 +1593,31 @@ export async function productionController({
         return false;
       }
     },
+    createUserThemeFromBytes: async ({ bytes, extension, name, colors }) => {
+      const create = deps.createSingleImageThemeFromBytes ?? createSingleImageThemeFromBytes;
+      return create({
+        bytes,
+        extension,
+        name,
+        storeRoot: paths.userThemesRoot,
+        ...(colors === undefined ? {} : { colors }),
+      });
+    },
+    removeUserTheme: async ({ id }) => {
+      const remove = deps.removeUserThemeFromStore ?? removeUserThemeFromStore;
+      return remove({ storeRoot: paths.userThemesRoot, id });
+    },
     injectSkin: async ({ themeId, control, targetIds, preferStored: requestPreference }) => {
       const state = await readStudioState(paths.statePath);
       const effectiveThemeId = themeId === NATIVE_THEME_ID
         ? state?.lastNonNativeThemeId ?? DEFAULT_THEME_ID
         : themeId;
-      const bundle = await themeBundle({ deps, roots, themeId: effectiveThemeId });
+      const bundle = await themeBundle({
+        deps,
+        roots,
+        themeId: effectiveThemeId,
+        userThemesRoot: paths.userThemesRoot,
+      });
       return deps.applySkin({
         loadedTheme: bundle.loadedTheme,
         themes: bundle.menuThemes,
@@ -1652,6 +1767,7 @@ export async function runControllerProcess(controller, {
   publishHandshake = publishBackgroundHandshake,
   readCurrentIdentity,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  ensureSoleWindowsBackground = ensureSoleWindowsBackgroundController,
 } = {}) {
   if (startupHandshake !== null && backgroundRuntime !== null) {
     throw new Error("background controller cannot combine inline and one-shot handshake requests");
@@ -1666,6 +1782,17 @@ export async function runControllerProcess(controller, {
       backgroundRuntime.backgroundIdentity.length === 0
     ) {
       throw new Error("background runtime identity is invalid");
+    }
+    if (backgroundRuntime.platform === "win32") {
+      try {
+        await ensureSoleWindowsBackground({
+          taskName: backgroundRuntime.backgroundIdentity,
+          stateDirectory: paths.stateRoot,
+          excludePid: process.pid,
+        });
+      } catch {
+        // 清兄弟失败不应阻断握手；后续锁重试仍可吸收瞬时争用。
+      }
     }
     activeHandshake = await claimStartRequest({
       stateRoot: paths.stateRoot,
