@@ -156,30 +156,38 @@ function slugify(value) {
   return slug || "custom-skin";
 }
 
-export async function createSingleImageTheme({ imagePath, name, storeRoot, colors = {}, hooks = {} }) {
+export async function createSingleImageThemeFromBytes({
+  bytes,
+  extension,
+  name,
+  storeRoot,
+  colors = {},
+  hooks = {},
+}) {
   name = validThemeName(name);
-  const extension = extname(imagePath).toLowerCase();
-  if (!IMAGE_EXTENSIONS.has(extension)) {
+  const normalizedExtension = typeof extension === "string" && extension.startsWith(".")
+    ? extension.toLowerCase()
+    : typeof extension === "string"
+      ? `.${extension.toLowerCase()}`
+      : "";
+  if (!IMAGE_EXTENSIONS.has(normalizedExtension)) {
     throw new Error("素材必须是 PNG、JPG、JPEG 或 WebP 图片");
   }
-  let sourceBytes;
-  try {
-    ({ bytes: sourceBytes } = await readBoundedFile(imagePath, {
-      maxBytes: MAX_SOURCE_IMAGE_BYTES,
-      label: "素材图片",
-    }));
-  } catch (error) {
-    if (/8388608|超过/.test(error?.message ?? "")) {
-      throw new Error("素材图片过大（上限 8MB），请先压缩后再做主题，否则注入会超时");
-    }
-    throw error;
+  if (!Buffer.isBuffer(bytes)) {
+    throw new TypeError("素材图片必须是 Buffer");
   }
-  validateImageMetadata(sourceBytes, { expectedMime: IMAGE_MIME.get(extension) });
+  if (bytes.byteLength < 1) {
+    throw new Error("素材图片为空");
+  }
+  if (bytes.byteLength > MAX_SOURCE_IMAGE_BYTES) {
+    throw new Error("素材图片过大（上限 8MB），请先压缩后再做主题，否则注入会超时");
+  }
+  validateImageMetadata(bytes, { expectedMime: IMAGE_MIME.get(normalizedExtension) });
 
   const digest = createHash("sha256")
     .update(name, "utf8")
     .update("\0")
-    .update(sourceBytes)
+    .update(bytes)
     .digest("hex")
     .slice(0, 16);
   const id = `${slugify(name)}-${digest}`;
@@ -188,7 +196,7 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
   const transactionId = randomUUID();
   const temporary = join(storeRoot, `.${id}.tmp-${transactionId}`);
   const retired = join(storeRoot, `.${id}.retired-${transactionId}`);
-  const hero = `hero${extension}`;
+  const hero = `hero${normalizedExtension}`;
   const manifest = {
     schemaVersion: 1,
     id,
@@ -207,7 +215,7 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
   let existingRetired = false;
   let published = false;
   try {
-    await writeExclusive(join(temporary, hero), sourceBytes, 0o600);
+    await writeExclusive(join(temporary, hero), bytes, 0o600);
     await writeExclusive(
       join(temporary, "theme.json"),
       Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"),
@@ -218,7 +226,7 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
     if (
       staged.manifest.id !== id
       || staged.manifest.name !== name
-      || !staged.assetBuffers.hero.equals(sourceBytes)
+      || !staged.assetBuffers.hero.equals(bytes)
     ) throw new Error("暂存主题与已验证输入不一致");
     const existing = await destinationState(destination, id);
     await invokeHook(hooks, "beforePublish", { destination, temporary, retired, existing });
@@ -236,7 +244,7 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
     if (
       installed.manifest.id !== id
       || installed.manifest.name !== name
-      || !installed.assetBuffers.hero.equals(sourceBytes)
+      || !installed.assetBuffers.hero.equals(bytes)
     ) throw new Error("发布后的主题与已验证输入不一致");
   } catch (error) {
     const rollbackErrors = [];
@@ -260,6 +268,58 @@ export async function createSingleImageTheme({ imagePath, name, storeRoot, color
     await syncDirectory(storeRoot);
   }
   return { id, path: destination, manifest };
+}
+
+export async function createSingleImageTheme({ imagePath, name, storeRoot, colors = {}, hooks = {} }) {
+  const extension = extname(imagePath).toLowerCase();
+  if (!IMAGE_EXTENSIONS.has(extension)) {
+    throw new Error("素材必须是 PNG、JPG、JPEG 或 WebP 图片");
+  }
+  let sourceBytes;
+  try {
+    ({ bytes: sourceBytes } = await readBoundedFile(imagePath, {
+      maxBytes: MAX_SOURCE_IMAGE_BYTES,
+      label: "素材图片",
+    }));
+  } catch (error) {
+    if (/8388608|超过/.test(error?.message ?? "")) {
+      throw new Error("素材图片过大（上限 8MB），请先压缩后再做主题，否则注入会超时");
+    }
+    throw error;
+  }
+  return createSingleImageThemeFromBytes({
+    bytes: sourceBytes,
+    extension,
+    name,
+    storeRoot,
+    colors,
+    hooks,
+  });
+}
+
+/**
+ * 仅删除 userThemesRoot 下已归属的用户主题目录；不碰内置 themes/。
+ */
+export async function removeUserTheme({ storeRoot, id }) {
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.includes("\0") ||
+    id.includes("/") ||
+    id.includes("\\") ||
+    id.includes("..")
+  ) {
+    throw new TypeError("theme id is invalid");
+  }
+  storeRoot = await requireSafeStoreRoot(storeRoot);
+  const destination = join(storeRoot, id);
+  const existing = await destinationState(destination, id);
+  if (existing === null) {
+    throw new Error(`找不到主题：${id}`);
+  }
+  await rm(destination, { recursive: true, force: false });
+  await syncDirectory(storeRoot);
+  return { id, removed: true };
 }
 
 /**
