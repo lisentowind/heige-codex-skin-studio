@@ -961,34 +961,117 @@ test("validated upload scales within both canvas budgets and persists", async (t
   await upload(page, { bytes: png(4000, 1000), name: "wide.png" });
   const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
   assert.equal(alert.getAttribute("aria-busy"), "false");
-  assert.match(alert.textContent, /已应用并保存/);
-  assert.match(alert.textContent, /不会改写最近正式主题/);
-  assert.match(alert.textContent, /自动补针或常驻启动时可能继续显示/);
+  assert.match(alert.textContent, /写入启动器|已保存到启动器/);
   assert.deepEqual(drawCalls[0], { width: 2000, height: 500 });
-  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "uploaded-skin-0123456789abcdef");
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.match(page.saveState.textContent, /已保存/);
   assert.equal(
     page.currentHero.style.backgroundSize,
     "100% 100%, contain",
     "custom artwork must remain fully visible in the current-theme board",
   );
   assert.equal(page.currentHero.style.backgroundRepeat, "no-repeat");
-  assert.match(page.window.localStorage.getItem("heigeCodexCustomTheme"), /data:image\/webp/);
-  const custom = page.document.querySelector('[data-heige-theme-id="custom-upload"]');
-  const remove = page.document.querySelector('[data-heige-role="custom-delete"]');
-  assert.equal(custom?.tagName, "BUTTON");
-  assert.equal(custom?.getAttribute("aria-pressed"), "true");
-  assert.equal(remove?.tagName, "BUTTON");
-  assert.match(remove?.getAttribute("aria-label") ?? "", /删除自定义主题.*wide/i);
-  assert.match(
-    custom.querySelector('[data-heige-role="theme-preview"]').style.backgroundImage,
-    /data:image\/webp/,
-  );
+  assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "uploaded-skin-0123456789abcdef");
   assert.equal(page.document.documentElement.classList.contains("electron-dark"), true);
-  const savedCustom = JSON.parse(page.window.localStorage.getItem("heigeCodexCustomTheme"));
-  assert.equal(savedCustom.appearance, "dark");
   const appearanceRequest = messages.find((message) =>
     message.type === "fetch" && message.url === "vscode://codex/set-setting");
   assert.equal(JSON.parse(appearanceRequest?.body ?? "null")?.value, "dark");
+});
+
+test("HTTP upload immediately inserts a formal user theme row in 我的主题", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 100,
+    decodedHeight: 100,
+  });
+  t.after(restore);
+  await page.openThemeCenter();
+  await upload(page, { bytes: png(100, 100), name: "mine.png" });
+
+  const themeId = "uploaded-skin-0123456789abcdef";
+  const row = page.document.querySelector(
+    `[data-heige-role="user-theme-row"][data-heige-theme-id="${themeId}"]`,
+  );
+  assert.ok(row, "formal user theme card must appear without waiting for reinject");
+  assert.ok(row.querySelector('[data-heige-role="user-theme-delete"]'));
+  assert.equal(
+    page.document.querySelector('[data-heige-theme-id="custom-upload"]'),
+    null,
+  );
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, themeId);
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.match(page.saveState.textContent, /已保存/);
+  assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
+});
+
+test("CSP-blocked upload ACK upserts a formal user theme row", async (t) => {
+  const page = await menuWindow({
+    revision: 7,
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  t.after(() => page.close());
+  const restore = installSuccessfulImagePipeline(page, {
+    decodedWidth: 100,
+    decodedHeight: 100,
+  });
+  t.after(restore);
+  await page.openThemeCenter();
+  await upload(page, { bytes: png(100, 100), name: "csp.png" });
+
+  const pending = page.window.__heigeCodexSkinRuntime.status().controlRequest;
+  assert.equal(pending?.action, "publish-user-theme");
+  assert.equal(typeof pending?.image, "string");
+  assert.ok(pending.image.startsWith("data:image/"));
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, true);
+  assert.ok(
+    page.document.querySelector('[data-heige-theme-id="custom-upload"]'),
+    "legacy preview stays visible while waiting for ACK",
+  );
+  assert.match(
+    page.document.querySelector('[data-heige-role="upload-alert"]').textContent,
+    /等待后台确认写入启动器/,
+  );
+
+  const themeId = "uploaded-skin-0123456789abcdef";
+  assert.equal(
+    page.window.__heigeCodexSkinRuntime.receiveThemeSelectionResult({
+      schemaVersion: 1,
+      requestId: pending.requestId,
+      themeId,
+      revision: 8,
+      persistenceEnabled: true,
+    }),
+    true,
+  );
+  await page.flush();
+
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().controlRequest, null);
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, false);
+  const row = page.document.querySelector(
+    `[data-heige-role="user-theme-row"][data-heige-theme-id="${themeId}"]`,
+  );
+  assert.ok(row);
+  assert.ok(row.querySelector('[data-heige-role="user-theme-delete"]'));
+  assert.equal(
+    page.document.querySelector('[data-heige-theme-id="custom-upload"]'),
+    null,
+  );
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, themeId);
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.match(page.saveState.textContent, /已保存/);
+
+  // Formal card is selectable via the same request path as built-ins.
+  page.document.querySelector('[data-heige-theme-id="miku-488137"]').click();
+  await page.flush();
+  row.querySelector('[data-heige-role="theme-option"]').click();
+  await page.flush();
+  assert.equal(
+    page.window.__heigeCodexSkinRuntime.status().controlRequest?.themeId,
+    themeId,
+  );
 });
 
 test("remote persistence changes close inline confirmation after restoring focus", async (t) => {
@@ -1063,7 +1146,7 @@ test("vertical boundary images keep the palette canvas below 48 pixels per side"
   });
   t.after(restore);
   await upload(page, { bytes: png(81, 8100), name: "vertical.png" });
-  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "uploaded-skin-0123456789abcdef");
   assert.ok(drawCalls[1].width <= 48);
   assert.ok(drawCalls[1].height <= 48);
 });
@@ -1081,11 +1164,8 @@ for (const fixture of [
     });
     t.after(restore);
     await upload(page, fixture);
-    assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
-    assert.match(
-      page.document.querySelector('[data-heige-role="upload-alert"]').textContent,
-      /已应用并保存/,
-    );
+    assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "uploaded-skin-0123456789abcdef");
+    assert.match(page.document.querySelector('[data-heige-role="upload-alert"]').textContent, /写入启动器|已保存到启动器/);
   });
 }
 
@@ -1098,11 +1178,8 @@ test("browser upload derives MIME from a valid extension when File.type is empty
   });
   t.after(restore);
   await upload(page, { bytes: png(100, 100), name: "photo.png", type: "" });
-  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
-  assert.match(
-    page.document.querySelector('[data-heige-role="upload-alert"]').textContent,
-    /已应用并保存/,
-  );
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "uploaded-skin-0123456789abcdef");
+  assert.match(page.document.querySelector('[data-heige-role="upload-alert"]').textContent, /写入启动器|已保存到启动器/);
 });
 
 test("decoded dimensions must match the validated header before canvas allocation", async (t) => {
@@ -1146,8 +1223,8 @@ test("storage quota failure keeps only the current generation and says restart w
   });
   await upload(page, { bytes: png(100, 100) });
   const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
-  assert.match(alert.textContent, /本次已应用.*重启后不会保留/);
-  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
+  assert.match(alert.textContent, /写入启动器|已保存到启动器/);
+  assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "uploaded-skin-0123456789abcdef");
   assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
 });
 
@@ -1172,6 +1249,8 @@ test("theme native hidden and persistence ACK synchronize to a second renderer",
   t.after(() => { left.close(); right.close(); SharedBroadcastChannel.reset(); });
 
   await left.pickTheme("night-city");
+  await left.flush();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await right.flush();
   assert.equal(right.themeId, "night-city");
   assert.equal(right.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
@@ -1234,7 +1313,7 @@ test("a menu theme choice renders immediately while durable confirmation is pend
   assert.equal(page.themeId, "night-city");
   assert.equal(page.backdrop.hidden, false);
   assert.equal(page.saveState.dataset.state, "saving");
-  assert.equal(page.saveState.textContent, "正在保存");
+  assert.match(page.saveState.textContent, /正在保存/);
   assert.equal(page.currentHero.dataset.themeId, "night-city");
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
   assert.equal(
@@ -1250,11 +1329,13 @@ test("a menu theme choice renders immediately while durable confirmation is pend
     themeId: "night-city",
   }));
   await page.flush();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await page.flush();
 
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
   assert.equal(page.controlRevision, 8);
   assert.equal(page.saveState.dataset.state, "saved");
-  assert.equal(page.saveState.textContent, "已保存");
+  assert.match(page.saveState.textContent, /已保存|已确认启动器主题/);
   assert.equal(page.backdrop.hidden, false);
   assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, false);
 });
@@ -1344,6 +1425,9 @@ test("a menu theme choice persists the authoritative theme revision", async (t) 
   t.after(() => page.close());
 
   await page.pickTheme("night-city");
+  await page.flush();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await page.flush();
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "http://127.0.0.1:43123/v1/theme");
@@ -1483,7 +1567,7 @@ test("an authoritative formal theme replaces stale formal storage during backgro
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
 });
 
-test("background repair may restore a valid local quick image without changing formal state", async (t) => {
+test("background repair prefers durable launcher theme over a leftover local quick image", async (t) => {
   const custom = {
     name: "Local image",
     dataUrl: `data:image/png;base64,${png(1, 1).toString("base64")}`,
@@ -1508,9 +1592,8 @@ test("background repair may restore a valid local quick image without changing f
   });
   t.after(() => page.close());
 
-  assert.equal(page.themeId, "custom-upload");
-  assert.equal(page.document.documentElement.classList.contains("electron-dark"), true);
-  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "custom-upload");
+  assert.equal(page.themeId, "night-city");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
 });
 
 test("a rejected theme request leaves the renderer unchanged and refreshes its revision", async (t) => {
@@ -1560,10 +1643,80 @@ test("an idempotent theme ACK can restore a formal theme over a local quick imag
   page.document.documentElement.dataset.heigeCodexSkin = "custom-upload";
 
   await page.pickTheme("miku-488137");
+  await page.flush();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await page.flush();
 
   assert.equal(page.themeId, "miku-488137");
   assert.equal(page.controlRevision, 7);
-  assert.equal(page.alert.textContent, "主题选择已保存。");
+  assert.match(page.alert.textContent, /已恢复启动器主题|主题选择已保存/);
+  assert.match(page.saveState.textContent, /已确认启动器主题|已保存/);
+});
+
+test("custom quick image then another formal theme shows saving and persists after ACK", async (t) => {
+  const custom = {
+    name: "Local image",
+    dataUrl: `data:image/png;base64,${png(1, 1).toString("base64")}`,
+    colors: {
+      accent: "#112233",
+      secondary: "#223344",
+      surface: "#334455",
+      text: "#ddeeff",
+    },
+  };
+  const pending = deferredResponse();
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    activeId: null,
+    initialStorage: {
+      heigeCodexSkinSelected: "custom-upload",
+      heigeCodexCustomTheme: JSON.stringify(custom),
+    },
+    preferStored: true,
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      assert.equal(body.themeId, "night-city");
+      return pending.promise;
+    },
+  });
+  t.after(() => page.close());
+
+  assert.equal(page.themeId, "custom-upload");
+  assert.equal(page.saveState.dataset.state, "local");
+  assert.match(page.saveState.textContent, /本机快捷|未写入启动器/);
+
+  await page.openThemeCenter();
+  const pickPromise = page.pickTheme("night-city");
+  await page.flush();
+  assert.equal(page.themeId, "night-city");
+  assert.equal(page.saveState.dataset.state, "saving");
+  assert.match(page.saveState.textContent, /正在保存/);
+  assert.equal(
+    page.document.querySelector('[data-heige-theme-id="night-city"]').disabled,
+    true,
+  );
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "custom-upload");
+
+  pending.resolve(jsonResponse(200, {
+    ok: true,
+    persistenceEnabled: false,
+    revision: 8,
+    themeId: "night-city",
+  }));
+  await pickPromise;
+  await page.flush();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await page.flush();
+
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+  assert.equal(page.controlRevision, 8);
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.match(page.alert.textContent, /主题选择已保存/);
 });
 
 test("broadcast protocol rejects loops stale sequences unknown fields and malformed values", async (t) => {
@@ -1706,4 +1859,138 @@ test("closing the theme center clears the reopen marker", async (t) => {
   assert.equal(page.window.sessionStorage.getItem("heigeCodexThemeCenterOpen"), null);
   await page.injectAgain();
   assert.equal(page.backdrop.hidden, true);
+});
+
+test("HTTP delete removes a user theme row and keeps the launcher selection", async (t) => {
+  const page = await menuWindow({
+    revision: 7,
+    activeId: "miku-488137",
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      {
+        id: "my-lake-0123456789abcdef",
+        name: "My Lake",
+        origin: "user",
+        accent: "#1e90ff",
+        css: "html { color: #abcdef; }",
+      },
+    ],
+  });
+  t.after(() => page.close());
+  await page.openThemeCenter();
+  assert.ok(page.document.querySelector('[data-heige-role="user-theme-row"][data-heige-theme-id="my-lake-0123456789abcdef"]'));
+  await page.deleteUserTheme("my-lake-0123456789abcdef");
+  await page.flush();
+  assert.equal(
+    page.document.querySelector('[data-heige-role="user-theme-row"][data-heige-theme-id="my-lake-0123456789abcdef"]'),
+    null,
+  );
+  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.match(page.saveState.textContent, /已删除/);
+  assert.match(page.alert.textContent, /已从启动器删除/);
+});
+
+test("CSP-blocked delete queues CDP fallback and ACK removes the row", async (t) => {
+  const page = await menuWindow({
+    revision: 7,
+    activeId: "my-lake-0123456789abcdef",
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      {
+        id: "my-lake-0123456789abcdef",
+        name: "My Lake",
+        origin: "user",
+        accent: "#1e90ff",
+        css: "html { color: #abcdef; }",
+      },
+    ],
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  t.after(() => page.close());
+  await page.openThemeCenter();
+  await page.deleteUserTheme("my-lake-0123456789abcdef");
+  await page.flush();
+
+  const pending = page.window.__heigeCodexSkinRuntime.status().controlRequest;
+  assert.equal(pending.action, "delete-user-theme");
+  assert.equal(pending.themeId, "my-lake-0123456789abcdef");
+  assert.equal(pending.expectedRevision, 7);
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, true);
+  assert.match(page.alert.textContent, /等待后台确认删除|等待后台确认/);
+
+  assert.equal(
+    page.window.__heigeCodexSkinRuntime.receiveThemeSelectionResult({
+      schemaVersion: 1,
+      requestId: pending.requestId,
+      themeId: "miku-488137",
+      revision: 8,
+      persistenceEnabled: true,
+    }),
+    true,
+  );
+  await page.flush();
+
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().controlRequest, null);
+  assert.equal(
+    page.document.querySelector('[data-heige-role="user-theme-row"][data-heige-theme-id="my-lake-0123456789abcdef"]'),
+    null,
+  );
+  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.controlRevision, 8);
+  assert.match(page.saveState.textContent, /已删除/);
+});
+
+test("a newer persistence revision cancels a queued delete without permanently blocking retries", async (t) => {
+  SharedBroadcastChannel.reset();
+  const page = await menuWindow({
+    BroadcastChannelClass: SharedBroadcastChannel,
+    revision: 7,
+    activeId: "miku-488137",
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      {
+        id: "my-lake-0123456789abcdef",
+        name: "My Lake",
+        origin: "user",
+        accent: "#1e90ff",
+        css: "html { color: #abcdef; }",
+      },
+    ],
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  const peer = await menuWindow({
+    BroadcastChannelClass: SharedBroadcastChannel,
+    revision: 7,
+    activeId: "miku-488137",
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      {
+        id: "my-lake-0123456789abcdef",
+        name: "My Lake",
+        origin: "user",
+        accent: "#1e90ff",
+        css: "html { color: #abcdef; }",
+      },
+    ],
+  });
+  t.after(() => { page.close(); peer.close(); SharedBroadcastChannel.reset(); });
+
+  await page.openThemeCenter();
+  await page.deleteUserTheme("my-lake-0123456789abcdef");
+  await page.flush();
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().controlRequest?.action, "delete-user-theme");
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, true);
+
+  // Peer advances revision and broadcasts; must clear delete queue and unlock themePending.
+  await peer.disablePersistence();
+  await page.flush();
+
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().controlRequest, null);
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().themeTransitionPending, false);
+  assert.match(page.saveState.textContent, /未删除/);
+
+  await page.deleteUserTheme("my-lake-0123456789abcdef");
+  await page.flush();
+  assert.equal(page.window.__heigeCodexSkinRuntime.status().controlRequest?.action, "delete-user-theme");
 });
