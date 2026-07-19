@@ -2614,7 +2614,11 @@ async function cleanupWindowsArtifacts({ stateRoot, lockPath, security, readProc
         continue;
       }
       // 并发 writer 可能刚 mkdir staging、尚未写出 owner.json；勿把竞态抬成致命 LOCK_MALFORMED。
-      if (disposable && error?.code === "LOCK_MALFORMED") {
+      // 另一进程可能已把 staging rename 成正式锁，readdir 后到 lstat 前目录消失 → LOCK_DISAPPEARED。
+      if (
+        disposable &&
+        (error?.code === "LOCK_MALFORMED" || error?.code === "LOCK_DISAPPEARED")
+      ) {
         continue;
       }
       throw error;
