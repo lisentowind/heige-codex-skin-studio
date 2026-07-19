@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   acquireEphemeralControllerLease,
   controllerInjectionPreference,
+  controllerTickWaitMs,
   createBackgroundReadinessVerifier,
   createControllerPortOwnerValidator,
   createWindowsRuntimeProbe,
@@ -15,10 +16,13 @@ import {
   offlineDisablePersistence,
   parseMacosInstallAuthorization,
   probeWindowsCdpProcess,
+  probeWindowsNativeProcess,
+  probeWindowsNativeProcessFromSnapshot,
   productionLockOptions,
   productionPreflight,
   runCli,
   runControllerProcess,
+  spawnWindowsRestartIntoCdp,
   validatePortOwner,
   waitForAppliedSkin,
   withLockHeldRetry,
@@ -557,6 +561,46 @@ test("withLockHeldRetry does not retry non-LOCK_HELD failures", async () => {
     },
   }), /boom/);
   assert.equal(attempts, 1);
+});
+
+test("withLockHeldRetry retries bounded LOCK_MALFORMED then succeeds", async () => {
+  let attempts = 0;
+  const waits = [];
+  const value = await withLockHeldRetry(async () => {
+    attempts += 1;
+    if (attempts < 2) {
+      const error = new Error("LOCK_MALFORMED: Windows owner directory lacks owner.json");
+      error.code = "LOCK_MALFORMED";
+      throw error;
+    }
+    return "claimed";
+  }, {
+    delaysMs: [3, 5],
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+  });
+  assert.equal(value, "claimed");
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [3]);
+});
+
+test("withLockHeldRetry retries bounded LOCK_PERMISSIONS then succeeds", async () => {
+  let attempts = 0;
+  const waits = [];
+  const value = await withLockHeldRetry(async () => {
+    attempts += 1;
+    if (attempts < 2) {
+      const error = new Error("LOCK_PERMISSIONS: Windows owner directory ACL cannot be healed safely");
+      error.code = "LOCK_PERMISSIONS";
+      throw error;
+    }
+    return "healed";
+  }, {
+    delaysMs: [2, 4],
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+  });
+  assert.equal(value, "healed");
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [2]);
 });
 
 test("apply confirmation rejects a partial multi-window status result", async () => {
@@ -1935,6 +1979,78 @@ test("a healthy background controller keeps the ten-second interaction cadence",
   assert.deepEqual(waits, [10_000]);
 });
 
+test("controller tick wait uses one-second cadence for interactive follow-ups", () => {
+  assert.equal(controllerTickWaitMs({ action: "idle" }), 10_000);
+  assert.equal(controllerTickWaitMs({ action: "idle", interactive: true }), 1_000);
+  assert.equal(controllerTickWaitMs({ action: "relaunch" }), 1_000);
+  assert.equal(controllerTickWaitMs({ action: "inject" }), 1_000);
+  assert.equal(controllerTickWaitMs({ action: "wait-for-app" }), 1_000);
+});
+
+test("an interactive controller tick uses the one-second cadence before the next tick", async () => {
+  const waits = [];
+  let ticks = 0;
+  const result = await runControllerProcess({
+    start: async () => ({
+      action: "relaunch",
+      mode: "active",
+      persistenceEnabled: true,
+      revision: 19,
+    }),
+    tick: async () => {
+      ticks += 1;
+      if (ticks === 1) {
+        return {
+          action: "idle",
+          mode: "active",
+          persistenceEnabled: true,
+          revision: 19,
+          interactive: true,
+        };
+      }
+      return {
+        action: "unregister",
+        mode: "native",
+        persistenceEnabled: false,
+        revision: 20,
+      };
+    },
+    stop: async () => {},
+  }, {
+    paths: { stateRoot: "/private/state" },
+    wait: async (milliseconds) => waits.push(milliseconds),
+  });
+
+  assert.equal(result.action, "unregister");
+  assert.deepEqual(waits, [1_000, 1_000]);
+});
+
+test("Windows background readiness verifier waits up to thirty-five seconds for handshake", async () => {
+  const waits = [];
+  const verifier = createBackgroundReadinessVerifier({
+    stateRoot: "/private/state",
+    platform: "win32",
+    backgroundIdentity: "HeiGeCodexSkinStudioController",
+    wait: async (options) => {
+      waits.push(options.timeoutMs);
+      return {
+        outcome: "ready",
+        pid: 73001,
+        startedAt: "2026-07-19T00:00:00.000Z",
+      };
+    },
+  });
+  assert.deepEqual(await verifier.verify({
+    revision: 7,
+    transitionNonce: "win-ready-7",
+    handshakeRequest: { notBefore: Date.now() - 1_000 },
+  }), {
+    pid: 73001,
+    startedAt: "2026-07-19T00:00:00.000Z",
+  });
+  assert.deepEqual(waits, [35_000]);
+});
+
 function postControl(control, input) {
   const endpoint = new URL(control.endpoint);
   const payload = JSON.stringify(input);
@@ -2469,6 +2585,133 @@ test("Windows trailing runtime proof cannot outlive an explicit discard", async 
   probe.discardPortProof();
   assert.equal(await validate(identity), true);
   assert.equal(queries, 2, "discarded proof must force a fresh runtime query");
+});
+
+test("Windows native probe returns the unique root when CDP is closed", async () => {
+  const identity = {
+    pid: 5151,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-19T08:00:00.0000000Z",
+  };
+  const snapshot = {
+    schemaVersion: 1,
+    app: {
+      kind: "Win32",
+      executablePath: identity.executablePath,
+      installPath: "C:\\Program Files\\Codex",
+      productName: "Codex",
+      packageFullName: null,
+      aumid: null,
+      launchTarget: identity.executablePath,
+    },
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    processes: [{
+      pid: identity.pid,
+      parentProcessId: 4,
+      executablePath: identity.executablePath,
+      startedAt: identity.startedAt,
+    }, {
+      pid: 5152,
+      parentProcessId: identity.pid,
+      executablePath: identity.executablePath,
+      startedAt: "2026-07-19T08:00:01.0000000Z",
+    }],
+    listeners: [],
+  };
+  assert.deepEqual(probeWindowsNativeProcessFromSnapshot(snapshot, { port: 9341 }), identity);
+  assert.deepEqual(await probeWindowsNativeProcess({
+    port: 9341,
+    queryWindowsRuntime: async () => snapshot,
+  }), identity);
+});
+
+test("Windows native probe stays idle while the CDP port is already open", async () => {
+  const identity = {
+    pid: 5252,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-19T08:10:00.0000000Z",
+  };
+  assert.equal(probeWindowsNativeProcessFromSnapshot({
+    schemaVersion: 1,
+    app: {
+      kind: "Win32",
+      executablePath: identity.executablePath,
+      installPath: "C:\\Program Files\\Codex",
+      productName: "Codex",
+      packageFullName: null,
+      aumid: null,
+      launchTarget: identity.executablePath,
+    },
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    processes: [{
+      pid: identity.pid,
+      parentProcessId: 4,
+      executablePath: identity.executablePath,
+      startedAt: identity.startedAt,
+    }],
+    listeners: [{
+      pid: identity.pid,
+      executablePath: identity.executablePath,
+      processName: "Codex",
+      startedAt: identity.startedAt,
+      localAddress: "127.0.0.1",
+      localPort: 9341,
+    }],
+  }, { port: 9341 }), null);
+});
+
+test("Windows restart-into-cdp spawns a detached PowerShell helper with exact process identity", async () => {
+  const identity = {
+    pid: 6060,
+    executablePath: "C:\\Program Files\\Codex\\Codex.exe",
+    startedAt: "2026-07-19T09:00:00.0000000Z",
+  };
+  const calls = [];
+  const result = await spawnWindowsRestartIntoCdp({
+    port: 9341,
+    nativeProcess: identity,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    scriptPath: "C:\\repo\\scripts\\windows\\lib\\restart-into-cdp.ps1",
+    env: {
+      SystemRoot: "C:\\Windows",
+      HEIGE_WINDOWS_APP_IDENTITY: "token",
+    },
+    spawnImpl: (file, args, options) => {
+      calls.push({ file, args, options });
+      return { pid: 7001, unref() { calls.push("unref"); } };
+    },
+  });
+  assert.deepEqual(result, { pid: 7001 });
+  assert.equal(calls[0].file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.deepEqual(calls[0].args, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "C:\\repo\\scripts\\windows\\lib\\restart-into-cdp.ps1",
+    "-Port",
+    "9341",
+    "-ExpectedPid",
+    "6060",
+    "-ExpectedExecutablePath",
+    identity.executablePath,
+    "-ExpectedStartedAt",
+    identity.startedAt,
+  ]);
+  assert.equal(calls[0].options.detached, true);
+  assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.env.HEIGE_WINDOWS_APP_IDENTITY, "token");
+  assert.equal(calls[1], "unref");
+  await assert.rejects(spawnWindowsRestartIntoCdp({
+    port: 9341,
+    nativeProcess: identity,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    scriptPath: "C:\\repo\\scripts\\windows\\lib\\restart-into-cdp.ps1",
+    env: { SystemRoot: "C:\\Windows" },
+    spawnImpl: () => ({ pid: 1, unref() {} }),
+  }), /HEIGE_WINDOWS_APP_IDENTITY/);
 });
 
 test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {
