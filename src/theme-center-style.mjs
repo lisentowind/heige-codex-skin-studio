@@ -217,6 +217,12 @@ export const THEME_CENTER_STYLE = String.raw`
   border-color: #13b7bd;
   box-shadow: 0 0 0 3px rgba(237,110,193,.16),0 10px 24px rgba(33,128,142,.12);
 }
+[data-heige-role="theme-option"]:disabled,
+[data-heige-role="native-option"]:disabled {
+  opacity: .58;
+  cursor: wait;
+  filter: grayscale(.12);
+}
 [data-heige-role="theme-preview"] {
   width: 92px;
   height: 62px;
@@ -292,6 +298,10 @@ export const THEME_CENTER_STYLE = String.raw`
 [data-heige-role="save-state"][data-state="saving"] {
   background: rgba(224,170,62,.12);
   color: #7a5a12;
+}
+[data-heige-role="save-state"][data-state="local"] {
+  background: rgba(23,52,79,.08);
+  color: #3d556b;
 }
 [data-heige-role="save-state"][data-state="error"] {
   background: rgba(187,72,50,.1);
