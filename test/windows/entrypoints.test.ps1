@@ -1467,6 +1467,67 @@ try {
         Assert-Match 'close-codex\.bat' $abort.Guidance
     }
 
+    Test-Case "Restart into CDP verifies identity then stops and starts with CDP" {
+        $path = "C:\Program Files\Codex\Codex.exe"
+        $startedAt = [datetime]::Parse("2026-07-19T09:00:00Z").ToUniversalTime().ToString("o")
+        $script:Running = @([pscustomobject]@{
+            Id = 7070
+            Path = $path
+            ProcessName = "Codex"
+            MainWindowHandle = [IntPtr]::Zero
+            StartTime = [datetime]::Parse("2026-07-19T09:00:00Z")
+        })
+        $script:Events = @()
+        $app = (New-TestEntrypointContext).App
+        $result = Invoke-HeiGeRestartCodexIntoCdp `
+            -Port 9341 `
+            -ExpectedPid 7070 `
+            -ExpectedExecutablePath $path `
+            -ExpectedStartedAt $startedAt `
+            -AppInfo $app `
+            -ProcessProvider { @($script:Running) } `
+            -CloseProvider {
+                param($Process)
+                $script:Events += ("close:" + [int]$Process.Id)
+            } `
+            -StopProvider {
+                param($Process)
+                $script:Events += ("stop:" + [int]$Process.Id)
+                $script:Running = @()
+            } `
+            -SleepProvider { param($Milliseconds) } `
+            -StartCdpProvider {
+                param($AppInfo, $Port)
+                $script:Events += ("start-cdp:" + $Port)
+            }
+        Assert-True $result.Restarted
+        Assert-True $result.CdpMode
+        Assert-equal 9341 $result.Port
+        Assert-True ($script:Events -contains "stop:7070" -or $script:Events -contains "close:7070")
+        Assert-True ($script:Events -contains "start-cdp:9341")
+        Assert-Throws {
+            Invoke-HeiGeRestartCodexIntoCdp `
+                -Port 9341 `
+                -ExpectedPid 7070 `
+                -ExpectedExecutablePath $path `
+                -ExpectedStartedAt $startedAt `
+                -AppInfo $app `
+                -ProcessProvider { @() } `
+                -StartCdpProvider { param($AppInfo, $Port) throw "should not start" }
+        } "已不存在"
+        $restartScript = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\restart-into-cdp.ps1")
+        )
+        Assert-Match 'Invoke-HeiGeRestartCodexIntoCdp' $restartScript
+        Assert-Match 'HEIGE_WINDOWS_APP_IDENTITY' $restartScript
+        $cli = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "src\cli.mjs")
+        )
+        Assert-Match 'probeWindowsNativeProcess' $cli
+        Assert-Match 'spawnWindowsRestartIntoCdp' $cli
+        Assert-Match 'platform === "win32"' $cli
+    }
+
     Test-Case "Uninstall cleans task shortcut state and install tree even when soft disable fails" {
         $uninstallRoot = Join-Path $script:Root ("heige-codex-skin-studio-" + [guid]::NewGuid().ToString("N"))
         $installTree = Join-Path $uninstallRoot "heige-codex-skin-studio"
