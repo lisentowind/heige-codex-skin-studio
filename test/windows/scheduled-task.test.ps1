@@ -56,10 +56,12 @@ function Remove-TestStartRequest {
 }
 
 try {
-    Test-Case "Production task is current user limited and points to stable controller" {
+    Test-Case "Production task is current user scoped and points to stable controller" {
         $definition = New-TestDefinition
+        $expectedRunLevel = Get-HeiGeControllerTaskRunLevel
         Assert-Equal "InteractiveToken" $definition.Principal.LogonType
-        Assert-Equal "Limited" $definition.Principal.RunLevel
+        Assert-Equal $expectedRunLevel $definition.Principal.RunLevel
+        Assert-Equal ($expectedRunLevel -ne "Limited") $definition.RequiresElevation
         Assert-Equal "TESTDOMAIN\HeiGe User" $definition.Principal.UserId
         Assert-Match ([regex]::Escape($script:Controller)) $definition.Action.Arguments
         Assert-Match ([regex]::Escape($script:ProductionTask)) $definition.Action.Arguments
@@ -67,7 +69,6 @@ try {
         Assert-Match '\-AppIdentityToken' $definition.Action.Arguments
         Assert-Match ([regex]::Escape($script:AppIdentityToken)) $definition.Action.Arguments
         Assert-Match '\-WindowStyle Hidden' $definition.Action.Arguments
-        Assert-False $definition.RequiresElevation
     }
 
     Test-Case "Production task has exact current-user recovery settings" {
