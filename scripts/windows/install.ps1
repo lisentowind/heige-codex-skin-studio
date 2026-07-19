@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 . (Join-Path $PSScriptRoot "lib\common.ps1")
+. (Join-Path $PSScriptRoot "lib\entrypoints.ps1")
 . (Join-Path $PSScriptRoot "lib\start-menu.ps1")
 . (Join-Path $PSScriptRoot "lib\bat-exit.ps1")
 
@@ -402,6 +403,21 @@ function Complete-HeiGeWindowsInstall {
         -Action finalize -Participant $Journal.Participants.Tree | Out-Null
 }
 
+function Stop-HeiGeInstallTreeHolders {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+    # publish 会 rename 稳定树；常驻后台若仍从该目录跑 Node，Windows 会 EPERM。
+    $taskName = $script:HeiGeProductionTaskName
+    $stateDirectory = Resolve-HeiGeScopedStateDirectory -StateDirectory $null
+    try {
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    } catch {
+        # 任务不存在或已停止时忽略；后续精确杀进程仍会清占用。
+    }
+    Stop-HeiGeBackgroundControllerProcesses -TaskName $taskName `
+        -StateDirectory $stateDirectory | Out-Null
+    Stop-HeiGeControllerResidue -InstallRoot $InstallRoot | Out-Null
+}
+
 function Recover-HeiGeWindowsInstall {
     param(
         [Parameter(Mandatory = $true)][string]$JournalPath,
@@ -575,6 +591,7 @@ function Invoke-HeiGeWindowsInstall {
             $journal = Update-HeiGeInstallJournal -Path $journalPath -Document $journal `
                 -Phase "participants-prepared"
 
+            Stop-HeiGeInstallTreeHolders -InstallRoot $target
             Invoke-HeiGeTreeParticipant -Node $node -TransactionScript $transactionScript `
                 -Action publish -Participant $journal.Participants.Tree | Out-Null
             $journal = Update-HeiGeInstallJournal -Path $journalPath -Document $journal `
