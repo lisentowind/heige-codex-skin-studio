@@ -14,7 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createSingleImageTheme, listThemes, resolveAndLoadTheme } from "../src/theme-store.mjs";
+import {
+  createSingleImageTheme,
+  createSingleImageThemeFromBytes,
+  listThemes,
+  removeUserTheme,
+  resolveAndLoadTheme,
+} from "../src/theme-store.mjs";
 
 async function temporaryRoot(prefix) {
   return realpath(await mkdtemp(join(tmpdir(), prefix)));
@@ -45,6 +51,47 @@ test("creates a theme from one local image without a build pipeline", async () =
   assert.equal(created.manifest.hero, "hero.png");
   assert.deepEqual(JSON.parse(await readFile(join(created.path, "theme.json"), "utf8")), created.manifest);
   assert.deepEqual((await listThemes({ roots: [join(root, "themes")] })).map((item) => item.id), [created.id]);
+});
+
+test("createSingleImageThemeFromBytes matches path-based create and is idempotent", async () => {
+  const root = await temporaryRoot("heige-theme-bytes-");
+  const storeRoot = join(root, "themes");
+  const bytes = png(320, 180);
+  const first = await createSingleImageThemeFromBytes({
+    bytes,
+    extension: ".png",
+    name: "Byte Skin",
+    storeRoot,
+    colors: { accent: "#112233", secondary: "#223344", surface: "#334455", text: "#445566" },
+  });
+  const second = await createSingleImageThemeFromBytes({
+    bytes,
+    extension: ".png",
+    name: "Byte Skin",
+    storeRoot,
+    colors: { accent: "#112233", secondary: "#223344", surface: "#334455", text: "#445566" },
+  });
+  assert.equal(first.id, second.id);
+  assert.equal(first.path, second.path);
+  assert.match(first.id, /^byte-skin-/);
+  await removeUserTheme({ storeRoot, id: first.id });
+  await assert.rejects(
+    () => resolveAndLoadTheme({ roots: [storeRoot], id: first.id }),
+    /找不到主题/,
+  );
+});
+
+test("createSingleImageThemeFromBytes rejects oversized buffers", async () => {
+  const root = await temporaryRoot("heige-theme-bytes-big-");
+  await assert.rejects(
+    () => createSingleImageThemeFromBytes({
+      bytes: png(640, 360, 9 * 1024 * 1024),
+      extension: ".png",
+      name: "Too Big",
+      storeRoot: join(root, "themes"),
+    }),
+    /8MB/,
+  );
 });
 
 test("rejects unsupported source files", async () => {
