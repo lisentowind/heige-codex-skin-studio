@@ -1032,6 +1032,53 @@ test("a polled menu theme request commits and reinjects the authoritative select
   }]);
 });
 
+test("delete-user-theme is drained even when session theme lags the launcher state", async () => {
+  const userThemeId = "my-lake-0123456789abcdef";
+  const fx = fixture({
+    state: {
+      selectedThemeId: "genshin-night",
+      lastNonNativeThemeId: "genshin-night",
+    },
+    session: activeSession({
+      activeThemeId: DEFAULT_THEME_ID,
+      keepUntilProcessExit: true,
+    }),
+    validateThemeSelection: async (themeId) => (
+      themeId === "genshin-night" ||
+      themeId === DEFAULT_THEME_ID ||
+      themeId === userThemeId
+    ),
+  });
+  const removed = [];
+  fx.deps.removeUserTheme = async ({ id }) => {
+    removed.push(id);
+  };
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "f".repeat(32),
+    action: "delete-user-theme",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    themeId: userThemeId,
+  }, {
+    themeId: "genshin-night",
+    revision: 1,
+  }));
+
+  const result = await controller.tick();
+
+  assert.deepEqual(removed, [userThemeId]);
+  assert.deepEqual(fx.calls.themeDelivery, [{
+    requestId: "f".repeat(32),
+    themeId: "genshin-night",
+    revision: 1,
+    persistenceEnabled: true,
+  }]);
+  assert.equal(result.interactive, true);
+});
+
 test("serializes overlapping controller lease operations before theme selection", async () => {
   const selected = "genshin-night";
   const fx = fixture({
@@ -1449,7 +1496,7 @@ test("a committed theme remains authoritative when its derived session cache wri
   assert.equal(fx.calls.logs.at(-1).event, "theme_session_cache_write_failed");
 });
 
-test("a quick local custom image is healthy without impersonating a durable launcher theme", async () => {
+test("a custom-upload renderer is repaired back to the durable launcher theme", async () => {
   const fx = fixture();
   const controller = createSkinController(fx.deps);
   await controller.start();
@@ -1466,8 +1513,8 @@ test("a quick local custom image is healthy without impersonating a durable laun
 
   const result = await controller.tick();
 
-  assert.equal(result.action, "idle");
-  assert.equal(fx.calls.inject.length, injectsBefore);
+  assert.equal(result.action, "repair");
+  assert.equal(fx.calls.inject.length, injectsBefore + 1);
   assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
   assert.equal(fx.state.lastNonNativeThemeId, DEFAULT_THEME_ID);
 });
