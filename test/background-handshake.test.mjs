@@ -420,6 +420,45 @@ test("an old controller handshake is rejected while a later exact process may re
   assert.equal(observed.transitionNonce, "controller-transition-7");
 });
 
+test("handshake wait clears a dead mismatched document before accepting a later exact one", async () => {
+  const stateRoot = await privateRoot();
+  await publishBackgroundHandshake({
+    stateRoot,
+    ...handshake({ transitionNonce: "old-controller", pid: 73000 }),
+  }, { now: () => NOW });
+  let waits = 0;
+  const observed = await waitForBackgroundHandshake({
+    stateRoot,
+    expected: {
+      revision: 6,
+      transitionNonce: "controller-transition-7",
+      platform: "darwin",
+      backgroundIdentity: "com.heige.codex-skin-controller",
+      outcome: "ready",
+    },
+    forbiddenPid: 1000,
+    notBefore: NOW.getTime(),
+    timeoutMs: 50,
+    pollIntervalMs: 1,
+    readProcessIdentity: async (pid) => {
+      if (pid === 73000) return null;
+      return {
+        pid: 73001,
+        startedAt: "Fri Jul 17 16:00:00 2026",
+      };
+    },
+    wait: async () => {
+      waits += 1;
+      assert.equal(await readBackgroundHandshake({ stateRoot }), null);
+      await publishBackgroundHandshake({ stateRoot, ...handshake() }, { now: () => NOW });
+    },
+    clock: () => NOW.getTime(),
+  });
+  assert.equal(waits, 1);
+  assert.equal(observed.pid, 73001);
+  assert.equal(observed.transitionNonce, "controller-transition-7");
+});
+
 for (const [name, changed, message] of [
   ["revision", { revision: 5 }, /revision|mismatch/i],
   ["nonce", { transitionNonce: "old-transition" }, /nonce|mismatch/i],
