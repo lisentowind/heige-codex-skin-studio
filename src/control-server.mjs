@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 
 const CONTROL_PATH = "/v1/persistence";
 const THEME_CONTROL_PATH = "/v1/theme";
+const USER_THEME_PATH = "/v1/user-theme";
 const NATIVE_THEME_ID = "__heige_native__";
 const LOCAL_CUSTOM_THEME_ID = "custom-upload";
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -11,6 +12,11 @@ const PREFLIGHT_METHOD = "POST";
 const PREFLIGHT_HEADERS = ["content-type", "x-heige-control-token"];
 const RESPONSE_PREFLIGHT_HEADERS = "Content-Type, X-HeiGe-Control-Token";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+/** data URL base64 相对源图约 4/3，外加 JSON 外壳；与 RESOURCE_LIMITS.assetBytes(8MiB) 对齐 */
+const DEFAULT_USER_THEME_MAX_BODY_BYTES = 12 * 1024 * 1024;
+const DEFAULT_USER_THEME_REQUEST_TIMEOUT_MS = 30_000;
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+const DATA_URL_IMAGE = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/;
 
 const SAFE_ERRORS = Object.freeze({
   NOT_FOUND: { status: 404, message: "控制接口不存在" },
@@ -35,6 +41,8 @@ const SAFE_ERRORS = Object.freeze({
   CONTROL_UNAVAILABLE: { status: 503, message: "控制服务暂时不可用，请重试" },
   PERSISTENCE_UPDATE_FAILED: { status: 503, message: "常驻设置失败，请重试" },
   THEME_UPDATE_FAILED: { status: 503, message: "主题状态同步失败，请重试" },
+  USER_THEME_PUBLISH_FAILED: { status: 503, message: "自定义主题写入启动器失败，请重试" },
+  USER_THEME_DELETE_FAILED: { status: 503, message: "自定义主题删除失败，请重试" },
   BACKGROUND_START_FAILED: {
     status: 503,
     message: "后台控制器启动失败，常驻仍为关闭",
@@ -330,6 +338,129 @@ function okThemeBody(state) {
       themeId: state.selectedThemeId,
     },
   };
+}
+
+function okUserThemeBody(state, themeId) {
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      persistenceEnabled: state.persistenceEnabled,
+      revision: state.revision,
+      themeId,
+    },
+  };
+}
+
+function exactUserThemeColors(value) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 4 ||
+    keys[0] !== "accent" ||
+    keys[1] !== "secondary" ||
+    keys[2] !== "surface" ||
+    keys[3] !== "text"
+  ) {
+    return null;
+  }
+  for (const key of keys) {
+    if (typeof value[key] !== "string" || !HEX_COLOR.test(value[key])) return null;
+  }
+  return {
+    accent: value.accent,
+    secondary: value.secondary,
+    surface: value.surface,
+    text: value.text,
+  };
+}
+
+function parseUserThemeImage(image) {
+  if (typeof image !== "string" || image.length < 32) return null;
+  const match = DATA_URL_IMAGE.exec(image);
+  if (match === null) return null;
+  const mime = match[1];
+  let bytes;
+  try {
+    bytes = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+  } catch {
+    return null;
+  }
+  if (bytes.byteLength < 1) return null;
+  const extension = mime === "image/png"
+    ? ".png"
+    : mime === "image/webp"
+      ? ".webp"
+      : ".jpg";
+  return { bytes, extension, mime };
+}
+
+function exactUserThemePublishBody(value) {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value).sort();
+  const allowed = new Set(["action", "colors", "image", "name", "requestId", "revision"]);
+  if (keys.some((key) => !allowed.has(key))) return null;
+  if (!keys.includes("revision") || !keys.includes("requestId") || !keys.includes("name") || !keys.includes("image")) {
+    return null;
+  }
+  if (keys.includes("action") && value.action !== "publish") return null;
+  if (!isNonNegativeInteger(value.revision)) return null;
+  if (typeof value.requestId !== "string" || !/^[a-f0-9]{32}$/.test(value.requestId)) return null;
+  if (typeof value.name !== "string" || value.name.trim().length < 1 || value.name.trim().length > 80) {
+    return null;
+  }
+  if (/[\0\r\n]/.test(value.name)) return null;
+  const parsedImage = parseUserThemeImage(value.image);
+  if (parsedImage === null) return null;
+  const colors = exactUserThemeColors(value.colors);
+  if (value.colors !== undefined && colors === null) return null;
+  return {
+    action: "publish",
+    revision: value.revision,
+    requestId: value.requestId,
+    name: value.name.trim(),
+    imageBytes: parsedImage.bytes,
+    extension: parsedImage.extension,
+    ...(colors === undefined ? {} : { colors }),
+  };
+}
+
+function exactUserThemeDeleteBody(value) {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 4 ||
+    keys[0] !== "action" ||
+    keys[1] !== "requestId" ||
+    keys[2] !== "revision" ||
+    keys[3] !== "themeId"
+  ) {
+    return null;
+  }
+  if (value.action !== "delete") return null;
+  if (!isNonNegativeInteger(value.revision)) return null;
+  if (typeof value.requestId !== "string" || !/^[a-f0-9]{32}$/.test(value.requestId)) return null;
+  if (
+    typeof value.themeId !== "string" ||
+    value.themeId === LOCAL_CUSTOM_THEME_ID ||
+    value.themeId === NATIVE_THEME_ID ||
+    !THEME_ID.test(value.themeId)
+  ) {
+    return null;
+  }
+  return {
+    action: "delete",
+    revision: value.revision,
+    requestId: value.requestId,
+    themeId: value.themeId,
+  };
+}
+
+function exactUserThemeRequestBody(value) {
+  if (!isPlainObject(value)) return null;
+  if (value.action === "delete") return exactUserThemeDeleteBody(value);
+  return exactUserThemePublishBody(value);
 }
 
 function readBody(request, maxBodyBytes, signal) {
@@ -707,8 +838,81 @@ async function applyThemeRequest(input, context, transaction) {
   return okThemeBody(updated);
 }
 
+async function applyUserThemeRequest(input, context, transaction) {
+  let current;
+  try {
+    current = extractThemeState(await transaction.waitPrecommit(context.readState()));
+  } catch {
+    transaction.assertPrecommit();
+    throw protocolError("CONTROL_UNAVAILABLE");
+  }
+  if (current === null) throw protocolError("CONTROL_UNAVAILABLE");
+  if (current.revision !== input.revision) {
+    throw protocolError("REVISION_CONFLICT", current);
+  }
+
+  let updated;
+  try {
+    const commitSignal = transaction.enterCommit();
+    if (input.action === "delete") {
+      updated = extractThemeState(await context.deleteUserTheme({
+        expectedRevision: input.revision,
+        themeId: input.themeId,
+        requestId: input.requestId,
+        signal: commitSignal,
+      }));
+    } else {
+      updated = extractThemeState(await context.publishUserTheme({
+        expectedRevision: input.revision,
+        name: input.name,
+        imageBytes: input.imageBytes,
+        extension: input.extension,
+        ...(input.colors === undefined ? {} : { colors: input.colors }),
+        requestId: input.requestId,
+        signal: commitSignal,
+      }));
+    }
+  } catch (error) {
+    let code;
+    try { code = error?.code; } catch { code = undefined; }
+    const authoritative = extractErrorState(error);
+    if (code === "REVISION_CONFLICT") {
+      throw protocolError("REVISION_CONFLICT", authoritative ?? undefined);
+    }
+    throw protocolError(
+      input.action === "delete" ? "USER_THEME_DELETE_FAILED" : "USER_THEME_PUBLISH_FAILED",
+      authoritative ?? undefined,
+    );
+  }
+  if (updated === null || updated.persistenceEnabled !== current.persistenceEnabled) {
+    throw protocolError(
+      input.action === "delete" ? "USER_THEME_DELETE_FAILED" : "USER_THEME_PUBLISH_FAILED",
+    );
+  }
+  if (input.action === "delete") {
+    if (updated.selectedThemeId === input.themeId) {
+      throw protocolError("USER_THEME_DELETE_FAILED");
+    }
+    return okUserThemeBody(updated, updated.selectedThemeId);
+  }
+  if (
+    typeof updated.selectedThemeId !== "string" ||
+    !isFormalThemeId(updated.selectedThemeId) ||
+    updated.revision < input.revision ||
+    updated.revision > input.revision + 1
+  ) {
+    throw protocolError("USER_THEME_PUBLISH_FAILED");
+  }
+  return okUserThemeBody(updated, updated.selectedThemeId);
+}
+
 async function routePersistenceRequest(request, context, signal, markCommitStarted) {
-  if (request.url !== CONTROL_PATH && request.url !== THEME_CONTROL_PATH) {
+  const userThemeRequest = request.url === USER_THEME_PATH;
+  if (
+    request.url !== CONTROL_PATH &&
+    request.url !== THEME_CONTROL_PATH &&
+    !userThemeRequest
+  ) {
     throw protocolError("NOT_FOUND");
   }
   if (request.method !== "POST" && request.method !== "OPTIONS") {
@@ -743,8 +947,9 @@ async function routePersistenceRequest(request, context, signal, markCommitStart
     throw protocolError("UNSUPPORTED_MEDIA_TYPE");
   }
 
-  const declaredLength = parseContentLength(request, context.maxBodyBytes);
-  const bytes = await readBody(request, context.maxBodyBytes, signal);
+  const bodyLimit = userThemeRequest ? context.userThemeMaxBodyBytes : context.maxBodyBytes;
+  const declaredLength = parseContentLength(request, bodyLimit);
+  const bytes = await readBody(request, bodyLimit, signal);
   throwIfAborted(signal);
   if (bytes.length !== declaredLength) throw protocolError("INVALID_CONTENT_LENGTH");
 
@@ -753,6 +958,15 @@ async function routePersistenceRequest(request, context, signal, markCommitStart
     parsed = JSON.parse(UTF8_DECODER.decode(bytes));
   } catch {
     throw protocolError("INVALID_JSON");
+  }
+  if (userThemeRequest) {
+    const input = exactUserThemeRequestBody(parsed);
+    if (input === null) throw protocolError("INVALID_REQUEST");
+    return context.persistenceCoordinator.run(
+      signal,
+      markCommitStarted,
+      (transaction) => applyUserThemeRequest(input, context, transaction),
+    );
   }
   const themeRequest = request.url === THEME_CONTROL_PATH;
   const input = themeRequest ? exactThemeRequestBody(parsed) : exactRequestBody(parsed);
@@ -776,6 +990,9 @@ function sendResponse(response, descriptor, corsOrigin, request, onFinished = un
   if (corsOrigin !== undefined) {
     headers["Access-Control-Allow-Origin"] = corsOrigin;
     headers.Vary = "Origin";
+    // Codex renderer 是 app://-，访问 127.0.0.1 控制口会触发 Private Network Access 预检；
+    // 缺此头时 Chromium/Electron 会直接 Failed to fetch，主题切换只能靠 CDP。
+    headers["Access-Control-Allow-Private-Network"] = "true";
   }
   if (descriptor.preflight) {
     headers["Access-Control-Allow-Methods"] = PREFLIGHT_METHOD;
@@ -823,13 +1040,16 @@ function requestHandler(context) {
     context.activeRequestEntries.add(requestEntry);
     request.once("aborted", onDisconnect);
     response.once("close", onDisconnect);
+    const timeoutMs = request.url === USER_THEME_PATH
+      ? context.userThemeRequestTimeoutMs
+      : context.requestTimeoutMs;
     const timeout = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
         if (commitStarted) return;
         const error = new RequestTimeoutError();
         reject(error);
         abortPrecommit(error);
-      }, context.requestTimeoutMs);
+      }, timeoutMs);
       timeoutId.unref?.();
     });
 
@@ -1032,11 +1252,15 @@ export async function startControlServer({
   readState,
   setPersistence,
   setThemeSelection,
+  publishUserTheme = null,
+  deleteUserTheme = null,
   onPersistenceResponseFinished,
   host = "127.0.0.1",
   port = 0,
   maxBodyBytes = 1024,
+  userThemeMaxBodyBytes = DEFAULT_USER_THEME_MAX_BODY_BYTES,
   requestTimeoutMs = 1500,
+  userThemeRequestTimeoutMs = DEFAULT_USER_THEME_REQUEST_TIMEOUT_MS,
   maxConnections = 8,
   maxPendingRequests = maxConnections,
 }) {
@@ -1046,12 +1270,23 @@ export async function startControlServer({
   const safeReadState = requireFunction(readState, "readState");
   const safeSetPersistence = requireFunction(setPersistence, "setPersistence");
   const safeSetThemeSelection = requireFunction(setThemeSelection, "setThemeSelection");
+  const safePublishUserTheme = publishUserTheme === null
+    ? null
+    : requireFunction(publishUserTheme, "publishUserTheme");
+  const safeDeleteUserTheme = deleteUserTheme === null
+    ? null
+    : requireFunction(deleteUserTheme, "deleteUserTheme");
   const safeResponseFinished = onPersistenceResponseFinished === undefined
     ? null
     : requireFunction(onPersistenceResponseFinished, "onPersistenceResponseFinished");
   const safePort = requirePort(port);
   const bodyLimit = requirePositiveInteger(maxBodyBytes, "maxBodyBytes");
+  const userThemeBodyLimit = requirePositiveInteger(userThemeMaxBodyBytes, "userThemeMaxBodyBytes");
   const timeoutMs = requirePositiveInteger(requestTimeoutMs, "requestTimeoutMs");
+  const userThemeTimeoutMs = requirePositiveInteger(
+    userThemeRequestTimeoutMs,
+    "userThemeRequestTimeoutMs",
+  );
   const connectionLimit = requirePositiveInteger(maxConnections, "maxConnections");
   const requestLimit = requirePositiveInteger(maxPendingRequests, "maxPendingRequests");
 
@@ -1061,9 +1296,17 @@ export async function startControlServer({
     readState: safeReadState,
     setPersistence: safeSetPersistence,
     setThemeSelection: safeSetThemeSelection,
+    publishUserTheme: safePublishUserTheme ?? (async () => {
+      throw protocolError("CONTROL_UNAVAILABLE");
+    }),
+    deleteUserTheme: safeDeleteUserTheme ?? (async () => {
+      throw protocolError("CONTROL_UNAVAILABLE");
+    }),
     onPersistenceResponseFinished: safeResponseFinished,
     maxBodyBytes: bodyLimit,
+    userThemeMaxBodyBytes: userThemeBodyLimit,
     requestTimeoutMs: timeoutMs,
+    userThemeRequestTimeoutMs: userThemeTimeoutMs,
     expectedHost: undefined,
     persistenceCoordinator: createPersistenceCoordinator(requestLimit),
     activeRequestEntries: new Set(),
