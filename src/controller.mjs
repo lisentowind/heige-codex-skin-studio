@@ -1,6 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
-import { CODEX_RENDERER_ORIGIN, NATIVE_THEME_ID } from "./constants.mjs";
+import { CODEX_RENDERER_ORIGIN, DEFAULT_THEME_ID, NATIVE_THEME_ID } from "./constants.mjs";
 import { sameProcessIdentity } from "./codex-app.mjs";
 import { withOperationLock } from "./operation-lock.mjs";
 import {
@@ -134,6 +134,59 @@ function normalizedRendererControlRequest(status) {
           THEME_ID.test(request.themeId)
         )
       )
+    ) return undefined;
+    return { ...request };
+  }
+  if (request.action === "publish-user-theme") {
+    const withColors = hasExactKeys(request, [
+      "action",
+      "capability",
+      "colors",
+      "expectedRevision",
+      "image",
+      "name",
+      "requestId",
+      "schemaVersion",
+    ]);
+    const withoutColors = hasExactKeys(request, [
+      "action",
+      "capability",
+      "expectedRevision",
+      "image",
+      "name",
+      "requestId",
+      "schemaVersion",
+    ]);
+    if (!withColors && !withoutColors) return undefined;
+    if (
+      typeof request.capability !== "string" ||
+      !CONTROL_TOKEN.test(request.capability) ||
+      request.expectedRevision !== status.revision ||
+      typeof request.name !== "string" ||
+      request.name.trim().length < 1 ||
+      request.name.trim().length > 80 ||
+      typeof request.image !== "string" ||
+      request.image.length < 32
+    ) return undefined;
+    return { ...request, name: request.name.trim() };
+  }
+  if (request.action === "delete-user-theme") {
+    if (
+      !hasExactKeys(request, [
+        "action",
+        "capability",
+        "expectedRevision",
+        "requestId",
+        "schemaVersion",
+        "themeId",
+      ]) ||
+      typeof request.capability !== "string" ||
+      !CONTROL_TOKEN.test(request.capability) ||
+      request.expectedRevision !== status.revision ||
+      typeof request.themeId !== "string" ||
+      request.themeId === LOCAL_CUSTOM_THEME_ID ||
+      request.themeId === NATIVE_THEME_ID ||
+      !THEME_ID.test(request.themeId)
     ) return undefined;
     return { ...request };
   }
@@ -357,6 +410,12 @@ function normalizedDependencies(input) {
     validateThemeSelection: input.validateThemeSelection === undefined
       ? async () => false
       : requireFunction(input.validateThemeSelection, "validateThemeSelection"),
+    createUserThemeFromBytes: input.createUserThemeFromBytes === undefined
+      ? null
+      : requireFunction(input.createUserThemeFromBytes, "createUserThemeFromBytes"),
+    removeUserTheme: input.removeUserTheme === undefined
+      ? null
+      : requireFunction(input.removeUserTheme, "removeUserTheme"),
     injectSkin: requireFunction(input.injectSkin, "injectSkin"),
     removeSkin: requireFunction(input.removeSkin, "removeSkin"),
     startControlServer: input.startControlServer ?? startLoopbackControlServer,
@@ -503,7 +562,6 @@ function rendererStatusIsHealthy(value, state) {
     }
     // 主题切换提交中：乐观 themeId 已变、revision 尚未追上，禁止因此 reinject 拆掉主题中心。
     if (themeTransitionPending) {
-      if (mode === "active" && themeId === LOCAL_CUSTOM_THEME_ID) return true;
       if (state.selectedThemeId === NATIVE_THEME_ID) {
         return mode === "native" ||
           themeId === null ||
@@ -518,7 +576,6 @@ function rendererStatusIsHealthy(value, state) {
     if (revision !== state.revision) {
       return false;
     }
-    if (mode === "active" && themeId === LOCAL_CUSTOM_THEME_ID) return true;
     if (state.selectedThemeId === NATIVE_THEME_ID) {
       return mode === "native" &&
         (themeId === null || themeId === NATIVE_THEME_ID);
@@ -708,6 +765,8 @@ export function createSkinController(input) {
   let setPersistenceFromRenderer;
   let setThemeSelectionPublic;
   let setThemeSelectionFromRenderer;
+  let publishUserThemePublic;
+  let deleteUserThemePublic;
   let processRendererRequest;
 
   const ensureServer = async (state) => {
@@ -719,6 +778,8 @@ export function createSkinController(input) {
         readState: deps.readState,
         setPersistence: (request) => setPersistenceFromMenu(request),
         setThemeSelection: (request) => setThemeSelectionPublic(request),
+        publishUserTheme: (request) => publishUserThemePublic(request),
+        deleteUserTheme: (request) => deleteUserThemePublic(request),
         onPersistenceResponseFinished: (state) => {
           if (!deps.backgroundProcess && state?.persistenceEnabled === true) {
             handoffRequested = true;
@@ -1082,15 +1143,11 @@ export function createSkinController(input) {
             ? before.session.activeThemeId === null
             : before.session.activeThemeId === before.state.selectedThemeId
         );
-      if (
-        before.transition !== null ||
-        before.process === null ||
-        !sessionMatches
-      ) return null;
+      // Codex CSP 会拦 renderer→本机 HTTP，菜单删除/发布只能靠 CDP。
+      // 即使 session 尚未完全对齐（apply 后 keepUntilProcessExit / 身份过渡），
+      // 只要进程与端口可用，也必须先抽干 controlRequest，否则会一直等到超时。
+      if (before.transition !== null || before.process === null) return null;
 
-      // The healthy path performs another exact process probe below. Let platform
-      // adapters reuse this just-captured identity for the adjacent port check,
-      // while retaining the trailing probe that detects PID/process drift.
       await assertPortOwner(before.process, {
         reuseCurrentProcessSnapshot: true,
       });
@@ -1117,6 +1174,7 @@ export function createSkinController(input) {
           }
         }
       }
+      if (!sessionMatches) return null;
       if (
         before.state.persistenceEnabled !== true ||
         before.session.keepUntilProcessExit !== false
@@ -1562,6 +1620,139 @@ export function createSkinController(input) {
     rendererCapability: request.capability,
   });
 
+  const parsePublishImage = (image) => {
+    if (typeof image !== "string") return null;
+    const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/.exec(image);
+    if (match === null) return null;
+    let bytes;
+    try {
+      bytes = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+    } catch {
+      return null;
+    }
+    if (bytes.byteLength < 1) return null;
+    const extension = match[1] === "image/png"
+      ? ".png"
+      : match[1] === "image/webp"
+        ? ".webp"
+        : ".jpg";
+    return { bytes, extension };
+  };
+
+  const publishUserTheme = async ({
+    expectedRevision,
+    name,
+    imageBytes,
+    extension,
+    colors,
+    requestId,
+    signal,
+  } = {}) => {
+    if (typeof deps.createUserThemeFromBytes !== "function") {
+      throw new Error("user theme publishing is unavailable");
+    }
+    if (signal?.aborted) throw signal.reason ?? new Error("user theme publish aborted");
+    const created = await deps.createUserThemeFromBytes({
+      bytes: imageBytes,
+      extension,
+      name,
+      ...(colors === undefined ? {} : { colors }),
+    });
+    return setThemeSelection({
+      expectedRevision,
+      themeId: created.id,
+      requestId,
+      signal,
+    });
+  };
+
+  const deleteUserTheme = async ({
+    expectedRevision,
+    themeId,
+    requestId,
+    signal,
+  } = {}) => {
+    if (typeof deps.removeUserTheme !== "function") {
+      throw new Error("user theme deletion is unavailable");
+    }
+    if (signal?.aborted) throw signal.reason ?? new Error("user theme delete aborted");
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error("expectedRevision must be a non-negative safe integer");
+    }
+    if (
+      typeof themeId !== "string" ||
+      themeId === LOCAL_CUSTOM_THEME_ID ||
+      themeId === NATIVE_THEME_ID ||
+      !THEME_ID.test(themeId)
+    ) {
+      throw new Error("themeId is invalid");
+    }
+    const state = validateControlState(await deps.readState());
+    lastKnownState = state;
+    if (state.revision !== expectedRevision) {
+      throw new ControllerTransitionError(
+        "REVISION_CONFLICT",
+        `state revision is ${state.revision}`,
+        state,
+      );
+    }
+    await deps.removeUserTheme({ id: themeId });
+    if (state.selectedThemeId === themeId) {
+      let fallback = DEFAULT_THEME_ID;
+      if (
+        state.lastNonNativeThemeId !== themeId &&
+        await deps.validateThemeSelection(state.lastNonNativeThemeId) === true
+      ) {
+        fallback = state.lastNonNativeThemeId;
+      } else if (await deps.validateThemeSelection(DEFAULT_THEME_ID) !== true) {
+        throw new Error("no fallback theme available after delete");
+      }
+      return setThemeSelection({
+        expectedRevision,
+        themeId: fallback,
+        requestId,
+        signal,
+      });
+    }
+    if (state.lastNonNativeThemeId === themeId) {
+      const replacement = state.selectedThemeId === NATIVE_THEME_ID
+        ? DEFAULT_THEME_ID
+        : state.selectedThemeId;
+      if (await deps.validateThemeSelection(replacement) !== true) {
+        throw new Error("no replacement lastNonNative theme after delete");
+      }
+      return deps.withLease("controller:delete-user-theme-last", async (lease) => {
+        const updated = validateControlState(await deps.compareAndUpdate({
+          expectedRevision,
+          mutate: (current) => ({
+            ...current,
+            lastNonNativeThemeId: replacement,
+          }),
+        }));
+        lastKnownState = updated;
+        await reconcile({
+          lease,
+          includeHealthCount: true,
+          forceRepair: true,
+          preferStored: false,
+        });
+        return publicThemeState(updated);
+      });
+    }
+    await deps.withLease("controller:delete-user-theme-refresh", async (lease) => {
+      await reconcile({
+        lease,
+        includeHealthCount: true,
+        forceRepair: true,
+        preferStored: false,
+      });
+    });
+    return publicThemeState(state);
+  };
+
+  publishUserThemePublic = (request) => publishUserTheme(request);
+  deleteUserThemePublic = (request) => deleteUserTheme(request);
+
   processRendererRequest = async (request) => {
     try {
       if (request.action === "check-update") {
@@ -1622,6 +1813,55 @@ export function createSkinController(input) {
         } catch (error) {
           await safeLog(deps.logger, "warn", "theme_selection_ack_failed", error);
         }
+      } else if (request.action === "publish-user-theme") {
+        const parsed = parsePublishImage(request.image);
+        if (parsed === null) throw new Error("publish-user-theme image is invalid");
+        if (
+          request.capability !== undefined &&
+          !sameControlCapability(request.capability, (await deps.readState()).controlToken)
+        ) {
+          throw new Error("renderer control capability is invalid");
+        }
+        const updated = await publishUserTheme({
+          expectedRevision: request.expectedRevision,
+          name: request.name,
+          imageBytes: parsed.bytes,
+          extension: parsed.extension,
+          ...(request.colors === undefined ? {} : { colors: request.colors }),
+          requestId: request.requestId,
+        });
+        try {
+          await deps.deliverThemeSelectionResult({
+            requestId: request.requestId,
+            themeId: updated.selectedThemeId,
+            revision: updated.revision,
+            persistenceEnabled: updated.persistenceEnabled,
+          });
+        } catch (error) {
+          await safeLog(deps.logger, "warn", "user_theme_publish_ack_failed", error);
+        }
+      } else if (request.action === "delete-user-theme") {
+        if (
+          request.capability !== undefined &&
+          !sameControlCapability(request.capability, (await deps.readState()).controlToken)
+        ) {
+          throw new Error("renderer control capability is invalid");
+        }
+        const updated = await deleteUserTheme({
+          expectedRevision: request.expectedRevision,
+          themeId: request.themeId,
+          requestId: request.requestId,
+        });
+        try {
+          await deps.deliverThemeSelectionResult({
+            requestId: request.requestId,
+            themeId: updated.selectedThemeId,
+            revision: updated.revision,
+            persistenceEnabled: updated.persistenceEnabled,
+          });
+        } catch (error) {
+          await safeLog(deps.logger, "warn", "user_theme_delete_ack_failed", error);
+        }
       }
       return runSafe(
         "controller:ack-renderer-request",
@@ -1629,7 +1869,13 @@ export function createSkinController(input) {
           lease,
           includeHealthCount: true,
           forceRepair: true,
-          ...(request.action === "set-theme" ? { preferStored: false } : {}),
+          ...(
+            request.action === "set-theme" ||
+            request.action === "publish-user-theme" ||
+            request.action === "delete-user-theme"
+              ? { preferStored: false }
+              : {}
+          ),
         }),
         { includeHealthCount: true },
       );
