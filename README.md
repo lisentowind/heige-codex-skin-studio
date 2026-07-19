@@ -60,7 +60,7 @@ Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/wind
 
 现成的生图提示词在[主题提示词库](docs/theme-prompts.md)：8 套风格，复制就能用。做出好看的主题，来[晒图区](https://github.com/HeiGeAi/heige-codex-skin-studio/discussions)贴一张，或者用[主题晒图模板](https://github.com/HeiGeAi/heige-codex-skin-studio/issues/new/choose)投稿，被选中会进 README 精选。
 
-一个实话：「自定义图片」是单个本地快捷槽，再次上传会覆盖；它不是可分发的正式主题，也不会改写启动器记录的最近正式主题。renderer 本地存储可在自动补针或常驻启动时继续显示该快捷图，清除本地数据后会丢失。想要能保存、能切换的主题，走第 2 或第 3 条路。
+一个实话：菜单上传会写入本机用户主题库并记入启动器，和内置主题一样可在「皮肤常驻」下跨重启复现（同名同图幂等覆盖）。也可用第 2 / 第 3 条路从文件或 AI 生成主题。
 
 ## 内置 12 套主题
 
