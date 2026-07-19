@@ -216,6 +216,22 @@ exit 0
         Assert-True ($undo -ge 0 -and $menu -gt $undo -and $tree -gt $menu)
     }
 
+    Test-Case "Publish stops stable-tree holders before renaming the install root" {
+        Assert-Match "function Stop-HeiGeInstallTreeHolders" $script:InstallerSource
+        Assert-Match "Stop-HeiGeBackgroundControllerProcesses" $script:InstallerSource
+        Assert-Match "Stop-HeiGeControllerResidue" $script:InstallerSource
+        $holders = $script:InstallerSource.IndexOf(
+            "Stop-HeiGeInstallTreeHolders -InstallRoot `$target",
+            [System.StringComparison]::Ordinal
+        )
+        $publish = $script:InstallerSource.IndexOf(
+            '-Action publish -Participant $journal.Participants.Tree',
+            $holders,
+            [System.StringComparison]::Ordinal
+        )
+        Assert-True ($holders -ge 0 -and $publish -gt $holders)
+    }
+
     Complete-TestRun
 } catch {
     throw
