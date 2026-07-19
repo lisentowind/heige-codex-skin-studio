@@ -403,6 +403,8 @@ test("Windows CLI help directs session lifecycle work to PowerShell or batch wra
   assert.match(help.lifecycleContract, /scripts\/windows\/apply\.ps1/);
   assert.match(help.lifecycleContract, /scripts\/windows\/enable-skin\.bat/);
   assert.match(help.lifecycleContract, /scripts\/windows\/restore\.ps1/);
+  assert.match(help.lifecycleContract, /scripts\/windows\/close-codex\.ps1/);
+  assert.match(help.lifecycleContract, /scripts\/windows\/close-codex\.bat/);
   assert.match(help.lifecycleContract, /scripts\/windows\/uninstall\.ps1/);
   assert.match(help.lifecycleContract, /scripts\/windows\/uninstall\.bat/);
 });
