@@ -2660,13 +2660,14 @@ test("Windows native probe stays idle while the CDP port is already open", async
   }, { port: 9341 }), null);
 });
 
-test("Windows restart-into-cdp spawns a detached PowerShell helper with exact process identity", async () => {
+test("Windows restart-into-cdp waits for an attached PowerShell helper and surfaces failures", async () => {
   const identity = {
     pid: 6060,
     executablePath: "C:\\Program Files\\Codex\\Codex.exe",
     startedAt: "2026-07-19T09:00:00.0000000Z",
   };
   const calls = [];
+  const { EventEmitter } = await import("node:events");
   const result = await spawnWindowsRestartIntoCdp({
     port: 9341,
     nativeProcess: identity,
@@ -2678,10 +2679,15 @@ test("Windows restart-into-cdp spawns a detached PowerShell helper with exact pr
     },
     spawnImpl: (file, args, options) => {
       calls.push({ file, args, options });
-      return { pid: 7001, unref() { calls.push("unref"); } };
+      const child = new EventEmitter();
+      child.pid = 7001;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
     },
   });
-  assert.deepEqual(result, { pid: 7001 });
+  assert.deepEqual(result, { pid: 7001, exitCode: 0 });
   assert.equal(calls[0].file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   assert.deepEqual(calls[0].args, [
     "-NoLogo",
@@ -2700,18 +2706,48 @@ test("Windows restart-into-cdp spawns a detached PowerShell helper with exact pr
     "-ExpectedStartedAt",
     identity.startedAt,
   ]);
-  assert.equal(calls[0].options.detached, true);
+  assert.equal(calls[0].options.detached, false);
   assert.equal(calls[0].options.windowsHide, true);
+  assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(calls[0].options.env.HEIGE_WINDOWS_APP_IDENTITY, "token");
-  assert.equal(calls[1], "unref");
+
   await assert.rejects(spawnWindowsRestartIntoCdp({
     port: 9341,
     nativeProcess: identity,
     powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     scriptPath: "C:\\repo\\scripts\\windows\\lib\\restart-into-cdp.ps1",
     env: { SystemRoot: "C:\\Windows" },
-    spawnImpl: () => ({ pid: 1, unref() {} }),
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.pid = 1;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    },
   }), /HEIGE_WINDOWS_APP_IDENTITY/);
+
+  await assert.rejects(spawnWindowsRestartIntoCdp({
+    port: 9341,
+    nativeProcess: identity,
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    scriptPath: "C:\\repo\\scripts\\windows\\lib\\restart-into-cdp.ps1",
+    env: {
+      SystemRoot: "C:\\Windows",
+      HEIGE_WINDOWS_APP_IDENTITY: "token",
+    },
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.pid = 7002;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => {
+        child.stderr.emit("data", Buffer.from("期望的原生 Codex 进程启动时间已变化"));
+        child.emit("exit", 1, null);
+      });
+      return child;
+    },
+  }), /启动时间已变化/);
 });
 
 test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {
