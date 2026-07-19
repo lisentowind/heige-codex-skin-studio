@@ -1,5 +1,12 @@
 # 更新日志
 
+## 5.4.3 - 2026-07-19
+
+### 新功能
+
+- 新增 Windows 一键关闭入口 `scripts/windows/close-codex.ps1` / `close-codex.bat`：只安全完整退出已归属的 Codex/GPT 桌面进程并保持关闭，不改常驻、不自动 apply、不自动重启；多实例归属不清时 fail-closed。
+- `abort-incompatible`（调试端口不可用）引导、CLI 生命周期说明、手册与 Skill 已指向该入口；Skill 仅在用户明确允许关闭时才可调用。
+
 ## 5.4.2 - 2026-07-19
 
 ### 修复
